@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "file_types.schema.json",
+  "title": "Wyeast file_types.json",
+  "description": "Single source of truth for file-type handling. PERMISSIVE on purpose: additionalProperties is NOT false, so new disposition categories / engine sets validate without a schema bump. Each disposition declares the extensions of a file kind and the action to take at intake; engine_sets are named extension lists consumed by individual stages. Structural cross-checks (e.g. extensions are lowercase dot-prefixed, image/video/pdf disjoint) live in tools/preflight.py and tests/unit/test_filetypes.py.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "dispositions": {
+      "type": "object",
+      "description": "category name -> disposition entry",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "extensions": {
+            "description": "Array of dot-prefixed extensions, or an object mapping extension -> handler key (archives).",
+            "oneOf": [
+              { "type": "array", "items": { "type": "string", "pattern": "^\\." } },
+              { "type": "object", "additionalProperties": { "type": "string" } }
+            ]
+          },
+          "names": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Exact filenames matched before extension (e.g. intake metadata)."
+          },
+          "name_patterns": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Case-insensitive fnmatch globs on the basename, checked before any extension match (e.g. message exports living on generic .xml/.json/.txt extensions)."
+          },
+          "action": {
+            "type": "string",
+            "enum": ["collect", "read_in_place", "surface", "convert_raw", "expand", "sniff_email", "sniff_message", "ignore"]
+          },
+          "bucket": { "type": "string", "minLength": 1 }
+        },
+        "required": ["action"]
+      }
+    },
+    "engine_sets": {
+      "type": "object",
+      "description": "name -> array of dot-prefixed extensions (string values like _note are ignored by readers).",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "array", "items": { "type": "string", "pattern": "^\\." } },
+          { "type": "string" }
+        ]
+      }
+    },
+    "skip_dirs": {
+      "type": "object",
+      "description": "Intake directory-prune policy: top-level OS/system subtrees skipped from stage-01 collection (kept in place + reported, not deleted), gated by a root_marker so it only fires on a system volume. Overridable per-case via case_config.json.",
+      "properties": {
+        "names": { "type": "array", "items": { "type": "string" } },
+        "root_markers": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "required": ["schema_version", "dispositions", "engine_sets"]
+}

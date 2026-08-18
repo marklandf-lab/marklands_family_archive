@@ -1,0 +1,11 @@
+# mac_family_archive — runtime dependencies.
+#
+# This is the COMPLETE third-party footprint of the Family Archive server.
+# Versions are pinned to the Zone B venv-phase1 freeze so curation behaviour
+# is identical to the examiner workstation.
+#
+# Do NOT install Wyeast's requirements/venv-phase1.txt here: it carries the
+# ~15 GB torch/CUDA/scikit-learn stack that the archive server never imports,
+# and several of those wheels have no macOS build at all.
+pillow==12.2.0
+pillow_heif==1.3.0
