@@ -1,0 +1,5448 @@
+/* Wyeast Family Archive — front-end engine (served over HTTP by family_archive.py).
+   Renders the page named in the #ctx JSON block, fetches /api/<page>, and drives
+   the write-back verbs (Confirm/Banish/Rename/Release/Export/Undo) with toasts. */
+(function () {
+  "use strict";
+  // Read the bootstrap context from a <script type="application/json" id="ctx">
+  // block rather than an inline-executable global, so the page can run under a
+  // strict Content-Security-Policy (script-src 'self', no 'unsafe-inline').
+  var CTX = (function () {
+    try {
+      var node = document.getElementById("ctx");
+      return node ? JSON.parse(node.textContent) : null;
+    } catch (e) { return null; }
+  })() || { page: "overview", role: "examiner", nav: [] };
+  var EXAMINER = CTX.role === "examiner";
+  var Q = (function () {
+    var o = {}, s = location.search.replace(/^\?/, "");
+    s.split("&").forEach(function (kv) {
+      if (!kv) return;
+      var p = kv.split("="); o[decodeURIComponent(p[0])] = decodeURIComponent(p[1] || "");
+    });
+    return o;
+  })();
+
+  // ── helpers ──
+  function el(t, c, h) { var e = document.createElement(t); if (c) e.className = c; if (h != null) e.innerHTML = h; return e; }
+  function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
+  function num(n) { return (n == null ? 0 : n).toLocaleString(); }
+  // Human byte size for attachment chips (G-4). Coerces junk to 0 → "0 B".
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / (1024 * 1024)).toFixed(1) + " MB";
+  }
+  function basename(s) { return String(s || "").split("/").pop(); }
+  // #26: strip a leading "- " artifact from a blank-caller Google Voice export
+  // filename (" - Voicemail - 2010-01-29T17_40_25Z.mp3") — mirrors
+  // _clean_recording_name in _archive_data.py (the recordings LIST goes
+  // through that; this covers the detail page, which titles itself from the
+  // raw file basename instead).
+  function cleanRecordingName(s) { return s.replace(/^\s*-\s*/, "") || s; }
+  function pretty(s) { return String(s || "").replace(/_/g, " "); }
+  // Whole-seconds offset → "m:ss" for the poster-strip frame labels (G-11).
+  function fmtSecs(s) { s = Math.max(0, Math.round(Number(s) || 0)); var m = Math.floor(s / 60), ss = s % 60; return m + ":" + (ss < 10 ? "0" : "") + ss; }
+  // Geo place names are "City_..._Region" (last token = state / 2-letter country),
+  // e.g. "Portland_Oregon" → "Portland, Oregon", "Depoe_Bay_Oregon" → "Depoe Bay,
+  // Oregon". Display-only; the raw name stays the deep-link / export / filter key.
+  function prettyPlace(s) {
+    s = String(s || "");
+    if (!s || s === "Unknown_Location") return s ? "Unknown location" : s;
+    var parts = s.split("_");
+    if (parts.length < 2) return s;
+    return parts.slice(0, -1).join(" ") + ", " + parts[parts.length - 1];
+  }
+  // Significance as an unobtrusive hover tooltip (was always-on ★ stars). role=img +
+  // aria-label so the level isn't conveyed by colour/opacity alone (F-12).
+  function sig(s) { var n = parseInt(s, 10) || 0; return n ? '<span class="sig" data-n="' + n + '" role="img" aria-label="Significance ' + n + ' of 5" title="Significance ' + n + '/5">●</span>' : ""; }
+  function thumbURL(id) { return "/thumb?src=" + encodeURIComponent(id); }
+  function mediaURL(id) { return "/media?src=" + encodeURIComponent(id); }
+
+  // The review-queue item kinds that carry a thumbnail and are batch-discardable
+  // media (as opposed to name/album guesses). One constant, three call sites (F-13).
+  var MEDIA_KINDS = ["scene_guess", "unidentified_face", "face_merge"];
+  function isMediaKind(k) { return MEDIA_KINDS.indexOf(k) !== -1; }
+
+  // Make a click-only element keyboard-operable (F-12): focusable + Enter/Space fires
+  // its existing click handler, so keyboard and pointer take the identical path. Call
+  // AFTER the element's onclick/click listener is wired. `role` defaults to "button";
+  // pass null to keep native semantics (e.g. a <tr> stays a table row, just focusable).
+  // CSP-safe: addEventListener only, no inline handlers.
+  function keyable(node, role, label) {
+    node.setAttribute("tabindex", "0");
+    if (role !== null) node.setAttribute("role", role || "button");
+    if (label) node.setAttribute("aria-label", label);
+    node.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        node.click();
+      }
+    });
+    return node;
+  }
+
+  // ── lazy thumbnails (F-5) ──
+  // A grid can hold thousands of cards; assigning every <img>.src up front fires a
+  // thumb-request storm at the single-threaded server (which self-DOSes). Instead,
+  // an IntersectionObserver assigns src only as a card nears the viewport, and a
+  // small concurrency cap keeps the number of outstanding requests bounded (the
+  // rest queue). Native loading="lazy" is set too as a second line of defence.
+  // One helper (lazyThumb) is reused by every grid.
+  var THUMB_MAX = 6;                 // max concurrent outstanding thumb fetches
+  var _thumbActive = 0, _thumbQueue = [];
+  function _thumbPump() {
+    while (_thumbActive < THUMB_MAX && _thumbQueue.length) {
+      var img = _thumbQueue.shift();
+      if (!img || img._lt_loaded || !img.dataset.src) continue;
+      img._lt_loaded = true;
+      img._lt_pending = true;      // still counted against THUMB_MAX; see reclaimThumbSlot
+      _thumbActive++;
+      var done = function () {
+        img.classList.remove("thumb-loading");   // #18: clear the skeleton either way
+        if (!img._lt_pending) return;   // already reclaimed on eviction — don't double-free
+        img._lt_pending = false;
+        _thumbActive--; _thumbPump();
+      };
+      img.addEventListener("load", done, { once: true });
+      img.addEventListener("error", done, { once: true });
+      img.src = img.dataset.src;
+    }
+  }
+  // The windowed grid can evict a tile whose thumb is still mid-flight (its
+  // first-paint row-height correction re-runs renderWindow() synchronously,
+  // right after the initial mount, and can un-mount tiles it just mounted).
+  // Removing an <img> from the document does not reliably fire its load/error
+  // listener in every case, which would leak this slot in _thumbActive
+  // forever — once enough evicted tiles do this, THUMB_MAX is permanently
+  // "full" and every later thumbnail on the page silently never loads (seen:
+  // a whole default Photos & Videos landing with every visible tile blank,
+  // unaffected by scrolling since nothing re-queues already-mounted images).
+  // Reclaim the slot proactively instead of waiting for an event that may
+  // never come.
+  function reclaimThumbSlot(img) {
+    if (!img._lt_pending) return;
+    img._lt_pending = false;
+    _thumbActive--; _thumbPump();
+  }
+  var _thumbObserver = ("IntersectionObserver" in window)
+    ? new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) {
+          if (!en.isIntersecting) return;
+          var img = en.target;
+          _thumbObserver.unobserve(img);
+          if (!img._lt_loaded && img.dataset.src) { _thumbQueue.push(img); _thumbPump(); }
+        });
+      }, { rootMargin: "400px" })
+    : null;
+  // Defer a thumbnail's src until it nears the viewport. `id` null → left blank
+  // (e.g. a video with no poster). Returns the img for chaining.
+  function lazyThumb(img, id) {
+    img.loading = "lazy";
+    if (id == null || id === "") return img;
+    // #18: a subtle skeleton while the thumbnail is in flight (fetch/decode is
+    // real network time, not a bug) instead of a blank card with no affordance.
+    img.classList.add("thumb-loading");
+    img.addEventListener("load", function () { img.classList.remove("thumb-loading"); }, { once: true });
+    img.addEventListener("error", function () { img.classList.remove("thumb-loading"); }, { once: true });
+    img.dataset.src = thumbURL(id);
+    if (_thumbObserver) _thumbObserver.observe(img);
+    else img.src = img.dataset.src;     // no IO support → load immediately
+    return img;
+  }
+  // Reject (with the server's error message when the body is JSON) on any non-2xx
+  // so a 500 {"error":…} or a 403 examiner-only JSON is surfaced as an error state
+  // instead of being handed to a page renderer as data (blank/crashed page). #F-2
+  function getJSON(p) {
+    return fetch(p).then(function (r) {
+      if (r.ok) return r.json();
+      return r.text().then(function (body) {
+        var msg = "";
+        try { msg = (JSON.parse(body) || {}).error || ""; } catch (e) { msg = ""; }
+        throw new Error(msg || ("Request failed (" + r.status + ")"));
+      });
+    });
+  }
+  function postJSON(p, body) {
+    return fetch(p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); });
+  }
+
+  // Clamp a long recipient/participant list to `max` + "+N more recipients" (#11).
+  // Accepts a list or a comma/semicolon-separated string. Returns escaped HTML.
+  function recipients(value, max) {
+    max = max || 3;
+    var arr = Array.isArray(value) ? value.slice()
+      : String(value || "").split(/[;,]/).map(function (s) { return s.trim(); }).filter(Boolean);
+    if (!arr.length) return "";
+    var shown = arr.slice(0, max).map(esc).join(", ");
+    return arr.length > max ? shown + ' <span class="more">+' + (arr.length - max) + " more recipients</span>" : shown;
+  }
+
+  function mediaKind(f) {  // lightbox kind by extension (#16)
+    var ext = String(f || "").split(".").pop().toLowerCase();
+    if (["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "heic"].indexOf(ext) >= 0) return "image";
+    if (["mp4", "mov", "m4v", "webm", "ogv"].indexOf(ext) >= 0) return "video";
+    if (ext === "pdf") return "pdf";   // F-11: previews inline in the browser PDF viewer
+    // office/svg/html/txt/unknown → the "doc" stage, which renders the extracted
+    // text layer inline when the pipeline produced one and otherwise shows a
+    // "Download to open" card. The raw BYTES stay attachment+octet-stream+sandbox
+    // (an inline frame over them only ever rendered blank or triggered a download
+    // inside the overlay) — the inline view is separate, sanitised text.
+    return "doc";
+  }
+
+  // Navigate to a click-through target {page, person_id?, scene?, place?, thread_id?,
+  // conversation?, open?, file?}.
+  function go(target) {
+    if (!target) return;
+    if (target.open && target.file) { lightbox(target.file, mediaKind(target.file)); return; }  // inline, not a new tab (#16)
+    var url = "/" + (target.page || "overview"), q = [];
+    ["person", "scene", "place", "event", "thread", "conversation", "venue", "tab",
+     "media", "vperson", "vscene", "favorite_curation", "collection_curation", "people",
+     "rec"].forEach(function (k) {
+      var v = target[k] != null ? target[k] : target[k + "_id"];
+      if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
+    });
+    if (q.length) url += "?" + q.join("&");
+    location.href = url;
+  }
+
+  // G-9: turn a /api/search record ({p:page, k:type, h:href}) into a go() target so
+  // a search hit OPENS the item (photo/document → lightbox, email/message → the
+  // thread/conversation) instead of only landing on the section page. A record with
+  // no href (or an unknown type) falls back to its section page. Used by the FTS
+  // search UI (family-archive-full-text-search.md).
+  function searchTarget(rec) {
+    if (!rec) return null;
+    var h = rec.h;
+    if (h) {
+      if (rec.k === "photo" || rec.k === "document") return { open: true, file: h };
+      if (rec.k === "email") return { page: "emails", thread: h };
+      if (rec.k === "conversation") return { page: "messages", conversation: h };
+      if (rec.k === "person") return { page: "people", person: h };
+      // Recordings reads ?rec=<file> to open one item's detail (recordingDetail),
+      // same as its own row click — audio search hits used to fall through to the
+      // bare section page below, dropping the file ref they already carried.
+      if (rec.k === "audio") return { page: "recordings", rec: h };
+    }
+    return { page: rec.p || "overview" };   // hrefless hits → section page
+  }
+
+  // Persist the active view sub-state in the URL (and the in-memory Q) so an action
+  // that calls render() — which rebuilds the page and re-seeds its controls from Q —
+  // keeps the current filter/selection instead of snapping back to default. Also
+  // makes filtered views shareable/reload-stable. setQ writes one param + rewrites
+  // the URL via replaceState; the page fn reads it back from Q on the next render.
+  function encodeURL() {
+    var q = [];
+    ["person", "scene", "place", "event", "thread", "media", "cat", "subcat", "modality", "qcat",
+     "album", "favorite", "hidden", "participant", "venue", "tab", "date_from", "date_to",
+     "vperson", "vscene", "favorite_curation", "collection_curation", "people"]
+      .forEach(function (k) { if (Q[k]) q.push(k + "=" + encodeURIComponent(Q[k])); });
+    return location.pathname + (q.length ? "?" + q.join("&") : "");
+  }
+  function setQ(updates) {
+    Object.keys(updates).forEach(function (k) {
+      if (updates[k]) Q[k] = updates[k]; else delete Q[k];
+    });
+    history.replaceState(null, "", encodeURL());
+  }
+
+  // Persistent polite live region so screen readers announce every verb result
+  // (F-12). Toasts are appended here rather than to <body>; each keeps its own
+  // position:fixed placement, so the region is layout-neutral (no children in flow).
+  function toastRegion() {
+    var r = document.getElementById("toasts");
+    if (!r) {
+      r = el("div"); r.id = "toasts";
+      r.setAttribute("role", "status");
+      r.setAttribute("aria-live", "polite");
+      r.setAttribute("aria-atomic", "false");
+      document.body.appendChild(r);
+    }
+    return r;
+  }
+
+  function toast(msg, undoToken) {
+    var t = el("div", "toast", esc(msg));
+    if (undoToken && EXAMINER) {
+      var u = el("span", "undo", "Undo");
+      u.onclick = function () {
+        postJSON("/api/undo", { undo_token: undoToken }).then(function (res) {
+          if (res.ok && res.j.ok !== false) { location.reload(); return; }
+          toast("Couldn't undo: " + (res.j.error || "error"));
+        }).catch(function (e) { toast("Couldn't undo: " + (e && e.message ? e.message : "server error")); });
+      };
+      t.appendChild(u);
+    }
+    toastRegion().appendChild(t);
+    setTimeout(function () { t.remove(); }, 6000);
+  }
+
+  // Always resolves — never rejects. On an HTTP error, a non-JSON 500, or a network
+  // drop it toasts the reason and returns null, so every call site's `if (!x)` /
+  // `else` branch runs and restores its button/disabled state (was: a rejected verb
+  // showed no toast AND left "Discarding…" stuck disabled forever). #F-2
+  function doVerb(path, body, okMsg) {
+    return postJSON(path, body).then(function (res) {
+      if (res.ok && res.j.ok !== false) { toast(okMsg, res.j.undo_token); return res.j; }
+      toast("Couldn't do that: " + (res.j.error || "error")); return null;
+    }).catch(function (e) {
+      toast("Couldn't do that: " + (e && e.message ? e.message : "server error"));
+      return null;
+    });
+  }
+
+  // #11: debounce a live search-box handler (waits for a pause in typing before
+  // firing) so an in-list ?q= filter doesn't re-fetch on every keystroke.
+  function debounce(fn, ms) {
+    var t = null;
+    return function () {
+      var args = arguments;
+      clearTimeout(t);
+      t = setTimeout(function () { fn.apply(null, args); }, ms);
+    };
+  }
+
+  // G-15: pick a target person cluster from a small modal, then cb(person_id).
+  // `excludeId` is dropped from the list (can't merge/assign into the same person).
+  // CSP-safe: no inline handlers (addEventListener/.onclick only); the <option> text
+  // is set via new Option(text,…) which assigns textContent, so names are never
+  // interpreted as HTML; person_ids ride the option VALUE and go into a JSON body.
+  // Shared modal shell (#14): every pick*() below built this same back/box/
+  // Confirm/Cancel/Escape/click-outside scaffold by hand. Centralized here so
+  // new callers (textPrompt below; person/collection rename, add-to-collection)
+  // get the same in-app dialog instead of falling back to a raw prompt()/confirm().
+  // `opts.onConfirm(close)` reads the body's current value and decides whether
+  // to close (a validation failure can toast and leave the dialog open).
+  function pickmodal(title, bodyEl, opts) {
+    opts = opts || {};
+    var back = el("div", "pickmodal-back");
+    var box = el("div", "pickmodal");
+    box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-label", title);
+    box.appendChild(el("h3", null, esc(title)));
+    box.appendChild(bodyEl);
+    var actions = el("div", "pickmodal-actions");
+    var ok = el("button", "btn primary", opts.confirmLabel || "Confirm");
+    var cancel = el("button", "btn", "Cancel");
+    function onKey(e) { if (e.key === "Escape") close(); }
+    function close() { document.removeEventListener("keydown", onKey); back.remove(); }
+    function confirm() { if (opts.onConfirm) opts.onConfirm(close); }
+    ok.onclick = confirm;
+    cancel.onclick = close;
+    back.addEventListener("click", function (e) { if (e.target === back) close(); });
+    document.addEventListener("keydown", onKey);
+    actions.appendChild(ok); actions.appendChild(cancel);
+    box.appendChild(actions);
+    back.appendChild(box); document.body.appendChild(back);
+    return { box: box, close: close, confirm: confirm };
+  }
+
+  // A styled, in-app replacement for prompt() (#14): same callback shape as the
+  // pick*() functions — `cb` only fires on Confirm, never on Cancel/Escape (no
+  // `if (name == null) return;` needed at call sites, unlike native prompt()).
+  function textPrompt(title, defaultValue, cb) {
+    var input = el("input", "pickmodal-sel");
+    input.type = "text"; input.value = defaultValue || "";
+    var m = pickmodal(title, input, {
+      onConfirm: function (close) { var v = input.value; close(); cb(v); },
+    });
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") m.confirm(); });
+    try { input.focus(); input.select(); } catch (e) { /* no focus */ }
+  }
+
+  function pickPerson(title, excludeId, cb) {
+    getJSON("/api/people").then(function (rows) {
+      var choices = (rows || []).filter(function (r) { return r.person_id !== excludeId; });
+      if (!choices.length) { toast("No other people to choose from."); return; }
+      var sel = el("select", "pickmodal-sel");
+      choices.forEach(function (r) {
+        sel.appendChild(new Option((r.name || r.person_id) + " · " + num(r.photo_count) + " photos",
+                                    r.person_id));   // text is textContent-safe
+      });
+      var m = pickmodal(title, sel, {
+        onConfirm: function (close) { var pid = sel.value; close(); if (pid) cb(pid); },
+      });
+      try { sel.focus(); } catch (e) { /* no focus */ }
+    }).catch(function (e) { toast("Couldn't load people: " + (e && e.message ? e.message : "error")); });
+  }
+
+  // Scene picker (Phase-1.5 Move): choose a target gallery scene CATEGORY. The
+  // choices are the distinct scene categories present across the whole photo set
+  // (loaded over every page), minus the item's current scene. The server validates
+  // the target again (a scanned-document / unknown category is refused), so this is
+  // just the affordance. Text is textContent-safe (pretty()); ids never inlined.
+  function pickScene(title, excludeScene, cb) {
+    loadAllRows("/api/photos", function (rows) {
+      var seen = {}, choices = [];
+      (rows || []).forEach(function (r) {
+        var s = r.scene;
+        if (s && s !== excludeScene && !seen[s]) { seen[s] = 1; choices.push(s); }
+      });
+      choices.sort();
+      if (!choices.length) { toast("No other scenes to choose from."); return; }
+      var sel = el("select", "pickmodal-sel");
+      choices.forEach(function (s) {
+        sel.appendChild(new Option(pretty(s), s));   // Option text is textContent-safe
+      });
+      var m = pickmodal(title, sel, {
+        onConfirm: function (close) { var s = sel.value; close(); if (s) cb(s); },
+      });
+      try { sel.focus(); } catch (e) { /* no focus */ }
+    });
+  }
+
+  // Album picker (Move Phase 2): choose a target event album. The choices are the
+  // configured event albums (from /api/events), minus the item's current album.
+  // The server validates the target again (an unknown album_id → 409), so this is
+  // just the affordance. Option text is textContent-safe (esc not needed for
+  // Option); album_ids ride the option VALUE and go into a JSON body.
+  function pickAlbum(title, excludeAlbum, cb) {
+    getJSON("/api/events").then(function (albs) {
+      var choices = (albs || []).filter(function (a) {
+        return String(a.album_id) !== String(excludeAlbum);
+      });
+      if (!choices.length) { toast("No other albums to choose from."); return; }
+      var sel = el("select", "pickmodal-sel");
+      choices.forEach(function (a) {
+        sel.appendChild(new Option((a.title || a.album_id) + " · " + num(a.count) + " photos",
+                                    String(a.album_id)));   // text is textContent-safe
+      });
+      var m = pickmodal(title, sel, {
+        onConfirm: function (close) { var aid = sel.value; close(); if (aid) cb(aid); },
+      });
+      try { sel.focus(); } catch (e) { /* no focus */ }
+    }).catch(function (e) { toast("Couldn't load albums: " + (e && e.message ? e.message : "error")); });
+  }
+
+  // Category picker (Move Phase 2.5): choose a target DOCUMENT category. The choices
+  // are served from /api/doc-categories (the case-config document_categories, or the
+  // stdlib fallback, ALREADY MINUS account_credentials — the sealed category is never
+  // a movable target, §13.3). `excludeCat` drops the item's current category. The
+  // server re-validates (unknown/no-op/account_credentials refused), so this is just
+  // the affordance. Option text is textContent-safe (pretty()); category strings ride
+  // the option VALUE and go into a JSON body.
+  function pickCategory(title, excludeCat, cb) {
+    getJSON("/api/doc-categories").then(function (resp) {
+      var choices = ((resp && resp.categories) || []).filter(function (c) {
+        return c !== excludeCat;
+      });
+      if (!choices.length) { toast("No other categories to choose from."); return; }
+      var sel = el("select", "pickmodal-sel");
+      choices.forEach(function (c) {
+        sel.appendChild(new Option(pretty(c), c));   // Option text is textContent-safe
+      });
+      var m = pickmodal(title, sel, {
+        onConfirm: function (close) { var c = sel.value; close(); if (c) cb(c); },
+      });
+      try { sel.focus(); } catch (e) { /* no focus */ }
+    }).catch(function (e) { toast("Couldn't load categories: " + (e && e.message ? e.message : "error")); });
+  }
+
+  // Vital-document target picker (reassign): choose a DIFFERENT vital-document
+  // target for a checklist item. `choices` is vd.all_targets ([{target,label}] — the
+  // canonical 13 types + labels served by the documents payload); `excludeTarget`
+  // (the item's current display target) is dropped. Labels are textContent-safe via
+  // new Option(); the target id rides the option VALUE and goes into a JSON body —
+  // never inlined into HTML. Mirrors pickCategory (CSP-safe: addEventListener/.onclick).
+  function pickVitalTarget(title, choices, excludeTarget, cb) {
+    var opts = (choices || []).filter(function (c) { return c.target !== excludeTarget; });
+    if (!opts.length) { toast("No other document types to choose from."); return; }
+    var sel = el("select", "pickmodal-sel");
+    opts.forEach(function (c) {
+      sel.appendChild(new Option(c.label || c.target, c.target));   // Option text is textContent-safe
+    });
+    var m = pickmodal(title, sel, {
+      onConfirm: function (close) { var v = sel.value; close(); if (v) cb(v); },
+    });
+    try { sel.focus(); } catch (e) { /* no focus */ }
+  }
+
+  // The distinct vital categories a given document PATH currently matches (used to
+  // decide whether a reassign needs a scope prompt). A doc confirmed under >1 target
+  // shows up once per target in vd.targets[].items.
+  function vitalPathTargets(vd, path) {
+    var seen = {};
+    (vd.targets || []).forEach(function (t) {
+      (t.items || []).forEach(function (it) { if (it.path === path) seen[t.target] = 1; });
+    });
+    return Object.keys(seen);
+  }
+
+  // Reassign SCOPE chooser: when a document matched >1 vital category, ask whether
+  // the reassign applies to EVERY category (global) or only the clicked one (single).
+  // CSP-safe (addEventListener/.onclick, no inline handlers); text via esc()+innerHTML.
+  function pickScope(nCats, cb) {
+    var back = el("div", "pickmodal-back");
+    var box = el("div", "pickmodal");
+    box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-label", "Reassign scope");
+    box.appendChild(el("h3", null, "Reassign in how many categories?"));
+    box.appendChild(el("p", "pickmodal-note",
+      esc("This document is a vital match in " + nCats + " categories.")));
+    var actions = el("div", "pickmodal-actions");
+    var all = el("button", "btn primary", esc("All " + nCats + " categories"));
+    var one = el("button", "btn", "Just this one");
+    var cancel = el("button", "btn", "Cancel");
+    function onKey(e) { if (e.key === "Escape") close(); }
+    function close() { document.removeEventListener("keydown", onKey); back.remove(); }
+    all.onclick = function () { close(); cb("global"); };
+    one.onclick = function () { close(); cb("single"); };
+    cancel.onclick = close;
+    back.addEventListener("click", function (e) { if (e.target === back) close(); });
+    document.addEventListener("keydown", onKey);
+    actions.appendChild(all); actions.appendChild(one); actions.appendChild(cancel);
+    box.appendChild(actions);
+    back.appendChild(box); document.body.appendChild(back);
+    try { all.focus(); } catch (e) { /* no focus */ }
+  }
+
+  // Financial SUB-category picker (§14.5) — mirrors pickCategory but lists the
+  // movable financial subcategories served additively at /api/doc-categories
+  // `financial_subcategories` (case-config, or the stdlib fallback; an EMPTY list
+  // means the second pass is disabled → no targets). `excludeSub` drops the row's
+  // current subcategory. Only offered on rows already category=="financial"
+  // (client-side gate); the server re-validates. textContent-safe (pretty()).
+  function pickSubcategory(title, excludeSub, cb) {
+    getJSON("/api/doc-categories").then(function (resp) {
+      var choices = ((resp && resp.financial_subcategories) || []).filter(function (s) {
+        return s !== excludeSub;
+      });
+      if (!choices.length) { toast("No other sub-categories to choose from."); return; }
+      var sel = el("select", "pickmodal-sel");
+      choices.forEach(function (s) {
+        sel.appendChild(new Option(pretty(s), s));   // Option text is textContent-safe
+      });
+      var m = pickmodal(title, sel, {
+        onConfirm: function (close) { var s = sel.value; close(); if (s) cb(s); },
+      });
+      try { sel.focus(); } catch (e) { /* no focus */ }
+    }).catch(function (e) { toast("Couldn't load sub-categories: " + (e && e.message ? e.message : "error")); });
+  }
+
+  // ── shell ──
+  function shell() {
+    var app = document.getElementById("app");
+    app.innerHTML = "";
+    var sh = el("div", "shell");
+    var rail = el("nav", "rail");
+    rail.setAttribute("role", "navigation");
+    rail.setAttribute("aria-label", "Archive sections");
+    rail.innerHTML = '<div class="brand"><span class="mark">Wyeast</span><span class="sub">Family Archive</span></div>';
+    // Full-text search box — present on every page (family-archive-full-text-search.md).
+    // CSP-safe: no inline handlers, submit navigates to the /search results page.
+    var railForm = el("form", "railsearch");
+    var railInput = el("input", "railsearch-input");
+    railInput.type = "search";
+    railInput.name = "q";
+    railInput.placeholder = "Search the archive…";
+    railInput.setAttribute("aria-label", "Search the archive");
+    railInput.autocomplete = "off";
+    if (CTX.page === "search" && Q.q) railInput.value = Q.q;
+    railForm.appendChild(railInput);
+    railForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var v = railInput.value.trim();
+      location.href = v ? "/search?q=" + encodeURIComponent(v) : "/search";
+    });
+    rail.appendChild(railForm);
+    (CTX.nav || []).forEach(function (item) {
+      var active = item.key === CTX.page;
+      var a = el("a", "navlink" + (active ? " active" : ""), esc(item.label));
+      a.href = "/" + item.key;
+      if (active) a.setAttribute("aria-current", "page");
+      rail.appendChild(a);
+    });
+    rail.appendChild(el("div", "spacer"));
+    rail.appendChild(el("div", "casemeta", esc(CTX.case_id) + '<br><span class="role-pill">' + esc(CTX.role) + '</span>'));
+    var main = el("main", "main"); main.id = "main"; main.setAttribute("role", "main");
+    sh.appendChild(rail); sh.appendChild(main); app.appendChild(sh);
+    return main;
+  }
+
+  // Sticky section header. Title group on the left; a right-aligned .controls slot
+  // (#7) for filter dropdowns that must stay reachable while the body scrolls.
+  // Returns the .controls element so callers can append their controls into it.
+  function head(main, eyebrow, title, lead) {
+    var ph = el("div", "pagehead");
+    var titleWrap = el("div", "pagehead-title");
+    if (eyebrow) titleWrap.appendChild(el("div", "eyebrow", esc(eyebrow)));
+    titleWrap.appendChild(el("h1", null, esc(title)));
+    if (lead) titleWrap.appendChild(el("p", "lead", esc(lead)));
+    var controls = el("div", "controls");
+    ph.appendChild(titleWrap); ph.appendChild(controls);
+    main.appendChild(ph);
+    return controls;
+  }
+
+  function backLink(main, label, target) {
+    var a = el("a", "backlink", "← " + esc(label));
+    a.href = "#"; a.onclick = function (e) { e.preventDefault(); go(target); };
+    main.appendChild(a);
+  }
+
+  // ── targeted view updates ──
+  // A page can register removeItems(ids) so a verb success updates the CURRENT
+  // view in place instead of re-fetching the whole dataset and rebuilding up to
+  // 2,000 cards (the "re-render-the-world" pattern). render() clears the hook;
+  // pages without one fall back to a full render() unchanged.
+  var VIEW = { removeItems: null };
+  function dropItems(ids) {
+    if (!VIEW.removeItems) return false;
+    VIEW.removeItems(ids);
+    return true;
+  }
+
+  // ── Load-more pagination (F-3) ──
+  // Drives a paginated section endpoint ({rows,total,offset,limit}). Seed from the
+  // page-1 payload the router already fetched, then Load-more fetches the next
+  // ?offset=&limit= slice and APPENDS to the accumulated set. `opts.getParams()`
+  // adds server params (sort/date/category); change them and call load(true) to
+  // refetch from offset 0. `opts.render(allRows, total, reset)` redraws the body.
+  // The returned `.footer` carries the "Showing 1–N of M" note + Load-more button
+  // — append it below the body. CSP-safe: no inline handlers (addEventListener/
+  // .onclick only), getJSON rejects on non-2xx.
+  function pager(apiPath, opts) {
+    opts = opts || {};
+    // Extract the {rows,total,...} envelope from a response — top-level by default,
+    // but a nested key for endpoints that paginate a sub-list (correspondence's
+    // `scanned`). Applied to BOTH the Load-more fetch and the seed payload.
+    var unwrap = opts.unwrap || function (d) { return d || {}; };
+    var st = { rows: [], total: 0, offset: 0, limit: 2000, loading: false,
+               footer: el("div", "pager") };
+    function draw() {
+      st.footer.innerHTML = "";
+      var shown = st.rows.length;
+      st.footer.appendChild(el("p", "count-note",
+        st.total ? ("Showing 1–" + num(shown) + " of " + num(st.total)) : "Nothing here."));
+      if (shown < st.total) {
+        var b = el("button", "btn", "Load more (" + num(st.total - shown) + " remaining)");
+        b.onclick = function () { b.disabled = true; st.load(false); };
+        st.footer.appendChild(b);
+      }
+    }
+    st.draw = draw;
+    st.load = function (reset) {
+      if (st.loading) return Promise.resolve();
+      st.loading = true;
+      if (reset) { st.rows = []; st.offset = 0; }
+      var params = (opts.getParams && opts.getParams()) || {};
+      var q = ["offset=" + st.offset, "limit=" + st.limit];
+      Object.keys(params).forEach(function (k) {
+        if (params[k] != null && params[k] !== "") q.push(k + "=" + encodeURIComponent(params[k]));
+      });
+      return getJSON(apiPath + "?" + q.join("&")).then(function (d) {
+        st.loading = false;
+        var u = unwrap(d), rows = (u && u.rows) || [];
+        st.rows = st.rows.concat(rows);
+        st.total = (u && u.total != null) ? u.total : st.rows.length;
+        st.offset = st.rows.length;
+        if (opts.onData) opts.onData(d);   // raw payload (e.g. photo facets)
+        opts.render(st.rows, st.total, reset);
+        draw();
+      }).catch(function (e) {
+        st.loading = false;
+        toast("Couldn't load more: " + (e && e.message ? e.message : "error"));
+        draw();
+      });
+    };
+    // Seed from the router's page-1 payload (avoids a duplicate first fetch).
+    st.seed = function (d) {
+      var u = unwrap(d);
+      st.rows = (u && u.rows) || [];
+      st.total = (u && u.total != null) ? u.total : st.rows.length;
+      st.offset = st.rows.length;
+      if (opts.onData) opts.onData(d);   // raw payload (e.g. photo facets)
+      opts.render(st.rows, st.total, true);
+      draw();
+    };
+    return st;
+  }
+
+  // Fetch EVERY page of a paginated endpoint (for internal consumers that need the
+  // whole set — e.g. the Places drill-in filtering photos to one location, or the
+  // Photos page's video pool). Pages in 2,000-row chunks so no single response is
+  // oversized. Calls done(allRows) once; toasts + returns what it has on error.
+  function loadAllRows(apiPath, done, onFirst) {
+    var acc = [], first = true;
+    function step(offset) {
+      var sep = apiPath.indexOf("?") >= 0 ? "&" : "?";
+      getJSON(apiPath + sep + "offset=" + offset + "&limit=2000").then(function (d) {
+        if (first) { first = false; if (onFirst) onFirst(d); }   // raw payload (e.g. video facets)
+        var rows = (d && d.rows) || [];
+        acc = acc.concat(rows);
+        var total = (d && d.total != null) ? d.total : acc.length;
+        if (rows.length && acc.length < total) step(acc.length);
+        else done(acc);
+      }).catch(function (e) {
+        toast("Couldn't load all: " + (e && e.message ? e.message : "error"));
+        done(acc);
+      });
+    }
+    step(0);
+  }
+
+  // Repopulate a <select> from `values`, preserving the current selection if it
+  // still exists (filter dropdowns rebuilt as more pages load).
+  function fillSelect(sel, allLabel, values, labelFn) {
+    var cur = sel.value;
+    sel.innerHTML = "";
+    sel.appendChild(new Option(allLabel, ""));
+    values.forEach(function (v) { sel.appendChild(new Option(labelFn ? labelFn(v) : v, v)); });
+    if (cur && values.indexOf(cur) >= 0) sel.value = cur; else sel.value = "";
+  }
+
+  // ── selection bar ──
+  var SEL = {};
+  // file id → rendered category, populated by fileTable — lets a batch sub-move
+  // restrict the selection to financial rows (§14.6, client-side gate).
+  var DOC_CAT = {};
+  function selbar() {
+    var bar = document.getElementById("selbar");
+    if (!bar) { bar = el("div", "selbar"); bar.id = "selbar"; document.body.appendChild(bar); }
+    var ids = Object.keys(SEL);
+    bar.innerHTML = '<span class="n">' + ids.length + ' selected</span><span class="sep"></span>';
+    var exp = el("button", "act primary", "Export");
+    exp.onclick = function () { doVerb("/api/export", { items: ids }, "Exported " + ids.length + " item(s)").then(clearSel); };
+    bar.appendChild(exp);
+    if (EXAMINER) {
+      // "Discard" is the user-facing label; the verb/route/dir stay "banish" (#10).
+      var ban = el("button", "act danger", "Discard");
+      ban.onclick = function () {
+        // Group discard confirms; a single item is immediate (both reversible
+        // from History).
+        if (ids.length > 1 && !confirm("Discard " + ids.length + " items? They are hidden from the archive "
+          + "(removed from view); this is reversible from the History view.")) return;
+        // One batched request (server reloads the case once) + immediate disabled
+        // feedback, so a multi-select Discard updates the grid promptly instead of
+        // lagging seconds behind per-item reloads and looking like it failed.
+        ban.disabled = true; ban.textContent = "Discarding…";
+        doVerb("/api/banish", { srcs: ids }, "Discarded " + ids.length + " item(s)")
+          .then(function (x) {
+            if (!x) { ban.disabled = false; ban.textContent = "Discard"; return; }
+            clearSel();
+            if (!dropItems(ids)) render();   // in-place removal when the page supports it
+          });
+      };
+      bar.appendChild(ban);
+      // Batch Move (Phase 1.5) — reuses the selection + toast/undo wiring. On a
+      // person_detail grid it re-files the selection under another person; on the
+      // Photos gallery it relabels the selection's scene facet. One batched request
+      // (server writes once, reloads once); skip-not-fail on any non-movable member.
+      if (CTX.page === "people" && Q.person) {
+        var mvp = el("button", "act", "Move to person…");
+        mvp.onclick = function () {
+          pickPerson("Move " + ids.length + " item(s) to which person?", Q.person, function (pid) {
+            mvp.disabled = true; mvp.textContent = "Moving…";
+            doVerb("/api/move", { view: "person", srcs: ids, to: pid },
+                   "Moved " + ids.length + " item(s)").then(function (x) {
+              if (!x) { mvp.disabled = false; mvp.textContent = "Move to person…"; return; }
+              clearSel();
+              if (!dropItems(ids)) render();
+            });
+          });
+        };
+        bar.appendChild(mvp);
+      }
+      if (CTX.page === "photos") {
+        var mvs = el("button", "act", "Move to scene…");
+        mvs.onclick = function () {
+          pickScene("Move " + ids.length + " item(s) to which scene?", null, function (cat) {
+            mvs.disabled = true; mvs.textContent = "Moving…";
+            doVerb("/api/move", { view: "scene", srcs: ids, to: cat },
+                   "Moved " + ids.length + " item(s)").then(function (x) {
+              if (!x) { mvs.disabled = false; mvs.textContent = "Move to scene…"; return; }
+              clearSel(); render();
+            });
+          });
+        };
+        bar.appendChild(mvs);
+        // Batch event-move (Phase 2): re-file the selection into one event album.
+        var mva = el("button", "act", "Move to album…");
+        mva.onclick = function () {
+          pickAlbum("Move " + ids.length + " item(s) to which album?", null, function (aid) {
+            mva.disabled = true; mva.textContent = "Moving…";
+            doVerb("/api/move", { view: "event", srcs: ids, to: aid },
+                   "Moved " + ids.length + " item(s)").then(function (x) {
+              if (!x) { mva.disabled = false; mva.textContent = "Move to album…"; return; }
+              clearSel(); render();
+            });
+          });
+        };
+        bar.appendChild(mva);
+      }
+      // Batch document-category move (Phase 2.5): re-file the selected documents into
+      // one category. On the Documents and Correspondence pages the selection is doc
+      // `file` ids (fileTable). Skip-not-fail (a credential/email/no-op member is
+      // skipped server-side, §13.3/§13.4); a full re-render reflects the new buckets.
+      if (CTX.page === "documents" || CTX.page === "correspondence") {
+        var mvc = el("button", "act", "Move to category…");
+        mvc.onclick = function () {
+          pickCategory("Move " + ids.length + " document(s) to which category?", null, function (cat) {
+            mvc.disabled = true; mvc.textContent = "Moving…";
+            doVerb("/api/move", { view: "document", srcs: ids, to: cat },
+                   "Moved " + ids.length + " document(s)").then(function (x) {
+              if (!x) { mvc.disabled = false; mvc.textContent = "Move to category…"; return; }
+              clearSel(); render();
+            });
+          });
+        };
+        bar.appendChild(mvc);
+        // Batch financial SUB-category move (Phase 2.6): restrict the selection to
+        // financial rows (§14.6 — a mixed batch would MOVE non-financial members
+        // into financial, so the UI gates to financial-only). Shown only when the
+        // selection includes at least one financial row.
+        var finIds = ids.filter(function (id) { return DOC_CAT[id] === "financial"; });
+        if (finIds.length) {
+          var mvsub = el("button", "act", "Move to sub-category…");
+          mvsub.onclick = function () {
+            pickSubcategory("Move " + finIds.length + " financial document(s) to which sub-category?", null, function (sub) {
+              mvsub.disabled = true; mvsub.textContent = "Moving…";
+              doVerb("/api/move", { view: "document", srcs: finIds, to: "financial", subcategory: sub },
+                     "Moved " + finIds.length + " document(s)").then(function (x) {
+                if (!x) { mvsub.disabled = false; mvsub.textContent = "Move to sub-category…"; return; }
+                clearSel(); render();
+              });
+            });
+          };
+          bar.appendChild(mvsub);
+        }
+        // #19: a scanned-document/handwritten-letter image the scene classifier
+        // mis-tagged has no Move (scanned isn't a document_classifications
+        // category — the Move machinery excludes it) and Discard would hide it
+        // entirely when the family may still want the photo, just not filed as
+        // correspondence. Server-side skip-not-fail (like the sub-category gate
+        // above) means a mixed selection (typed/handwritten doc rows alongside
+        // scanned images) just quietly skips the non-scanned members.
+        if (CTX.page === "correspondence") {
+          var relsc = el("button", "act", "Not a document");
+          relsc.title = "Release back to Photos — it isn't a scanned document/letter";
+          relsc.onclick = function () {
+            relsc.disabled = true; relsc.textContent = "Releasing…";
+            doVerb("/api/release/scanned", { ids: ids }, "Released " + ids.length + " item(s) to Photos")
+              .then(function (x) {
+                if (!x) { relsc.disabled = false; relsc.textContent = "Not a document"; return; }
+                clearSel();
+                if (!dropItems(ids)) render();
+              });
+          };
+          bar.appendChild(relsc);
+        }
+      }
+    }
+    var clr = el("button", "act", "Deselect all");
+    clr.onclick = clearSel;
+    bar.appendChild(clr);
+    bar.classList.toggle("show", ids.length > 0);
+  }
+  function clearSel() {
+    SEL = {}; selbar();
+    document.querySelectorAll(".sel").forEach(function (c) { c.classList.remove("sel"); });
+    document.querySelectorAll("input.rowpick:checked").forEach(function (i) { i.checked = false; });
+  }
+  function toggleSel(id, on) { if (on) SEL[id] = 1; else delete SEL[id]; selbar(); }
+  function addPick(card, id) {
+    card.dataset.id = id;
+    var pick = el("div", "pick");
+    pick.onclick = function (e) {
+      e.stopPropagation();
+      var on = !SEL[id];
+      card.classList.toggle("sel", on); toggleSel(id, on);
+      pick.setAttribute("aria-pressed", on ? "true" : "false");
+    };
+    keyable(pick, "button", "Select item");   // F-12: focusable + Enter/Space toggles
+    pick.setAttribute("aria-pressed", SEL[id] ? "true" : "false");
+    card.appendChild(pick);
+    if (SEL[id]) card.classList.add("sel");
+  }
+  // SEL-based pick for marquee/click selection of grid cards (data-id carries the id).
+  function selPick(card, on) {
+    var id = card.dataset.id; if (!id) return;
+    card.classList.toggle("sel", on); toggleSel(id, on);
+  }
+  // Rubber-band (drag) selection over a card grid, gated by a "Select" mode toggle
+  // placed in `controls`. While the mode is on the page cursor is a crosshair, a
+  // plain card click toggles its selection (not the lightbox), and dragging a box
+  // selects every card it touches. `pick(cardEl, on)` records the selection.
+  function marqueeSelect(controls, root, cardSel, pick, onClear) {
+    var on = false, box = null;
+    var btn = el("button", "btn", "Select");
+    btn.onclick = function () {
+      on = !on; document.body.classList.toggle("selecting", on);
+      btn.textContent = on ? "Done" : "Select"; btn.classList.toggle("primary", on);
+    };
+    controls.appendChild(btn);
+    var clr = el("button", "btn", "Deselect all");
+    clr.onclick = onClear || clearSel;
+    controls.appendChild(clr);
+    root.addEventListener("mousedown", function (e) {
+      if (!on || e.button) return;
+      e.preventDefault();
+      var sx = e.clientX, sy = e.clientY;
+      // Cache each currently-mounted card's viewport rect ONCE (F-7): the grid doesn't
+      // move during a drag, so re-reading getBoundingClientRect on every mousemove
+      // (a forced layout per card) is pure waste. `pre` records the card's selection
+      // state at drag start; `dragOn` tracks cards THIS drag toggled on — so shrinking
+      // the box deselects its own overshoot while leaving prior selections intact.
+      // With F-4 virtualization only mounted cards have rects; marquee operates over
+      // the visible window (acceptable — the rest aren't on screen).
+      var rects = Array.prototype.map.call(root.querySelectorAll(cardSel), function (c) {
+        var b = c.getBoundingClientRect();
+        return { card: c, l: b.left, t: b.top, r: b.right, bo: b.bottom,
+                 pre: c.classList.contains("sel"), dragOn: false };
+      });
+      box = el("div", "marquee"); document.body.appendChild(box);
+      function mv(ev) {
+        var x = Math.min(sx, ev.clientX), y = Math.min(sy, ev.clientY),
+            w = Math.abs(ev.clientX - sx), h = Math.abs(ev.clientY - sy),
+            x2 = x + w, y2 = y + h;
+        box.style.cssText = "left:" + x + "px;top:" + y + "px;width:" + w + "px;height:" + h + "px";
+        rects.forEach(function (rc) {
+          var hit = !(rc.r < x || rc.l > x2 || rc.bo < y || rc.t > y2);
+          if (hit) { if (!rc.pre && !rc.dragOn) { pick(rc.card, true); rc.dragOn = true; } }
+          else if (rc.dragOn) { pick(rc.card, false); rc.dragOn = false; }
+        });
+      }
+      function up() {
+        document.removeEventListener("mousemove", mv); document.removeEventListener("mouseup", up);
+        if (box) { box.remove(); box = null; }
+      }
+      document.addEventListener("mousemove", mv); document.addEventListener("mouseup", up);
+    });
+    root.addEventListener("click", function (e) {   // capture: beat the card's own onclick
+      if (!on) return;
+      var c = e.target.closest(cardSel);
+      if (!c || !root.contains(c)) return;
+      e.preventDefault(); e.stopPropagation();
+      pick(c, !c.classList.contains("sel"));
+    }, true);
+  }
+
+  // ── lightbox (F-10) ──
+  // A real viewer: keyboard (Escape closes, ←/→ page through the caller's set),
+  // click/scroll zoom + drag pan on images, an EXIF/metadata sidebar, and full
+  // dialog a11y (role=dialog, aria-modal, focus moves in on open + is trapped +
+  // restored to the trigger on close). `openLightbox({list,index,resolve})` drives
+  // a gallery; `lightbox(id,kind,actions,meta)` is the single-item wrapper (arrows
+  // are no-ops). `resolve(row)` → {id, kind, actions, meta}; `meta` is the photo row
+  // (or a {caption,source} legacy object) — whatever fields it carries populate the
+  // panel. `kind`: true/"image", "video", "pdf" (inline browser PDF viewer — F-11),
+  // "doc" (Download-to-open card — F-11), false/"iframe" (legacy sandboxed frame).
+  var LBX = { list: null, index: 0, mode: null, trigger: null, resolve: null,
+              go: null, zoomCleanup: null, keyed: false };
+
+  function ensureLB() {
+    var lb = document.getElementById("lb");
+    if (!lb) {
+      lb = el("div", "lightbox"); lb.id = "lb";
+      lb.setAttribute("role", "dialog"); lb.setAttribute("aria-modal", "true");
+      lb.setAttribute("aria-label", "Media viewer"); lb.tabIndex = -1;
+      document.body.appendChild(lb);
+      lb.addEventListener("click", function (e) {
+        // Backdrop (or the × button) closes; the media/panel/nav controls don't.
+        if (e.target === lb || (e.target.classList && e.target.classList.contains("x"))) closeLB();
+      });
+    }
+    if (!LBX.keyed) {   // one document-level key handler for the whole session
+      LBX.keyed = true;
+      document.addEventListener("keydown", function (e) {
+        var box = document.getElementById("lb");
+        if (!box || !box.classList.contains("show")) return;
+        if (e.key === "Escape") { e.preventDefault(); closeLB(); return; }
+        if (e.key === "Tab") { trapFocus(e, box); return; }
+        if (LBX.mode === "gallery" && LBX.go) {
+          if (e.key === "ArrowRight") { e.preventDefault(); LBX.go(1); }
+          else if (e.key === "ArrowLeft") { e.preventDefault(); LBX.go(-1); }
+        }
+      });
+    }
+    return lb;
+  }
+
+  function closeLB() {
+    if (LBX.zoomCleanup) { LBX.zoomCleanup(); LBX.zoomCleanup = null; }
+    var lb = document.getElementById("lb");
+    if (lb) lb.classList.remove("show");
+    document.body.classList.remove("lb-open");
+    var t = LBX.trigger;
+    LBX.trigger = null; LBX.mode = null; LBX.list = null; LBX.go = null;
+    if (t && t.focus) { try { t.focus(); } catch (e) { /* trigger gone */ } }
+  }
+
+  // Keep Tab focus inside the open dialog (F-10 / F-12).
+  function trapFocus(e, lb) {
+    var nodes = lb.querySelectorAll('button, a[href], iframe, video, [tabindex]:not([tabindex="-1"])');
+    var f = Array.prototype.filter.call(nodes, function (n) {
+      return !n.disabled && (n.offsetWidth || n.offsetHeight || n === document.activeElement);
+    });
+    if (!f.length) { e.preventDefault(); lb.focus(); return; }
+    var first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    else if (f.indexOf(document.activeElement) < 0) { e.preventDefault(); first.focus(); }
+  }
+
+  // Find the on-screen grid card for an id (so a verb invoked from the lightbox can
+  // still update the card in place while paging a gallery). String-equality on the
+  // dataset id — no attribute-selector escaping hazard.
+  function findCard(grid, id) {
+    if (!grid) return null;
+    var cs = grid.querySelectorAll(".card, .qcard");
+    for (var i = 0; i < cs.length; i++) if (cs[i].dataset.id === id) return cs[i];
+    return null;
+  }
+
+  // ── metadata panel ──
+  function _coord(v) { var n = Number(v); return isFinite(n) ? n.toFixed(5) : String(v); }
+  function placeText(meta) {
+    var pd = meta.place_detail;
+    if (pd && typeof pd === "object") {
+      var parts = [pd.name, pd.admin1, pd.cc].filter(Boolean);
+      if (parts.length) return parts.join(", ");
+    }
+    return meta.place ? prettyPlace(meta.place) : "";
+  }
+  // [label, escaped-HTML] pairs for whatever the row carries. Everything is
+  // estate-derived → esc() at the sink.
+  function metaRows(meta) {
+    if (!meta) return [];
+    var out = [];
+    if (meta.ts) out.push(["Date", esc(String(meta.ts).replace("T", " "))]);
+    var place = placeText(meta);
+    if (place) out.push(["Place", esc(place)]);
+    var cam = [meta.camera_make, meta.camera_model].filter(Boolean).join(" ");
+    if (cam) out.push(["Camera", esc(cam)]);
+    if (meta.width_px && meta.height_px)
+      out.push(["Dimensions", esc(num(meta.width_px) + " × " + num(meta.height_px) + " px")]);
+    if (meta.gps && meta.gps.lat != null && meta.gps.lon != null) {
+      var g = esc(_coord(meta.gps.lat) + ", " + _coord(meta.gps.lon));
+      if (meta.gps_altitude_m != null) g += esc(" · " + Math.round(meta.gps_altitude_m) + " m");
+      out.push(["GPS", g]);
+    }
+    if (meta.scene) out.push(["Scene", esc(pretty(meta.scene))]);
+    if (meta.caption) out.push(["Caption", esc(meta.caption)]);
+    if (meta.albums && meta.albums.length) out.push(["Albums", esc(meta.albums.join(", "))]);
+    if (meta.source) out.push(["Source", esc(pretty(meta.source))]);
+    // Curation overlay (examiner): starred flag, collection membership, note. All
+    // estate/operator-derived → esc() at the sink.
+    if (meta.favorite_curation) out.push(["Starred", "★"]);
+    if (meta.collections && meta.collections.length)
+      out.push(["Collections", esc(meta.collections.join(", "))]);
+    if (meta.note) out.push(["Note", esc(meta.note)]);
+    return out;
+  }
+  function metaPanel(meta) {
+    var rows = metaRows(meta);
+    if (!rows.length) return null;
+    var panel = el("aside", "lb-panel"); panel.setAttribute("aria-label", "Details");
+    if (meta && meta.name) panel.appendChild(el("h2", "lb-panel-h", esc(meta.name)));
+    else panel.appendChild(el("h2", "lb-panel-h", "Details"));
+    var dl = el("dl", "lb-meta");
+    rows.forEach(function (r) {
+      dl.appendChild(el("dt", null, esc(r[0])));
+      dl.appendChild(el("dd", null, r[1]));   // r[1] is already escaped HTML
+    });
+    panel.appendChild(dl);
+    var btn = el("button", "lb-info", "Details");
+    btn.setAttribute("aria-label", "Toggle details"); btn.setAttribute("aria-expanded", "true");
+    btn.onclick = function (e) {
+      e.stopPropagation();
+      var hidden = panel.classList.toggle("hidden");
+      btn.setAttribute("aria-expanded", hidden ? "false" : "true");
+    };
+    return { el: panel, btn: btn };
+  }
+
+  // ── image zoom / pan ── dependency-free. Scroll or click to zoom, drag to pan.
+  function attachZoom(img, stage) {
+    var scale = 1, tx = 0, ty = 0, dragging = false, sx = 0, sy = 0, moved = false;
+    function apply() {
+      img.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + scale + ")";
+      img.style.cursor = scale > 1 ? "grab" : "zoom-in";
+    }
+    function onWheel(e) {
+      e.preventDefault();
+      scale = Math.min(6, Math.max(1, scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+      if (scale === 1) { tx = 0; ty = 0; }
+      apply();
+    }
+    function onDown(e) {
+      if (e.button) return;
+      e.preventDefault(); dragging = true; moved = false; sx = e.clientX; sy = e.clientY;
+      if (scale > 1) img.style.cursor = "grabbing";
+    }
+    function onMove(e) {
+      if (!dragging) return;
+      var dx = e.clientX - sx, dy = e.clientY - sy;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+      if (scale > 1) { tx += dx; ty += dy; sx = e.clientX; sy = e.clientY; apply(); }
+    }
+    function onUp() {
+      if (!dragging) return;
+      dragging = false;
+      if (!moved) {   // a plain click toggles zoom (in to ~2.4×, or back to fit)
+        if (scale > 1) { scale = 1; tx = 0; ty = 0; } else { scale = 2.4; }
+      }
+      apply();
+    }
+    img.addEventListener("wheel", onWheel, { passive: false });
+    img.addEventListener("mousedown", onDown);
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    apply();
+    return function () {   // cleanup on nav/close
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+  }
+
+  // Inline document icon for the Download-to-open card (Zone-B safe, no CDN).
+  function docIcon() {
+    return '<svg viewBox="0 0 24 24" width="46" height="46" aria-hidden="true">' +
+      '<path d="M6 2h8l4 4v16H6z" fill="none" stroke="currentColor" stroke-width="1.4"/>' +
+      '<path d="M14 2v4h4" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+  }
+  // F-11: office/svg/html/unknown → a clean "Download to open" card (never a broken
+  // frame / silent attachment download inside the overlay). Filename + optional size
+  // + the OCR preview text the archive already has (when the caller passes it).
+  function downloadCard(id, meta) {
+    var name = (meta && meta.name) || basename(id);
+    var wrap = el("div", "lb-download");
+    wrap.appendChild(el("div", "lb-dl-icon", docIcon()));
+    wrap.appendChild(el("h2", "lb-dl-name", esc(name)));
+    // Reached for two different reasons — a format with no in-browser renderer
+    // (.svg/.html/unknown) and a renderable document whose view sidecar is
+    // absent — so the wording has to be true of both.
+    var sub = "A preview isn't available for this file.";
+    if (meta && meta.size) sub += " · " + esc(String(meta.size));
+    wrap.appendChild(el("p", "lb-dl-note", sub));
+    if (meta && meta.preview) wrap.appendChild(el("div", "lb-dl-preview", esc(meta.preview)));
+    var a = el("a", "btn primary", "Download to open");
+    a.href = mediaURL(id); a.setAttribute("download", name);
+    a.setAttribute("rel", "noopener noreferrer");
+    a.onclick = function (e) { e.stopPropagation(); };
+    wrap.appendChild(a);
+    return wrap;
+  }
+
+  // ── inline office-document view (F-11 follow-up) ──
+  // The server hands back typed BLOCKS of plain text (never document markup —
+  // see wyeast/stages/_doctext.py), and every string lands via textContent, so a
+  // hostile estate .docx cannot inject anything into this page. Do NOT switch
+  // these to el(tag, cls, html): that third argument is innerHTML.
+  function txt(tag, cls, s) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    e.textContent = String(s == null ? "" : s);
+    return e;
+  }
+
+  function docBlockNode(b) {
+    var t = b && b.t;
+    if (t === "h") return txt("h" + Math.min(6, Math.max(1, b.level || 2)), "dv-h", b.text);
+    if (t === "section") return txt("div", "dv-section", b.text);
+    if (t === "pre") return txt("pre", "dv-pre", b.text);
+    if (t === "table") {
+      var rows = b.rows || [];
+      if (!rows.length) return null;
+      // Wide sheets scroll inside the table, never widening the lightbox.
+      var wrap = el("div", "dv-tablewrap");
+      var tbl = document.createElement("table");
+      tbl.className = "dv-table";
+      rows.forEach(function (r, i) {
+        var head = b.header && i === 0;
+        var tr = document.createElement("tr");
+        (r || []).forEach(function (c) { tr.appendChild(txt(head ? "th" : "td", null, c)); });
+        tbl.appendChild(tr);
+      });
+      wrap.appendChild(tbl);
+      return wrap;
+    }
+    return txt("p", "dv-p", (b && b.text) || "");
+  }
+
+  // A "doc" lightbox stage: try the inline view, fall back to the download card.
+  // Absence is routine (legacy .doc, unrenderable file, case OCR'd before inline
+  // views existed), so a failed fetch is a normal outcome, not an error state.
+  function docStage(id, meta) {
+    var wrap = el("div", "lb-doc");
+    wrap.appendChild(el("p", "notice", "Loading preview…"));
+    getJSON("/api/doctext?src=" + encodeURIComponent(id)).then(function (r) {
+      var blocks = (r && r.blocks) || [];
+      if (!blocks.length) throw new Error("empty");
+      wrap.innerHTML = "";
+      var bar = el("div", "dv-bar");
+      bar.appendChild(txt("span", "dv-name", (meta && meta.name) || r.name || basename(id)));
+      var dl = el("a", "btn", "Download");
+      dl.href = mediaURL(id);
+      dl.setAttribute("download", (meta && meta.name) || r.name || basename(id));
+      dl.setAttribute("rel", "noopener noreferrer");
+      dl.onclick = function (e) { e.stopPropagation(); };
+      bar.appendChild(dl);
+      wrap.appendChild(bar);
+      var body = el("div", "dv-body");
+      blocks.forEach(function (b) {
+        var n = docBlockNode(b);
+        if (n) body.appendChild(n);
+      });
+      wrap.appendChild(body);
+    }).catch(function () {
+      wrap.innerHTML = "";
+      wrap.appendChild(downloadCard(id, meta));
+    });
+    return wrap;
+  }
+
+  // Render the current item into #lb. `focusSel` picks what to focus afterwards.
+  function showLBItem(focusSel) {
+    var lb = document.getElementById("lb"); if (!lb) return;
+    if (LBX.zoomCleanup) { LBX.zoomCleanup(); LBX.zoomCleanup = null; }
+    var d = (LBX.resolve ? LBX.resolve(LBX.list[LBX.index]) : null) || {};
+    var id = d.id, actions = d.actions, meta = d.meta;
+    var k = d.kind === true ? "image" : d.kind === false ? "iframe" : (d.kind || "image");
+    lb.innerHTML = "";
+    var close = el("button", "x", "×"); close.setAttribute("aria-label", "Close"); lb.appendChild(close);
+    if (LBX.mode === "gallery") {
+      var prev = el("button", "lb-nav lb-prev", "‹"); prev.setAttribute("aria-label", "Previous");
+      prev.onclick = function (e) { e.stopPropagation(); LBX.go(-1); };
+      var next = el("button", "lb-nav lb-next", "›"); next.setAttribute("aria-label", "Next");
+      next.onclick = function (e) { e.stopPropagation(); LBX.go(1); };
+      lb.appendChild(prev); lb.appendChild(next);
+    }
+    var stage = el("div", "lb-stage"); lb.appendChild(stage);
+    var node;
+    if (k === "video") {
+      node = el("video"); node.controls = true; node.src = mediaURL(id);
+      node.onerror = function () {   // many estate videos are .wmv/.avi → no in-browser codec
+        // G-11 poster-strip fallback: show the video's keyframes so the family can
+        // still SEE the moments even when the browser can't decode the stream.
+        var fb = el("div", "lb-fallback");
+        fb.appendChild(el("p", "notice", "This video can't be played in the browser — "
+          + "here are its moments. Use Export to view the full video."));
+        var strip = el("div", "stackstrip posterstrip"); fb.appendChild(strip);
+        node.replaceWith(fb);
+        getJSON("/api/video-frames?id=" + encodeURIComponent(id)).then(function (r) {
+          // The endpoint is retention-aware: it returns ONLY frames that still
+          // exist on disk (the poster itself is one of them when it survives), so
+          // an empty list means nothing remains → show a notice, never a broken thumb.
+          var frames = (r && r.frames) || [];
+          if (!frames.length) { strip.appendChild(el("p", "notice", "No preview frames remain for this video — use Export to view it.")); return; }
+          frames.forEach(function (fr) {
+            var cell = el("div", "sthumb");
+            var im = el("img"); lazyThumb(im, fr.id); im.alt = "";
+            im.addEventListener("click", function () { lightbox(fr.id, "image"); });   // just view the frame
+            cell.appendChild(im);
+            if (fr.offset != null) cell.appendChild(el("div", "slabel", esc(fmtSecs(fr.offset))));
+            strip.appendChild(cell);
+          });
+        }).catch(function () {
+          strip.appendChild(el("p", "notice", "Couldn't load preview frames."));
+        });
+      };
+      stage.appendChild(node);
+    } else if (k === "image") {
+      node = el("img"); node.src = mediaURL(id);
+      node.alt = (meta && meta.caption) || (meta && meta.name) || "";   // G-7 alt-text
+      stage.appendChild(node);
+      LBX.zoomCleanup = attachZoom(node, stage);   // click/scroll zoom + drag pan
+    } else if (k === "pdf") {
+      // F-11: the browser's built-in (itself sandboxed) PDF viewer — NOT sandbox=""
+      // (which blanks it). Same-origin /media; the page CSP allows frame-src 'self'.
+      node = document.createElement("iframe"); node.className = "lb-frame"; node.src = mediaURL(id);
+      node.setAttribute("title", (meta && meta.name) || "PDF preview");
+      stage.appendChild(node);
+    } else if (k === "doc") {
+      // Office formats render inline from the text layer the pipeline already
+      // extracted; anything with no view falls back to the download card.
+      stage.appendChild(docStage(id, meta));
+    } else {
+      // Legacy fallback (kind false/"iframe"): fully sandboxed frame for anything a
+      // caller still routes here. Defence-in-depth alongside the /media sandbox CSP.
+      node = document.createElement("iframe"); node.className = "lb-frame";
+      node.setAttribute("sandbox", ""); node.src = mediaURL(id);
+      stage.appendChild(node);
+    }
+    if (LBX.mode === "gallery")
+      stage.appendChild(el("div", "lb-counter", (LBX.index + 1) + " / " + LBX.list.length));
+    var panel = metaPanel(meta);
+    if (panel) { lb.appendChild(panel.btn); lb.appendChild(panel.el); }
+    if (actions && actions.length) {
+      var barEl = el("div", "lbactions");
+      actions.forEach(function (a) {
+        var b = el("button", "btn" + (a.cls ? " " + a.cls : ""), esc(a.label));
+        b.onclick = function (ev) { ev.stopPropagation(); a.onclick(lb); };
+        barEl.appendChild(b);
+      });
+      lb.appendChild(barEl);
+    }
+    var focusEl = (focusSel && lb.querySelector(focusSel)) || close;
+    setTimeout(function () { if (focusEl && focusEl.focus) focusEl.focus(); }, 0);
+  }
+
+  // Gallery engine. `list` is the caller's set (opaque rows); `resolve(row)` builds
+  // the descriptor for one. Single-item callers pass a 1-list → arrows are no-ops.
+  function openLightbox(opts) {
+    ensureLB();
+    LBX.trigger = document.activeElement;
+    LBX.list = (opts.list && opts.list.length) ? opts.list : [opts.item != null ? opts.item : null];
+    LBX.resolve = opts.resolve || function () { return opts.item || {}; };
+    LBX.index = Math.max(0, Math.min(opts.index || 0, LBX.list.length - 1));
+    LBX.mode = LBX.list.length > 1 ? "gallery" : "single";
+    LBX.go = function (delta) {
+      var n = LBX.list.length;
+      LBX.index = ((LBX.index + delta) % n + n) % n;
+      showLBItem(delta > 0 ? ".lb-next" : ".lb-prev");
+    };
+    document.body.classList.add("lb-open");
+    document.getElementById("lb").classList.add("show");
+    showLBItem();
+  }
+
+  // Single-item wrapper — preserves the old lightbox(id, kind, actions, meta) API.
+  function lightbox(id, kind, actions, meta) {
+    openLightbox({ list: [null], index: 0,
+      resolve: function () { return { id: id, kind: kind, actions: actions, meta: meta }; } });
+  }
+
+  // ── photo stacks (perceptual dup groups): badge + review strip ──
+  // A keeper that heads a surfaced stack gets a "⧉ N" badge; opening it shows
+  // every scan-cleared variant ordered by capture time, with full-size view and
+  // download for any member. The pipeline's pick is advisory — bursts have no
+  // machine-decidable winner, so the stack is the review surface, and members
+  // are view/download objects only (they skipped enrichment; no verbs).
+  function stackBadge(c, r) {
+    var b = el("div", "stackbadge", "⧉ " + r.stack.n);
+    b.title = r.stack.n + " similar shot(s) — click to review";
+    b.onclick = function (e) { e.stopPropagation(); openStack(r); };
+    c.appendChild(b);
+  }
+  function openStack(r) {
+    var st = r.stack; if (!st) return;
+    var frames = [{ src: r.id, name: r.name, capture_time: r.ts, keeper: true }]
+      .concat((st.members || []).map(function (m) {
+        return { src: m.src, name: m.name, capture_time: m.capture_time };
+      }));
+    frames.sort(function (a, b) {   // capture-time order, undated last, keeper wins ties
+      if (a.capture_time == null) return b.capture_time == null ? 0 : 1;
+      if (b.capture_time == null) return -1;
+      return a.capture_time < b.capture_time ? -1 : a.capture_time > b.capture_time ? 1 : (a.keeper ? -1 : 1);
+    });
+    var lb = ensureLB();
+    // Single-item modal (no ←/→ paging over the gallery); Escape still closes it and
+    // focus is restored to the trigger via closeLB.
+    LBX.trigger = document.activeElement; LBX.mode = "single"; LBX.list = null; LBX.go = null;
+    if (LBX.zoomCleanup) { LBX.zoomCleanup(); LBX.zoomCleanup = null; }
+    document.body.classList.add("lb-open");
+    lb.innerHTML = '<button class="x" aria-label="Close">×</button>';
+    var wrap = el("div", "stackwrap");
+    wrap.appendChild(el("div", "stackhead",
+      esc(st.n + " similar shot" + (st.n === 1 ? "" : "s") + " · " + pretty(st.kind))));
+    var mainImg = el("img", "stackmain");
+    wrap.appendChild(mainImg);
+    var ctl = el("div", "stackctl");
+    var meta = el("div", "stackmeta");
+    var dl = el("a", "btn", "Download");
+    ctl.appendChild(meta); ctl.appendChild(dl); wrap.appendChild(ctl);
+    var strip = el("div", "stackstrip");
+    function show(f) {
+      mainImg.src = mediaURL(f.src);
+      meta.innerHTML = "<strong>" + esc(f.name) + "</strong>" +
+        (f.capture_time ? ' <span class="when">' + esc(String(f.capture_time).replace("T", " ")) + "</span>" : "") +
+        (f.keeper ? ' <span class="badge">Delivered pick</span>' : "") +
+        (st.suggested && f.name === st.suggested && !f.keeper ? ' <span class="badge sug">Suggested</span>' : "");
+      dl.href = mediaURL(f.src); dl.setAttribute("download", f.name || "photo");
+      strip.querySelectorAll(".sthumb").forEach(function (t, i) {
+        t.classList.toggle("active", frames[i] === f);
+      });
+    }
+    frames.forEach(function (f) {
+      var t = el("div", "sthumb");
+      var im = el("img"); lazyThumb(im, f.src); im.alt = f.name || "";
+      t.appendChild(im);
+      t.appendChild(el("div", "slabel",
+        esc(String(f.capture_time || "").slice(11, 19) || basename(f.name)) +
+        (f.keeper ? " ●" : "")));
+      t.title = f.name + (f.keeper ? " (delivered pick)" : "");
+      t.onclick = function (e) { e.stopPropagation(); show(f); };
+      strip.appendChild(t);
+    });
+    wrap.appendChild(strip);
+    lb.appendChild(wrap);
+    show(frames.filter(function (f) { return f.keeper; })[0] || frames[0]);
+    lb.classList.add("show");
+  }
+
+  // Open the lightbox on one grid item, threading the WHOLE virtual set so ←/→ page
+  // through it (F-10) even across tiles that aren't mounted. `ctx` = {win, grid};
+  // win.getRows() is the live full set (a virtualized grid mutates it via setRows).
+  function openCardLightbox(r, ctx) {
+    var win = ctx && ctx.win;
+    var list = win ? win.getRows() : (ctx && ctx.list) ? ctx.list : [r];
+    var grid = ctx && ctx.grid;
+    var index = list.indexOf(r); if (index < 0) index = 0;
+    openLightbox({ list: list, index: index,
+      resolve: function (row) { return galleryDescriptor(row, grid, win); } });
+  }
+  // Descriptor for one gallery row: the full row is the metadata panel source. `win`
+  // lets a discard-from-lightbox drop the row from the virtual set even when its tile
+  // isn't currently mounted (findCard would return null in that case).
+  function galleryDescriptor(row, grid, win) {
+    if (!row) return {};
+    var card = findCard(grid, row.id);
+    if (row.kind === "video") return { id: row.id, kind: "video", actions: videoActions(row, card, win), meta: row };
+    return { id: row.id, kind: "image", actions: photoActions(row, card, win), meta: row };
+  }
+
+  // A photo card, shared by photoGrid + mediaGrid: caption is used for alt-text
+  // (G-7) and the lightbox metadata; a favorite gets a ★, a source shows a chip.
+  function photoCard(r, ctx) {
+    var c = el("div", "card");
+    var img = el("img"); lazyThumb(img, r.id);             // F-5 lazy thumbnail
+    img.alt = r.caption || r.name || "";                 // G-7 alt-text
+    img.onclick = function () { openCardLightbox(r, ctx); };
+    c.appendChild(img);
+    addPick(c, r.id);
+    if (r.stack) stackBadge(c, r);
+    if (r.favorite) c.appendChild(el("div", "favbadge", "★"));   // G-1 owner favorite
+    if (r.favorite_curation) c.appendChild(el("div", "starbadge", "★"));  // curation star (examiner)
+    if (r.note) {                                                // curation note indicator
+      var nb = el("div", "notebadge", "✎"); nb.title = r.note; c.appendChild(nb);
+    }
+    var metaBits = [r.scene, prettyPlace(r.place)].filter(Boolean).join(" · ");
+    c.appendChild(el("div", "cap", '<span class="nm">' + esc(r.name) + '</span><span class="meta">' +
+      esc(metaBits) + "</span>" +
+      (r.source ? '<span class="srcchip">' + esc(pretty(r.source)) + "</span>" : "")));
+    return c;
+  }
+
+  // ── windowed grid (virtual scroller, F-4) ──
+  // Mounts only the tiles near the viewport so DOM node count stays bounded no matter
+  // how large the set is. Tiles are absolutely positioned inside a spacer sized to the
+  // full set's height; on (rAF-throttled) window scroll/resize the visible row range is
+  // recomputed and only that slice (+overscan) is mounted. `makeTile(row,index)` builds
+  // one card (with lazyThumb etc.); mounted tiles are keyed by index and evicted (their
+  // thumbs unobserved) when they leave the window. Interop:
+  //   • pager Load-more → setRows(concatenatedRows) extends the virtual set in place.
+  //   • lazyThumb/IntersectionObserver → a mounted tile's <img> registers as usual; an
+  //     evicted tile is unobserved so the observer's target set stays bounded.
+  //   • lightbox ←/→ → callers thread win.getRows() (the FULL virtual set), never the DOM.
+  // Degrades to a plain CSS grid below `plainMax` rows (tiny sets skip the math). Every
+  // live controller is registered in GRIDS so render() can destroy stale ones (their
+  // window scroll/resize listeners) before rebuilding the page.
+  var GRIDS = [];
+  function destroyGrids() {
+    GRIDS.forEach(function (g) { try { g.destroy(); } catch (e) { /* detached */ } });
+    GRIDS = [];
+  }
+  function windowGrid(container, rows, makeTile, opts) {
+    opts = opts || {};
+    var TILE_MIN = opts.tileMin || 150, GAP = opts.gap || 12, OVERSCAN = 2;
+    var plainMax = opts.plainMax || 60;
+    var wrap = el("div", "vgrid");
+    container.appendChild(wrap);
+    var st = { rows: rows || [], cols: 1, tileW: TILE_MIN, rowH: opts.rowH || 188,
+               mounted: {}, measured: false, plain: false, raf: 0, dead: false };
+
+    function unlazy(tile) {
+      var imgs = tile.querySelectorAll("img[data-src]");
+      for (var i = 0; i < imgs.length; i++) {
+        if (_thumbObserver && !imgs[i]._lt_loaded) _thumbObserver.unobserve(imgs[i]);
+        reclaimThumbSlot(imgs[i]);
+      }
+    }
+    function clearMounted() {
+      Object.keys(st.mounted).forEach(function (k) { unlazy(st.mounted[k]); st.mounted[k].remove(); });
+      st.mounted = {};
+    }
+    function layout() {
+      var w = wrap.clientWidth || container.clientWidth || 0;
+      st.cols = Math.max(1, Math.floor((w + GAP) / (TILE_MIN + GAP)));  // matches CSS auto-fill
+      st.tileW = st.cols > 0 ? (w - (st.cols - 1) * GAP) / st.cols : w;
+    }
+    // Plain render for tiny sets: reuse the responsive .grid CSS, no windowing math.
+    function renderPlain() {
+      clearMounted();
+      wrap.className = "grid"; wrap.style.height = ""; wrap.innerHTML = "";
+      st.rows.forEach(function (r, i) { wrap.appendChild(makeTile(r, i)); });
+    }
+    function renderWindow() {
+      if (st.dead) return;
+      layout();
+      var n = st.rows.length, stepY = st.rowH + GAP;
+      var totalRows = Math.ceil(n / st.cols);
+      wrap.style.height = (totalRows > 0 ? totalRows * st.rowH + (totalRows - 1) * GAP : 0) + "px";
+      var top = wrap.getBoundingClientRect().top + window.pageYOffset;
+      var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+      var y0 = window.pageYOffset - top, y1 = y0 + vh;
+      var firstRow = Math.max(0, Math.floor(y0 / stepY) - OVERSCAN);
+      var lastRow = Math.min(totalRows - 1, Math.floor(y1 / stepY) + OVERSCAN);
+      var need = {};
+      for (var r = firstRow; r <= lastRow; r++) {
+        for (var c = 0; c < st.cols; c++) {
+          var idx = r * st.cols + c;
+          if (idx >= n) break;
+          need[idx] = 1;
+          var tile = st.mounted[idx];
+          if (!tile) {
+            tile = makeTile(st.rows[idx], idx); tile.classList.add("vtile");
+            wrap.appendChild(tile); st.mounted[idx] = tile;
+          }
+          tile.style.left = (c * (st.tileW + GAP)) + "px";
+          tile.style.top = (r * stepY) + "px";
+          tile.style.width = st.tileW + "px";
+        }
+      }
+      Object.keys(st.mounted).forEach(function (k) {
+        if (!need[k]) { unlazy(st.mounted[k]); st.mounted[k].remove(); delete st.mounted[k]; }
+      });
+      // Measure the real tile height once (captions are clipped → height is constant
+      // enough) and re-layout if it differs materially from the estimate.
+      if (!st.measured) {
+        var keys = Object.keys(st.mounted);
+        if (keys.length) {
+          var h = st.mounted[keys[0]].offsetHeight;
+          st.measured = true;
+          if (h && Math.abs(h - st.rowH) > 2) { st.rowH = h; renderWindow(); }
+        }
+      }
+    }
+    function schedule() {
+      if (st.plain || st.dead || st.raf) return;
+      st.raf = window.requestAnimationFrame(function () { st.raf = 0; renderWindow(); });
+    }
+    function apply() {
+      if (st.dead) return;
+      st.plain = st.rows.length <= plainMax && !opts.forceVirtual;
+      clearMounted();
+      if (st.plain) { renderPlain(); }
+      else {
+        // Full reset: drop any leftover DOM (e.g. untracked plain-mode tiles from a
+        // previous, smaller set) before the windowed renderer takes over.
+        wrap.className = "vgrid"; wrap.style.height = ""; wrap.innerHTML = ""; st.mounted = {};
+        renderWindow();
+      }
+    }
+    function onResize() { st.measured = false; apply(); }
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", onResize);
+
+    var ctrl = {
+      el: wrap,
+      getRows: function () { return st.rows; },
+      setRows: function (newRows) { st.rows = newRows || []; st.measured = false; apply(); },
+      removeIds: function (ids) {
+        var set = {}; (ids || []).forEach(function (i) { set[i] = 1; });
+        st.rows = st.rows.filter(function (r) { return !set[r.id]; });
+        st.measured = false; apply();
+      },
+      refresh: function () { st.measured = false; apply(); },   // re-measure after unhide
+      destroy: function () {
+        st.dead = true;
+        window.removeEventListener("scroll", schedule);
+        window.removeEventListener("resize", onResize);
+        if (st.raf) window.cancelAnimationFrame(st.raf);
+        clearMounted();
+      },
+    };
+    GRIDS.push(ctrl);
+    apply();
+    return ctrl;
+  }
+
+  // ── reusable photo grid (Photos, person detail, place detail) ──
+  // Virtualized (F-4): returns a window controller ({el,getRows,setRows,removeIds,…}).
+  // `ctx` threads the controller so a card's click reads the CURRENT full row set for
+  // the lightbox (win.getRows(), not a captured array) and verbs can removeIds() it.
+  function photoGrid(container, rows) {
+    var ctx = {};
+    var ctrl = windowGrid(container, rows, function (r) { return photoCard(r, ctx); });
+    ctx.grid = ctrl.el; ctx.win = ctrl;
+    return ctrl;
+  }
+
+  // Person/scene facet chips for a video card (G-11). person → filter to that
+  // person; scene → filter to that scene. All estate text esc()'d; the chip label
+  // is a metadata affordance (both roles).
+  function videoChips(v) {
+    var persons = v.persons || [], scenes = v.scenes || [];
+    if (!persons.length && !scenes.length) return null;
+    var wrap = el("div", "vchips");
+    persons.forEach(function (p) {
+      var chip = el("span", "vchip who", esc(p.name || p.person_id));
+      chip.title = "Show videos with " + (p.name || p.person_id);
+      chip.addEventListener("click", function (e) {
+        e.stopPropagation();
+        go({ page: "photos", media: "videos", vperson: p.person_id });
+      });
+      wrap.appendChild(chip);
+    });
+    scenes.forEach(function (s) {
+      var chip = el("span", "vchip scene", esc(pretty(s)));
+      chip.title = "Show " + pretty(s) + " videos";
+      chip.addEventListener("click", function (e) {
+        e.stopPropagation();
+        go({ page: "photos", media: "videos", vscene: s });
+      });
+      wrap.appendChild(chip);
+    });
+    return wrap;
+  }
+
+  // A video tile: keyframe poster + ▶, click plays the source video (#3).
+  function videoCard(v, ctx) {
+    var c = el("div", "card vidcard");
+    var img = el("img"); lazyThumb(img, v.poster); img.alt = v.name || "";   // F-5 lazy poster
+    img.onclick = function () { openCardLightbox(v, ctx); };
+    c.appendChild(img);
+    c.appendChild(el("div", "playbadge", "▶"));
+    addPick(c, v.id);
+    c.appendChild(el("div", "cap", '<span class="nm">' + esc(v.name) + '</span><span class="meta">video</span>'));
+    var chips = videoChips(v);       // G-11 person/scene chips
+    if (chips) c.appendChild(chips);
+    return c;
+  }
+
+  // Mixed grid of photo + video items (kind:"video" → video tile, else photo).
+  // Virtualized (F-4) — returns the same window controller as photoGrid.
+  function mediaGrid(container, items) {
+    var ctx = {};
+    var ctrl = windowGrid(container, items, function (r) {
+      return r.kind === "video" ? videoCard(r, ctx) : photoCard(r, ctx);
+    });
+    ctx.grid = ctrl.el; ctx.win = ctrl;
+    return ctrl;
+  }
+
+  function exportCollection(kind, key, label) {
+    doVerb("/api/export/collection", { kind: kind, key: key },
+      "Exported all of " + (label || key));
+  }
+
+  // Drop a discarded row from whatever view owns it: the page's in-place hook
+  // (Photos) first, else the virtual grid's set (person/places — works even if the
+  // tile isn't mounted), else the bare card element.
+  function dropDiscarded(ids, card, win) {
+    if (dropItems(ids)) return;
+    if (win) { win.removeIds(ids); return; }
+    if (card) card.remove();
+  }
+
+  // Curation-layer actions (examiner-first): Star / Note / Add to collection. Shared
+  // by the photo + video lightbox. All operator text is esc()'d at the metadata sink
+  // (metaRows) and ids go through encodeURIComponent in the verb URLs. `row` is the
+  // live row so we can flip its overlay keys optimistically after a verb.
+  function curationActions(row) {
+    if (!EXAMINER) return [];
+    var id = row.id;
+    var acts = [];
+    acts.push({ label: row.favorite_curation ? "★ Unstar" : "☆ Star",
+      onclick: function () {
+        var on = !row.favorite_curation;
+        doVerb("/api/favorite", { id: id, on: on }, on ? "Starred" : "Unstarred")
+          .then(function (x) { if (x) row.favorite_curation = on; });
+      } });
+    acts.push({ label: row.note ? "Edit note" : "Add note",
+      onclick: function () {
+        var text = prompt("Note for this item:", row.note || "");
+        if (text == null) return;
+        if (!text.trim()) {
+          doVerb("/api/note/clear", { id: id }, "Note cleared")
+            .then(function (x) { if (x) row.note = null; });
+        } else {
+          doVerb("/api/note/set", { id: id, text: text }, "Note saved")
+            .then(function (x) { if (x) row.note = text; });
+        }
+      } });
+    acts.push({ label: "Add to collection", onclick: function () { addToCollection([id]); } });
+    return acts;
+  }
+
+  // Let the examiner pick an existing collection or create a new one, then add
+  // `ids` to it. A labeled dropdown + "or type a new name" field in the shared
+  // pickmodal (#14) — was a number-to-pick-from-a-menu prompt() dialog, easy to
+  // mistype and inconsistent with "Merge into…"'s in-app modal.
+  function addToCollection(ids) {
+    getJSON("/api/collections").then(function (d) {
+      var cols = (d && d.collections) || [];
+      var body = el("div");
+      body.appendChild(el("p", "pickmodal-note",
+        esc("Add " + ids.length + " item(s) to a collection.")));
+      var sel = el("select", "pickmodal-sel");
+      sel.appendChild(new Option("— New collection —", ""));
+      cols.forEach(function (c) { sel.appendChild(new Option(c.title, c.slug)); });   // textContent-safe
+      var input = el("input", "pickmodal-sel");
+      input.type = "text"; input.placeholder = "New collection name";
+      function sync() { input.style.display = sel.value ? "none" : ""; }
+      sel.onchange = sync; sync();
+      body.appendChild(sel); body.appendChild(input);
+      pickmodal("Add to collection", body, {
+        onConfirm: function (close) {
+          var slug = sel.value, name = input.value.trim();
+          if (slug) {
+            var picked = cols.filter(function (c) { return c.slug === slug; })[0];
+            close();
+            doVerb("/api/collection/add", { slug: slug, ids: ids }, "Added to " + (picked ? picked.title : slug));
+          } else if (name) {
+            close();
+            postJSON("/api/collection/create", { title: name }).then(function (res) {
+              if (!res.ok) { toast((res.j && res.j.error) || "Couldn't create collection"); return; }
+              doVerb("/api/collection/add", { slug: res.j.slug, ids: ids }, "Added to " + name);
+            });
+          } else {
+            toast("Pick a collection or type a new name.");
+          }
+        },
+      });
+      try { sel.focus(); } catch (e) { /* no focus */ }
+    }).catch(function (e) { toast("Couldn't load collections: " + (e && e.message)); });
+  }
+
+  // Per-photo actions shown in the zoom/lightbox (#13).
+  function photoActions(r, card, win) {
+    var acts = [
+      { label: "Export", onclick: function () { doVerb("/api/export", { items: [r.id] }, "Exported " + r.name); } },
+      { label: "Discard", cls: "danger", onclick: function (lb) {
+        // Single-item discard is immediate (no confirm) — it is reversible from
+        // History. Only multi-item/group discards prompt.
+        doVerb("/api/banish", { src: r.id }, "Discarded").then(function (x) {
+          if (x) { dropDiscarded([r.id], card, win); if (lb) closeLB(); }
+        });
+      } },
+    ];
+    // #19: the Correspondence "Scanned letters & documents" grid surfaces images
+    // the scene classifier CLIP-tagged as a scanned document/letter — sometimes
+    // wrongly (an ordinary photo). Discard would hide it entirely; this instead
+    // clears the tag (a decisions overlay, not a scene_index mutation) so it
+    // rejoins Photos. Only meaningful on that grid.
+    if (EXAMINER && CTX.page === "correspondence") {
+      acts.push({ label: "Not a document", onclick: function (lb) {
+        doVerb("/api/release/scanned", { id: r.id }, "Released to Photos").then(function (x) {
+          if (x) { dropDiscarded([r.id], card, win); if (lb) closeLB(); }
+        });
+      } });
+    }
+    // Move verb (Phase 1, person view only): on a person_detail member, re-file this
+    // photo under a different person. The item leaves THIS person's grid on success.
+    if (EXAMINER && CTX.page === "people" && Q.person) {
+      acts.push({ label: "Move to person…", onclick: function (lb) {
+        pickPerson("Move this photo to which person?", Q.person, function (pid) {
+          doVerb("/api/move", { view: "person", src: r.id, to: pid, from: Q.person }, "Moved to person")
+            .then(function (x) {
+              if (x) { dropDiscarded([r.id], card, win); if (lb) closeLB(); }
+            });
+        }); } });
+    }
+    // Scene-move (Phase 1.5): relabel this gallery photo's scene facet (a relabel
+    // WITHIN the gallery, never a cross-section re-file). Photos gallery only.
+    if (EXAMINER && CTX.page === "photos") {
+      acts.push({ label: "Move to scene…", onclick: function (lb) {
+        pickScene("Move this photo to which scene?", r.scene, function (cat) {
+          doVerb("/api/move", { view: "scene", src: r.id, to: cat }, "Moved to scene")
+            .then(function (x) {
+              if (x) { if (lb) closeLB(); render(); }
+            });
+        }); } });
+      // Event-move (Phase 2): re-file this gallery photo into a different event
+      // album; the events view's live counts shift on success.
+      acts.push({ label: "Move to album…", onclick: function (lb) {
+        pickAlbum("Move this photo to which album?", r.event_id, function (aid) {
+          doVerb("/api/move", { view: "event", src: r.id, to: aid }, "Moved to album")
+            .then(function (x) {
+              if (x) { if (lb) closeLB(); render(); }
+            });
+        }); } });
+    }
+    curationActions(r).forEach(function (a) { acts.push(a); });
+    if (r.stack) acts.push({ label: "Similar shots (" + r.stack.n + ")", onclick: function () { openStack(r); } });
+    return acts;
+  }
+
+  // Per-video actions (Export, + examiner Discard) shared by the tile and the
+  // lightbox so paging through a mixed gallery keeps the verbs on video frames.
+  function videoActions(v, card, win) {
+    var acts = [{ label: "Export", onclick: function () { doVerb("/api/export", { items: [v.id] }, "Exported " + v.name); } }];
+    if (EXAMINER) acts.push({ label: "Discard", cls: "danger", onclick: function (lb) {
+      doVerb("/api/banish", { src: v.id }, "Discarded").then(function (x) {
+        if (x) { dropDiscarded([v.id], card, win); if (lb) closeLB(); }
+      });
+    } });
+    curationActions(v).forEach(function (a) { acts.push(a); });
+    return acts;
+  }
+
+  // ── pages ──
+  var P = {};
+
+  P.overview = function (main, d) {
+    head(main, (d.case_id || "") + " · Family Archive", "The archive is sorted and waiting.",
+      "Everything we recovered, organized so you can find what matters.");
+    var g = d.export_gate || {};
+    if (g.delivery_blocked) main.appendChild(el("div", "banner crit",
+      "<strong>Delivery blocked.</strong> " + esc((g.reasons || []).join("; ")) + " — examiner review only."));
+    var c = d.counts || {}, tiles = el("div", "tiles");
+    [["photos", "Photos & Videos", "photos"], ["people", "People", "people"], ["places", "Places", "places"],
+     ["documents", "Documents", "documents"], ["emails", "Emails", "emails"],
+     ["audio", "Recordings", "recordings"]].forEach(function (p) {
+      var t = el("a", "tile"); t.href = "/" + p[2];
+      t.innerHTML = '<span class="n">' + num(c[p[0]]) + '</span><span class="l">' + p[1] + '</span>';
+      tiles.appendChild(t);
+    });
+    main.appendChild(tiles);
+    onThisDayCard(main, d.on_this_day);   // G-8: photos taken on today's date, across years
+    transparencyCard(main);               // G-14: dedup/set-aside reassurance (numbers only)
+    var vd = d.vital_docs;
+    if (vd && vd.available) {  // G-2: compact vital-documents tally + type list
+      var vcard = el("section", "vitals-card");
+      var vhead = el("div", "vitals-card-head");
+      vhead.appendChild(el("h2", null, "Vital documents"));
+      vhead.appendChild(el("a", "vitals-more", "See all on Documents →")).href = "/documents";
+      vcard.appendChild(vhead);
+      vcard.appendChild(el("p", "vitals-tally",
+        esc(num(vd.found_count) + " of " + num(vd.total_count) + " key document types found")));
+      var vlist = el("ul", "vitals-list");
+      (vd.types || []).forEach(function (t) {
+        var li = el("li", "vitals-item " + (t.found ? "found" : "missing"));
+        li.innerHTML = '<span class="vmark">' + (t.found ? "✓" : "—") + '</span>' +
+          '<span class="vlabel">' + esc(t.label) + '</span>';
+        vlist.appendChild(li);
+      });
+      vcard.appendChild(vlist);
+      main.appendChild(vcard);
+    }
+    if ((d.ranked_top || []).length) {
+      main.appendChild(el("h2", null, "Most significant"));
+      var box = el("div", "ranked");
+      d.ranked_top.slice(0, 18).forEach(function (r) {
+        var row = el("div", "rkcard" + (r.target ? " clickable" : ""));
+        var thumbs = r.thumbs && r.thumbs.length ? r.thumbs : (r.thumb ? [r.thumb] : []);
+        var media;
+        if (thumbs.length) {  // #5: 1 medium + up to 4 small previews
+          var small = thumbs.slice(1, 5).map(function (id) {
+            return '<img loading="lazy" src="' + thumbURL(id) + '">';
+          }).join("");
+          media = '<div class="rk-medium"><img loading="lazy" src="' + thumbURL(thumbs[0]) + '"></div>' +
+            (small ? '<div class="rk-small">' + small + "</div>" : "");
+        } else {
+          media = '<span class="ticon">' + typeIcon(r.type) + "</span>";  // doc/email/audio → icon
+        }
+        row.innerHTML = '<div class="rk-media">' + media + '</div><div class="rk-body">' +
+          '<div class="rk-label">' + esc(r.label || r.person_id || "item") + "</div>" +
+          '<span class="badge">' + esc(pretty(r.type)) + "</span></div>";
+        if (r.target) { row.onclick = function (e) { if (e.target.tagName !== "BUTTON") go(r.target); }; keyable(row, "button"); }
+        if (EXAMINER && r.key) {  // #12 demote (ranking only — not a discard)
+          var dm = el("button", "rk-demote", "Remove");
+          dm.title = "Remove from Most Significant (keeps the item; ranking only)";
+          dm.onclick = function (e) {
+            e.stopPropagation();
+            doVerb("/api/demote", { key: r.key, label: r.label }, "Removed from Most Significant")
+              .then(function (x) { if (x) row.remove(); });
+          };
+          row.appendChild(dm);
+        }
+        box.appendChild(row);
+      });
+      main.appendChild(box);
+    }
+  };
+
+  // Inline SVG type icons (no CDN — Zone-B safe) for ranked items without a thumb.
+  function typeIcon(t) {
+    var p = {
+      document: '<path d="M6 2h8l4 4v16H6z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M14 2v4h4" fill="none" stroke="currentColor" stroke-width="1.6"/>',
+      email: '<rect x="3" y="5" width="18" height="14" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4 6l8 6 8-6" fill="none" stroke="currentColor" stroke-width="1.6"/>',
+      audio: '<path d="M9 18V7l9-2v11" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="7" cy="18" r="2.2" fill="currentColor"/><circle cx="16" cy="16" r="2.2" fill="currentColor"/>',
+      scene: '<rect x="3" y="4" width="18" height="16" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8.5" cy="9.5" r="1.8" fill="currentColor"/><path d="M5 18l5-5 4 3 3-2 4 4" fill="none" stroke="currentColor" stroke-width="1.6"/>'
+    };
+    var body = p[t] || '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.6"/>';
+    return '<svg viewBox="0 0 24 24" width="26" height="26">' + body + "</svg>";
+  }
+
+  P.photos = function (main, data) {
+    var controls = head(main, "Photos & Videos", "Photos & Videos",
+      "Filter, then select to export or discard.");
+    // Curation: when a collection filter is active (?collection_curation=<slug>),
+    // show a context bar with a back link + Export-this-collection button. The slug
+    // is a safe lookup key; the human title is fetched (esc()'d) for the label.
+    if (Q.collection_curation) {
+      var cbar = el("div", "collbar");
+      backLink(cbar, "All collections", { page: "collections" });
+      var clabel = el("span", "collname", esc(Q.collection_curation));
+      cbar.appendChild(clabel);
+      var cexp = el("button", "btn primary", "Export this collection");
+      cexp.onclick = function () {
+        exportCollection("curation_collection", Q.collection_curation, Q.collection_curation);
+      };
+      cbar.appendChild(cexp);
+      main.appendChild(cbar);
+      getJSON("/api/collections").then(function (d) {
+        (d.collections || []).forEach(function (c) {
+          if (c.slug === Q.collection_curation) clabel.textContent = c.title;
+        });
+      }).catch(function () {});
+    }
+    // Pagination model (docs/specs/family-archive-pagination.md, F-3):
+    //  • Sort (newest/oldest) + date range are SERVER params — so the oldest tail
+    //    and a given date window are reachable without paging through everything.
+    //  • Scene / Place / Event / media (photo/video) filter the LOADED pages
+    //    client-side (Load-more loads more if a filter's tail isn't loaded yet).
+    //  • The 2,000-photo cliff (shown.slice(0,2000)) is gone.
+    var loaded = [], total = (data && data.total) || 0, videos = null, shown = [];
+    var videoFacets = null;   // G-11: distinct persons/scenes for the whole video set
+
+    var selMedia = el("select");
+    [["", "All"], ["photos", "Photos"], ["videos", "Videos"]].forEach(function (o) { selMedia.appendChild(new Option(o[1], o[0])); });
+    // G-11 video facet filters (person / scene). Server-side params on /api/videos —
+    // hidden until the Videos view is active AND the whole-set facets carry data.
+    var vpLabel = el("span", "flabel", "Who"); var selVPerson = el("select");
+    var vsLabel = el("span", "flabel", "Video scene"); var selVScene = el("select");
+    vpLabel.style.display = selVPerson.style.display = "none";
+    vsLabel.style.display = selVScene.style.display = "none";
+    var selEvent = el("select"); var evLabel = el("span", "flabel", "Event");
+    var selScene = el("select"); var selPlace = el("select");
+    var selSort = el("select");
+    [["newest", "Newest first"], ["oldest", "Oldest first"]].forEach(function (o) { selSort.appendChild(new Option(o[1], o[0])); });
+    var dFrom = el("input"); dFrom.type = "date"; dFrom.title = "From date";
+    var dTo = el("input"); dTo.type = "date"; dTo.title = "To date";
+    // G-1 owner-gallery controls. Album is a SERVER filter (narrows the full set
+    // before paging); Favorites/Hidden are SERVER params too. All three are hidden
+    // until the whole-set facets say they have data (source-conditional).
+    var albLabel = el("span", "flabel", "Album"); var selAlbum = el("select");
+    var favBtn = el("button", "btn chip", "★ Favorites");
+    var hidBtn = el("button", "btn chip", "Hidden");   // examiner toggle only
+    // Curation-layer Starred chip (examiner): a virtual filter over ?favorite_curation=1.
+    // Distinct from the owner-gallery Favorites chip above.
+    var starBtn = el("button", "btn chip", "★ Starred");
+    albLabel.style.display = selAlbum.style.display = favBtn.style.display
+      = hidBtn.style.display = starBtn.style.display = "none";
+    if (Q.favorite === "1") favBtn.classList.add("active");
+    if (Q.hidden === "1") hidBtn.classList.add("active");
+    if (Q.favorite_curation === "1") starBtn.classList.add("active");
+    if (Q.media) selMedia.value = Q.media;
+    if (Q.sort) selSort.value = Q.sort;
+    if (Q.date_from) dFrom.value = Q.date_from;
+    if (Q.date_to) dTo.value = Q.date_to;
+    var expBtn = el("button", "btn", "Export filtered");
+    controls.appendChild(el("span", "flabel", "Show")); controls.appendChild(selMedia);
+    controls.appendChild(vpLabel); controls.appendChild(selVPerson);   // G-11 video person filter
+    controls.appendChild(vsLabel); controls.appendChild(selVScene);    // G-11 video scene filter
+    controls.appendChild(evLabel); controls.appendChild(selEvent);
+    controls.appendChild(el("span", "flabel", "Scene")); controls.appendChild(selScene);
+    controls.appendChild(el("span", "flabel", "Place")); controls.appendChild(selPlace);
+    controls.appendChild(albLabel); controls.appendChild(selAlbum);
+    controls.appendChild(el("span", "flabel", "Sort")); controls.appendChild(selSort);
+    controls.appendChild(el("span", "flabel", "From")); controls.appendChild(dFrom);
+    controls.appendChild(el("span", "flabel", "To")); controls.appendChild(dTo);
+    controls.appendChild(favBtn);
+    if (EXAMINER) { controls.appendChild(hidBtn); controls.appendChild(starBtn); }
+    controls.appendChild(expBtn);
+
+    // Whole-set facets from the /api/photos payload drive the owner-gallery
+    // controls' visibility + album options (favorites/albums may live in the
+    // un-loaded tail, so this uses the server's full-set summary, not loaded rows).
+    function applyFacets(f) {
+      f = f || {};
+      var favN = f.favorites || 0, hidN = f.hidden || 0, albums = f.albums || [];
+      favBtn.style.display = favN ? "" : "none";
+      favBtn.textContent = "★ Favorites (" + num(favN) + ")";
+      if (albums.length) {
+        fillSelect(selAlbum, "All albums", albums);
+        if (Q.album) selAlbum.value = Q.album;
+        albLabel.style.display = selAlbum.style.display = "";
+      } else {
+        albLabel.style.display = selAlbum.style.display = "none";
+      }
+      hidBtn.style.display = (EXAMINER && hidN) ? "" : "none";
+      hidBtn.textContent = "Hidden (" + num(hidN) + ")";
+      // Curation Starred chip: shown to the examiner when the star filter is active
+      // (so it can be turned off even from an empty result) or any starred items exist.
+      var starN = f.starred || 0;
+      starBtn.style.display = (EXAMINER && (starN || Q.favorite_curation === "1")) ? "" : "none";
+      starBtn.textContent = "★ Starred" + (starN ? " (" + num(starN) + ")" : "");
+    }
+
+    // G-11: populate the video person/scene selects from the whole-set video facets
+    // (the /api/videos payload, same for every filter), then sync their visibility.
+    function applyVideoFacets(f) {
+      f = f || {};
+      var persons = f.persons || [], scenes = f.scenes || [];
+      selVPerson.innerHTML = "";
+      selVPerson.appendChild(new Option("Anyone", ""));            // text node → safe
+      persons.forEach(function (p) { selVPerson.appendChild(new Option(p.name || p.person_id, p.person_id)); });
+      if (Q.vperson) selVPerson.value = Q.vperson;
+      fillSelect(selVScene, "All scenes", scenes, pretty);
+      if (Q.vscene) selVScene.value = Q.vscene;
+      syncVideoControls();
+    }
+    // Video facet controls belong to the Videos view only (persons/scenes don't
+    // apply to photos); hidden when the facets carry no data (pre-video_index case).
+    function syncVideoControls() {
+      var isVid = selMedia.value === "videos", f = videoFacets || {};
+      var hasP = (f.persons || []).length, hasS = (f.scenes || []).length;
+      vpLabel.style.display = selVPerson.style.display = (isVid && hasP) ? "" : "none";
+      vsLabel.style.display = selVScene.style.display = (isVid && hasS) ? "" : "none";
+    }
+    // Server-side video load: ?person=/?scene= narrow the FULL set before paging,
+    // so a filtered tail is reachable. Facets are captured from the first page.
+    function loadVideos() {
+      var qp = [];
+      if (Q.vperson) qp.push("person=" + encodeURIComponent(Q.vperson));
+      if (Q.vscene) qp.push("scene=" + encodeURIComponent(Q.vscene));
+      loadAllRows("/api/videos" + (qp.length ? "?" + qp.join("&") : ""),
+        function (v) { videos = v; rebuildFilters(); draw(); },
+        function (first) {   // whole-set facets (stable across filters)
+          if (!videoFacets) { videoFacets = (first && first.facets) || {}; applyVideoFacets(videoFacets); }
+        });
+    }
+
+    var holder = el("div"); main.appendChild(holder);
+    // Persistent count-note + empty-notice + a single virtualized grid: filter changes
+    // re-window in place (mgrid.setRows) instead of tearing down and rebuilding, so
+    // scroll and a late /api/videos merge don't yank the grid (F-8).
+    var noteEl = el("p", "count-note"); holder.appendChild(noteEl);
+    var emptyEl = el("p", "notice", "No photographs match these filters.");
+    emptyEl.style.display = "none"; holder.appendChild(emptyEl);
+    var mgrid = mediaGrid(holder, []);
+    marqueeSelect(controls, holder, ".card", selPick);  // drag-select photos/videos
+
+    // Move Phase 2: the event dropdown is a SERVER filter keyed on album_id, so its
+    // options come from the whole-set /api/events list (not the filtered loaded
+    // rows) and its title labels survive when ?event= narrows the gallery.
+    var eventTitles = {};
+    function loadEventAlbums() {
+      getJSON("/api/events").then(function (albs) {
+        albs = albs || [];
+        selEvent.innerHTML = "";
+        selEvent.appendChild(new Option("All events", ""));   // text node → safe
+        albs.forEach(function (a) {
+          var aid = String(a.album_id);
+          eventTitles[aid] = a.title;
+          selEvent.appendChild(new Option((a.title || aid) + " · " + num(a.count) + " photos", aid));
+        });
+        if (Q.event) selEvent.value = Q.event;
+        var has = albs.length > 0;
+        evLabel.style.display = selEvent.style.display = has ? "" : "none";
+      }).catch(function () { /* no albums → control stays hidden */ });
+    }
+
+    function rebuildFilters() {
+      var scenes = {}, places = {};
+      loaded.forEach(function (r) {
+        if (r.scene) scenes[r.scene] = 1; if (r.place) places[r.place] = 1;
+      });
+      (videos || []).forEach(function (v) { if (v.place) places[v.place] = 1; });
+      fillSelect(selScene, "All scenes", Object.keys(scenes).sort(), pretty);
+      fillSelect(selPlace, "All places", Object.keys(places).sort(), prettyPlace);
+      if (Q.scene) selScene.value = Q.scene; if (Q.place) selPlace.value = Q.place;
+    }
+
+    function draw() {
+      var m = selMedia.value, sc = selScene.value, pl = selPlace.value;
+      var pool = loaded.slice();
+      if (m !== "photos" && videos) pool = pool.concat(videos);   // include videos for All/Videos
+      var oldest = selSort.value === "oldest";
+      // TOTAL comparator (F-8): tiebreak equal timestamps on id so ordering is stable
+      // (the old comparator returned 0 → unstable, jittered order across re-windows).
+      pool.sort(function (a, b) {
+        var x = a.ts || "", y = b.ts || "", c = x < y ? -1 : x > y ? 1 : 0;
+        if (c === 0) { var ai = a.id || "", bi = b.id || ""; c = ai < bi ? -1 : ai > bi ? 1 : 0; }
+        return c * (oldest ? 1 : -1);
+      });
+      shown = pool.filter(function (r) {
+        if (m === "photos" && r.kind === "video") return false;
+        if (m === "videos" && r.kind !== "video") return false;
+        // The narrowing PHOTO-only server filters (owner album/favorite, event
+        // album, curation star/collection) narrow the photo set server-side, but the
+        // video pool (/api/videos) honors NONE of them — so without re-applying them
+        // here the full unfiltered video set leaks into the grid whenever one is
+        // active (the reported "Album shows unexpected results"). Re-apply each
+        // client-side over the merged pool: a no-op for the already-narrowed photos,
+        // decisive for the videos, which carry none of these fields and so drop out
+        // (a video belongs to no owner-album/event-album; future-proof if videos ever
+        // become curation-aware — a matching one would then be kept, not blanket-dropped).
+        if (Q.album && (r.albums || []).indexOf(Q.album) < 0) return false;
+        if (Q.event && r.event_id !== Q.event) return false;
+        if (Q.favorite === "1" && !r.favorite) return false;
+        if (Q.favorite_curation === "1" && !r.favorite_curation) return false;
+        if (Q.collection_curation && (r.collections || []).indexOf(Q.collection_curation) < 0) return false;
+        if (sc && r.scene !== sc) return false;                   // videos have no scene → excluded when a scene is chosen
+        if (pl && r.place !== pl) return false;
+        var day = (r.ts || "").slice(0, 10);                      // client date filter (also covers videos)
+        if (dFrom.value && day && day < dFrom.value) return false;
+        if (dTo.value && day && day > dTo.value) return false;
+        return true;
+      });
+      // The corpus size for this view: photos-only uses the server's photo total;
+      // All/Videos also counts videos (always loaded in full, unlike paginated
+      // photos) — without this, "shown" summed loaded-photos + all-videos and
+      // called it the total, which never matched any total the APIs report (#16).
+      var mediaTotal = m === "videos" ? (videos || []).length
+        : m === "photos" ? total
+        : total + (videos || []).length;
+      var note = num(shown.length) + " of " + num(mediaTotal) + " shown";
+      if (loaded.length < total && m !== "videos") {
+        note += " · " + num(total - loaded.length) + " photo(s) not yet loaded (Load more below)";
+      }
+      noteEl.textContent = note;
+      emptyEl.style.display = shown.length ? "none" : "";
+      mgrid.setRows(shown);   // re-window in place — no teardown, scroll preserved
+    }
+
+    var pg = pager("/api/photos", {
+      getParams: function () {
+        var p = { sort: selSort.value, date_from: dFrom.value, date_to: dTo.value };
+        // G-1 server-side filters — narrow the FULL set before the page slice.
+        if (Q.favorite === "1") p.favorite = "1";
+        if (Q.album) p.album = Q.album;
+        // Move Phase 2: event-album filter (album_id) narrows server-side too.
+        if (Q.event) p.event = Q.event;
+        if (Q.hidden === "1") p.hidden = "1";
+        // Curation virtual filters (server-side, narrow the full set before paging).
+        if (Q.favorite_curation === "1") p.favorite_curation = "1";
+        if (Q.collection_curation) p.collection_curation = Q.collection_curation;
+        return p;
+      },
+      onData: function (d) { applyFacets(d && d.facets); },
+      render: function (all, tot) { loaded = all; total = tot; rebuildFilters(); draw(); },
+    });
+    main.appendChild(pg.footer);
+
+    // Discards update this view in place: drop from the cached sets (so filter
+    // changes don't resurrect them), then re-window via draw() (no full teardown,
+    // scroll preserved) — no manual DOM surgery, the virtual grid handles it.
+    VIEW.removeItems = function (ids) {
+      var set = {}; ids.forEach(function (i) { set[i] = 1; });
+      loaded = loaded.filter(function (r) { return !set[r.id]; });
+      if (videos) videos = videos.filter(function (v) { return !set[v.id]; });
+      total = Math.max(0, total - ids.length);
+      draw();
+      pg.draw();
+    };
+
+    // Scene / Place are independent ways to slice the LOADED set client-side —
+    // picking one resets the other so the view always shows that slice.
+    function pickOnly(active, key) {
+      [selScene, selPlace].forEach(function (s) { if (s !== active) s.value = ""; });
+      var upd = { scene: "", place: "" };
+      upd[key] = active.value;   // "" (All) clears it
+      setQ(upd);
+      draw();
+    }
+    selScene.onchange = function () { pickOnly(selScene, "scene"); };
+    selPlace.onchange = function () { pickOnly(selPlace, "place"); };
+    // Event is a SERVER filter (album_id) → refetch page 1 narrowed, and reset the
+    // client scene/place slices so the view shows just that album.
+    selEvent.onchange = function () {
+      selScene.value = ""; selPlace.value = "";
+      setQ({ event: selEvent.value, scene: "", place: "" });
+      pg.load(true);
+    };
+    selMedia.onchange = function () { setQ({ media: selMedia.value }); syncVideoControls(); draw(); };
+    // G-11: video person/scene are SERVER filters → reload the video pool narrowed.
+    selVPerson.onchange = function () { setQ({ vperson: selVPerson.value }); loadVideos(); };
+    selVScene.onchange = function () { setQ({ vscene: selVScene.value }); loadVideos(); };
+    // Sort + date + owner-gallery filters are SERVER params → refetch page 1.
+    selSort.onchange = function () { setQ({ sort: selSort.value }); pg.load(true); };
+    function onDate() { setQ({ date_from: dFrom.value, date_to: dTo.value }); pg.load(true); }
+    dFrom.onchange = onDate; dTo.onchange = onDate;
+    selAlbum.onchange = function () { setQ({ album: selAlbum.value }); pg.load(true); };
+    favBtn.onclick = function () {
+      var on = Q.favorite === "1";
+      setQ({ favorite: on ? "" : "1" }); favBtn.classList.toggle("active", !on); pg.load(true);
+    };
+    hidBtn.onclick = function () {   // examiner: reveal the owner's hidden photos
+      var on = Q.hidden === "1";
+      setQ({ hidden: on ? "" : "1" }); hidBtn.classList.toggle("active", !on); pg.load(true);
+    };
+    starBtn.onclick = function () {   // curation: filter to starred items
+      var on = Q.favorite_curation === "1";
+      setQ({ favorite_curation: on ? "" : "1" }); starBtn.classList.toggle("active", !on); pg.load(true);
+    };
+    expBtn.onclick = function () {
+      var ev = selEvent.value, sc = selScene.value, pl = selPlace.value;
+      if (ev && !sc && !pl) return exportCollection("event", ev, eventTitles[ev] || ev);
+      if (sc && !pl) return exportCollection("scene", sc, pretty(sc));
+      if (pl && !sc) return exportCollection("place", pl, pretty(pl));
+      doVerb("/api/export", { items: shown.map(function (r) { return r.id; }) },
+        "Exported " + shown.length + " item(s)");
+    };
+
+    // Seed from the router's page-1 payload; if a non-default server filter is
+    // active (deep link: sort/date/favorite/album/hidden), refetch page 1 with
+    // those server params instead (the router's seed was fetched unfiltered).
+    if (selSort.value === "oldest" || dFrom.value || dTo.value
+        || Q.favorite === "1" || Q.album || Q.hidden === "1" || Q.event
+        || Q.favorite_curation === "1" || Q.collection_curation) pg.load(true);
+    else pg.seed(data);
+    loadVideos();   // lazy video pool (+ G-11 facets, honoring any ?vperson/?vscene deep link)
+    loadEventAlbums();   // Move Phase 2: whole-set album list for the Event server filter
+  };
+
+  // Events (Move Phase 2): the event-album view — one card per configured event
+  // album with its LIVE (placement-aware) member count, a few thumbs, and place /
+  // date range. A card opens the photos gallery filtered ?event=<album_id>. Both
+  // roles (album grouping is non-sensitive). Titles/places are estate text → esc()
+  // at every sink; album_ids ride go()'s query (encodeURIComponent) and JSON.
+  P.events = function (main, rows) {
+    head(main, "Events", "Events",
+      "Trips and occasions, grouped into albums. Open one to see its photos.");
+    rows = rows || [];
+    if (!rows.length) {
+      main.appendChild(el("p", "notice", "No event albums for this case."));
+      return;
+    }
+    var grid = el("div", "collgrid"); main.appendChild(grid);
+    rows.forEach(function (a) {
+      var card = el("div", "collcard");
+      // Clickable title: a real anchor to the same album gallery the "Open album"
+      // button reaches (/photos?event=<album_id>), so it right-clicks / opens in a
+      // new tab and is keyboard-focusable natively. Title is estate text → esc();
+      // album_id rides the query via encodeURIComponent.
+      var h = el("h2", "collcard-h");
+      var titleLink = el("a", "collcard-hlink", esc(a.title || "Untitled album"));
+      titleLink.href = "/photos?event=" + encodeURIComponent(a.album_id);
+      h.appendChild(titleLink);
+      card.appendChild(h);
+      var meta = [a.place, a.date_range].filter(Boolean).join(" · ");
+      if (meta) card.appendChild(el("p", "collcard-sub", esc(meta)));
+      var thumbs = el("div", "faces");   // reuse the People card's small face strip
+      (a.sample_ids || []).slice(0, 4).forEach(function (id) {
+        var im = el("img"); lazyThumb(im, id); im.alt = ""; thumbs.appendChild(im);
+      });
+      if ((a.sample_ids || []).length) card.appendChild(thumbs);
+      card.appendChild(el("p", "collcard-n", num(a.count) + " photo(s)"));
+      var open = el("button", "btn", "Open album");
+      open.onclick = function () { go({ page: "photos", event: String(a.album_id) }); };
+      card.appendChild(open);
+      grid.appendChild(card);
+    });
+  };
+
+  // Curation: the examiner's named collections index (examiner-only route). Each
+  // collection opens as a photos grid filtered ?collection_curation=<slug>; a
+  // Favorites virtual collection sits at the top. All titles are operator free text →
+  // esc() at every sink; slugs go through encodeURIComponent via go()/exportCollection.
+  P.collections = function (main, data) {
+    head(main, "Collections", "Collections",
+      "Hand-picked groups you gathered. Deleting a collection keeps its items.");
+    var favN = (data && data.favorites_count) || 0;
+    var grid = el("div", "collgrid"); main.appendChild(grid);
+    // Favorites pseudo-collection card.
+    var favCard = el("div", "collcard fav");
+    favCard.appendChild(el("h2", "collcard-h", "★ Favorites"));
+    favCard.appendChild(el("p", "collcard-n", num(favN) + " starred item(s)"));
+    var favTools = el("div", "collcard-tools");
+    var favOpen = el("button", "btn", "Open");
+    favOpen.onclick = function () { go({ page: "photos", favorite_curation: "1" }); };
+    var favExp = el("button", "btn", "Export Favorites");
+    favExp.onclick = function () { exportCollection("favorites", "", "Favorites"); };
+    favTools.appendChild(favOpen); favTools.appendChild(favExp);
+    favCard.appendChild(favTools);
+    grid.appendChild(favCard);
+
+    var cols = (data && data.collections) || [];
+    if (!cols.length) {
+      main.appendChild(el("p", "notice",
+        "No collections yet. Open a photo, then “Add to collection”."));
+      return;
+    }
+    cols.forEach(function (c) {
+      var card = el("div", "collcard");
+      card.appendChild(el("h2", "collcard-h", esc(c.title)));
+      card.appendChild(el("p", "collcard-n", num(c.count) + " item(s)"));
+      var tools = el("div", "collcard-tools");
+      var open = el("button", "btn", "Open");
+      open.onclick = function () { go({ page: "photos", collection_curation: c.slug }); };
+      tools.appendChild(open);
+      var exp = el("button", "btn", "Export");
+      exp.onclick = function () { exportCollection("curation_collection", c.slug, c.title); };
+      tools.appendChild(exp);
+      var ren = el("button", "btn", "Rename");
+      ren.onclick = function () {
+        textPrompt("New name for this collection:", c.title, function (t) {
+          if (!t.trim()) return;
+          doVerb("/api/collection/rename", { slug: c.slug, title: t.trim() }, "Renamed")
+            .then(function (x) { if (x) render(); });
+        });
+      };
+      tools.appendChild(ren);
+      var del = el("button", "btn danger", "Delete");
+      del.onclick = function () {
+        if (!confirm("Delete “" + c.title + "”? The items are kept. Reversible from History.")) return;
+        doVerb("/api/collection/delete", { slug: c.slug }, "Collection deleted")
+          .then(function (x) { if (x) render(); });
+      };
+      tools.appendChild(del);
+      card.appendChild(tools);
+      grid.appendChild(card);
+    });
+  };
+
+  P.people = function (main, rows) {
+    // Drill into one person when ?person=ID is present (#1). Render the person's
+    // ACTUAL cluster members directly (not via the frame/doc-excluded gallery, which
+    // empties out video-only people). Video appearances play their source video.
+    if (Q.person) {
+      // Carry the roster filter (?people=) back so a drill-in → merge/discard/back
+      // returns to the SAME context (e.g. still "Review needed"), not the full list.
+      backLink(main, "All people", { page: "people", people: Q.people });
+      var holder = el("div"); main.appendChild(holder);
+      getJSON("/api/person?id=" + encodeURIComponent(Q.person)).then(function (d) {
+        var ctrls = head(holder, "People", d.name || Q.person,
+          d.photo_n + " photograph(s)" + (d.video_n ? " · " + d.video_n + " video appearance(s)" : "") + ".");
+        var exp = el("button", "btn", "Export all of this person");
+        exp.onclick = function () { exportCollection("person", Q.person, d.name || Q.person); };
+        holder.appendChild(exp);
+        if (EXAMINER) {
+          var nm = el("button", "btn", d.named ? "Rename person" : "Name this person");
+          nm.onclick = function () {
+            textPrompt("Name for this person:", d.named ? d.name : "", function (name) {
+              doVerb("/api/rename/person", { person_id: Q.person, new_name: name },
+                "Renamed to " + (name || Q.person)).then(function (x) { if (x) location.reload(); });
+            });
+          };
+          holder.appendChild(nm);
+          var rm = el("button", "btn danger", "Remove person");  // #6
+          rm.onclick = function () {
+            if (!confirm("Remove this person grouping? The photographs are kept. Reversible from History.")) return;
+            doVerb("/api/remove/person", { person_id: Q.person }, "Removed " + (d.name || Q.person))
+              .then(function (x) { if (x) go({ page: "people", people: Q.people }); });
+          };
+          holder.appendChild(rm);
+          // G-15: fold THIS person into another (this becomes the loser). The target
+          // person absorbs these photos; this cluster disappears from People.
+          var mg = el("button", "btn", "Merge into…");
+          mg.title = "Merge this person into another (the photographs join that person)";
+          mg.onclick = function () {
+            pickPerson("Merge " + (d.name || Q.person) + " into which person?", Q.person, function (winner) {
+              doVerb("/api/merge/persons", { winner_pid: winner, loser_pid: Q.person },
+                "Merged " + (d.name || Q.person)).then(function (x) {
+                  // Return to the (filtered) People LIST to keep reviewing — not into
+                  // the winner's detail/album, which drops the review context.
+                  if (x) go({ page: "people", people: Q.people });
+                });
+            });
+          };
+          holder.appendChild(mg);
+        }
+        var photos = (d.members || []).filter(function (m) { return m.kind === "photo"; });
+        var videos = (d.members || []).filter(function (m) { return m.kind === "video"; });
+        if (photos.length) {
+          holder.appendChild(el("h2", null, "Photos (" + photos.length + ")"));
+          var pgrid = el("div"); holder.appendChild(pgrid);
+          photoGrid(pgrid, photos);
+          if (EXAMINER) marqueeSelect(ctrls, pgrid, ".card", selPick);  // drag-select
+        }
+        if (videos.length) {
+          holder.appendChild(el("h2", null, "Video appearances (" + videos.length + ")"));
+          var vg = el("div", "grid");
+          videos.forEach(function (m) {
+            var c = el("div", "card vidcard");
+            var img = el("img"); lazyThumb(img, m.id); img.alt = m.video_name || "";
+            img.onclick = function () {
+              lightbox(m.video_src, "video", [{ label: "Export video", onclick: function () {
+                doVerb("/api/export", { items: [m.video_src] }, "Exported " + m.video_name); } }]);
+            };
+            c.appendChild(img);
+            c.appendChild(el("div", "playbadge", "▶"));
+            c.appendChild(el("div", "cap", '<span class="nm">' + esc(m.video_name || "video") + "</span>"));
+            vg.appendChild(c);
+          });
+          holder.appendChild(vg);
+        }
+        if (!photos.length && !videos.length)
+          holder.appendChild(el("p", "notice", "No delivered media for this person."));
+      }).catch(function (e) { holder.appendChild(el("p", "notice", "Couldn't load: " + esc(e.message))); });
+      return;
+    }
+    var pplControls = head(main, "People", "The family",
+      rows.length + " people recognized across the photographs.");
+    // Cleanup item 1: filter the roster — All / Renamed (a real name set) / Review
+    // needed (still an unnamed Person_NN cluster an examiner should name). Persisted
+    // in ?people= for reload/share.
+    var pplNote = el("span", "count-note");
+    var selPeople = el("select");
+    [["", "All"], ["named", "Renamed"], ["review", "Review needed"]].forEach(
+      function (o) { selPeople.appendChild(new Option(o[1], o[0])); });
+    if (Q.people) selPeople.value = Q.people;
+    pplControls.appendChild(el("span", "flabel", "Show"));
+    pplControls.appendChild(selPeople);
+    pplControls.appendChild(pplNote);
+    var pplGrid = el("div"); main.appendChild(pplGrid);
+    // #22: a per-card Remove/Merge already drops the card from the grid in
+    // place (no full re-fetch/rebuild) — but neither the page header ("N
+    // people recognized…") nor the "N shown" note read from `rows` again
+    // until the next full navigation, so both kept reporting a stale total.
+    // Splice the row out of the same `rows` array drawPeople() filters and
+    // recompute both texts from it — no grid rebuild, just the two counts.
+    function removeRow(r) {
+      var ix = rows.indexOf(r);
+      if (ix >= 0) rows.splice(ix, 1);
+      var leadEl = main.querySelector(".pagehead-title .lead");
+      if (leadEl) leadEl.textContent = rows.length + " people recognized across the photographs.";
+      var mode = selPeople.value;
+      var shown = rows.filter(function (x) {
+        if (mode === "named") return x.named;
+        if (mode === "review") return !x.named;
+        return true;
+      }).length;
+      pplNote.textContent = num(shown) + " shown";
+    }
+    function personCard(r) {
+      var p = el("div", "person clickable");
+      var faces = el("div", "faces");
+      (r.sample_ids || []).slice(0, 4).forEach(function (id) { var im = el("img"); lazyThumb(im, id); im.alt = r.name ? ("Photo of " + r.name) : ""; faces.appendChild(im); });
+      if (!faces.children.length) faces.appendChild(el("div", "ph", ""));
+      p.appendChild(faces);
+      var body = el("div", "body");
+      body.innerHTML = "<h3>" + esc(r.name) + "</h3><span class='badge'>" +
+        num(r.photo_count) + " photos" + (r.video_count ? " · " + num(r.video_count) + " videos" : "") +
+        "</span>" + (r.summary ? "<p>" + esc(r.summary) + "</p>" : "");
+      p.appendChild(body);
+      p.onclick = function (e) { if (e.target.tagName !== "BUTTON") go({ page: "people", person: r.person_id, people: selPeople.value }); };
+      keyable(p, "button", "View " + (r.name || "person"));
+      if (EXAMINER) {
+        var btn = el("button", "btn", r.named ? "Rename" : "Name this person");
+        btn.onclick = function (e) {
+          e.stopPropagation();
+          textPrompt("Name for this person:", r.named ? r.name : "", function (name) {
+            doVerb("/api/rename/person", { person_id: r.person_id, new_name: name }, "Renamed to " + (name || r.person_id)).then(function (x) {
+              if (!x) return;
+              // Update the card in place — no full people re-fetch/rebuild.
+              r.named = !!name; r.name = name || r.person_id;
+              var h = body.querySelector("h3"); if (h) h.textContent = r.name;
+              btn.textContent = r.named ? "Rename" : "Name this person";
+              if (selPeople.value) drawPeople();   // it changed buckets under an active filter
+            });
+          });
+        };
+        p.appendChild(btn);
+        var rm = el("button", "btn danger", "Remove person");  // #6 dissolve grouping
+        rm.title = "Remove this grouping from People (photos are kept)";
+        rm.onclick = function (e) {
+          e.stopPropagation();
+          if (!confirm("Remove this person grouping? The photographs are kept (only the person folder is removed). Reversible from History.")) return;
+          doVerb("/api/remove/person", { person_id: r.person_id }, "Removed " + r.name).then(function (x) { if (x) { p.remove(); removeRow(r); } });
+        };
+        p.appendChild(rm);
+        // G-15: merge this card's person INTO another (this becomes the loser).
+        var mg = el("button", "btn", "Merge into…");
+        mg.title = "Merge this person into another (the photographs join that person)";
+        mg.onclick = function (e) {
+          e.stopPropagation();
+          pickPerson("Merge " + r.name + " into which person?", r.person_id, function (winner) {
+            doVerb("/api/merge/persons", { winner_pid: winner, loser_pid: r.person_id },
+              "Merged " + r.name).then(function (x) { if (x) { p.remove(); removeRow(r); } });
+          });
+        };
+        p.appendChild(mg);
+      }
+      return p;
+    }
+    function drawPeople() {
+      var mode = selPeople.value;
+      var items = rows.filter(function (r) {
+        if (mode === "named") return r.named;
+        if (mode === "review") return !r.named;
+        return true;
+      });
+      pplGrid.innerHTML = "";
+      pplNote.textContent = num(items.length) + " shown";
+      if (!items.length) {
+        pplGrid.appendChild(el("p", "notice",
+          mode === "review" ? "No people need review — everyone is named."
+          : mode === "named" ? "No one has been renamed yet." : "No people in this case."));
+        return;
+      }
+      items.forEach(function (r) { pplGrid.appendChild(personCard(r)); });
+    }
+    selPeople.onchange = function () { setQ({ people: selPeople.value }); drawPeople(); };
+    drawPeople();
+  };
+
+  // G-8: "On this day" Overview module — today's month-day across years. Hidden
+  // when nothing matches (server sends total_count 0). Each year links to the
+  // gallery pre-filtered to that exact day (date_from == date_to).
+  function onThisDayCard(main, od) {
+    if (!od || !od.total_count) return;   // nothing on this day → don't render the card
+    var card = el("section", "otd-card");
+    var h = el("div", "otd-head");
+    h.appendChild(el("h2", null, "On this day"));
+    h.appendChild(el("span", "otd-sub",
+      esc(num(od.total_count) + " photo" + (od.total_count === 1 ? "" : "s") + " taken on this date")));
+    card.appendChild(h);
+    (od.years || []).forEach(function (yr) {
+      var row = el("div", "otd-year");
+      var link = el("a", "otd-yearlabel", esc(yr.year) + " · " + num(yr.count));
+      var day = yr.year + "-" + od.mmdd;   // YYYY-MM-DD for the day filter
+      link.href = "/photos?date_from=" + encodeURIComponent(day) + "&date_to=" + encodeURIComponent(day);
+      row.appendChild(link);
+      var strip = el("div", "otd-strip");
+      var ctx = { list: yr.photos };       // ←/→ pages within this year's set
+      (yr.photos || []).forEach(function (p) { strip.appendChild(photoCard(p, ctx)); });
+      row.appendChild(strip);
+      card.appendChild(row);
+    });
+    main.appendChild(card);
+  }
+
+  // G-5: Timeline — chapter bands (collapsible) → event rows → capped photo strips.
+  // Bands render collapsed; each band's events/photos DOM is built lazily on first
+  // expand (a 184-chapter case stays cheap). Clicking a photo threads the whole
+  // chapter's rendered strip into the lightbox for ←/→.
+  function buildTimelineBand(body, ch) {
+    var chapterPhotos = [];   // every rendered photo in the band → lightbox ←/→ set
+    (ch.events || []).forEach(function (ev) {
+      (ev.photos || []).forEach(function (p) { chapterPhotos.push(p); });
+    });
+    var ctx = { list: chapterPhotos };
+    (ch.events || []).forEach(function (ev) {
+      var row = el("div", "tl-event");
+      var span = ev.date_from === ev.date_to ? ev.date_from : (ev.date_from + " – " + ev.date_to);
+      row.appendChild(el("div", "tl-eventhead",
+        esc(span) + " · " + num(ev.count) + " photo" + (ev.count === 1 ? "" : "s")));
+      var strip = el("div", "tl-strip");
+      (ev.photos || []).forEach(function (p) { strip.appendChild(photoCard(p, ctx)); });
+      var extra = ev.count - (ev.photos || []).length;
+      if (extra > 0) strip.appendChild(el("div", "tl-more", "+" + num(extra) + " more"));
+      row.appendChild(strip);
+      body.appendChild(row);
+    });
+  }
+
+  P.timeline = function (main, d) {
+    var chapters = d.chapters || [];
+    var undated = (d.undated && d.undated.count) || 0;
+    head(main, "Timeline", "Timeline",
+      num(d.chapter_count || chapters.length) + " chapter" + ((d.chapter_count || chapters.length) === 1 ? "" : "s") +
+      " · " + num(d.event_count || 0) + " moments" + (undated ? " · " + num(undated) + " undated" : "."));
+    if (!chapters.length) {
+      main.appendChild(el("p", "notice", "No dated photos to place on a timeline."));
+      return;
+    }
+    var wrap = el("div", "timeline");
+    chapters.forEach(function (ch) {
+      var band = el("section", "tl-band");
+      var hdr = el("button", "tl-bandhead"); hdr.type = "button";
+      hdr.setAttribute("aria-expanded", "false");
+      var range = ch.date_from === ch.date_to ? ch.date_from : (ch.date_from + " – " + ch.date_to);
+      hdr.innerHTML = '<span class="tl-caret" aria-hidden="true">▸</span>' +
+        '<span class="tl-title">' + esc(ch.label ? prettyPlace(ch.label) : ch.chapter) + "</span>" +
+        '<span class="tl-range">' + esc(range) + "</span>" +
+        '<span class="tl-count">' + num(ch.count) + " photo" + (ch.count === 1 ? "" : "s") + "</span>";
+      var body = el("div", "tl-body"); body.style.display = "none";
+      var built = false;
+      hdr.onclick = function () {
+        var open = body.style.display === "none";
+        body.style.display = open ? "" : "none";
+        hdr.classList.toggle("open", open);
+        hdr.setAttribute("aria-expanded", open ? "true" : "false");
+        if (open && !built) { built = true; buildTimelineBand(body, ch); }
+      };
+      band.appendChild(hdr); band.appendChild(body);
+      wrap.appendChild(band);
+    });
+    main.appendChild(wrap);
+    if (undated) {
+      var shelf = el("div", "tl-undated");
+      shelf.appendChild(el("span", "tl-undated-n", num(undated)));
+      shelf.appendChild(el("span", null,
+        " photo" + (undated === 1 ? "" : "s") + " without a date — not placed on the timeline."));
+      main.appendChild(shelf);
+    }
+  };
+
+  // Shared canvas map (F-6): plots the given AGGREGATE markers (trip or venue
+  // centroids, never 30k raw points) on a fresh Leaflet map inside `mapEl`. Each
+  // marker carries {lat,lon,key,n,target?} — a click go()s to the target (drill-in).
+  function placesMap(mapEl, markerData) {
+    var pts = (markerData || []).filter(function (mk) { return mk.lat != null && mk.lon != null; });
+    if (!pts.length) { mapEl.outerHTML = '<p class="notice">No GPS data in this case.</p>'; return; }
+    try {
+      var map = L.map(mapEl, { preferCanvas: true });   // canvas renderer (F-6)
+      if (typeof addBasemap === "function") addBasemap(map);
+      var ms = pts.map(function (mk) {
+        var radius = Math.min(16, 5 + Math.sqrt(mk.n || 1));   // scale by photo count
+        var m = L.circleMarker([mk.lat, mk.lon], { radius: radius, color: "#9c4f3a", fillColor: "#c9a964", fillOpacity: .85, weight: 1 })
+          .bindTooltip(esc(prettyPlace(mk.key || "location") + " · " + num(mk.n) + " photo" + (mk.n === 1 ? "" : "s")));
+        m.on("click", function () {  // open the location's gallery, not one photo (#C)
+          if (mk.target) go(mk.target);
+          else if (mk.id) lightbox(mk.id, true);
+        });
+        return m;
+      });
+      var grp = L.featureGroup(ms).addTo(map); map.fitBounds(grp.getBounds(), { padding: [30, 30] });
+      setTimeout(function () { map.invalidateSize(); }, 60);  // pane has a fixed size now
+    } catch (e) { mapEl.innerHTML = "Map error: " + esc(e.message); }
+  }
+
+  // One grouping list (trips OR venues): a table of {name, count, Export}. Clicking a
+  // row drills into that location's photos via the supplied target/export handlers.
+  function placesList(listPane, heading, items, opts) {
+    if (!items.length) return;
+    listPane.appendChild(el("h2", null, heading));
+    var tbl = el("table"); tbl.innerHTML = "<tr><th>Location</th><th>Photos</th><th></th></tr>";
+    items.forEach(function (it) {
+      var tr = el("tr", "clickable");
+      tr.innerHTML = "<td>" + esc(prettyPlace(it.name)) + "</td><td>" + num(it.count) + "</td><td></td>";
+      tr.onclick = function (e) { if (e.target.tagName !== "BUTTON") go(opts.target(it)); };
+      keyable(tr, null);   // F-12: keep row semantics, add focus + Enter/Space
+      var ex = el("button", "btn small", "Export");
+      ex.onclick = function (e) { e.stopPropagation(); opts.exportItem(it); };
+      tr.lastChild.appendChild(ex);
+      tbl.appendChild(tr);
+    });
+    listPane.appendChild(tbl);
+  }
+
+  P.places = function (main, d) {
+    var pts = d.points || [], trips = d.trips || [], venues = d.venues || [];
+    // G-10 venue drill-in: a filtered grid of the venue's member photos, resolved by
+    // the venue's member_ids (the trip drill-in below filters by place name instead).
+    if (Q.venue) {
+      var v = venues.filter(function (x) { return x.venue_id === Q.venue; })[0];
+      backLink(main, "All places", { page: "places", tab: "venues" });
+      head(main, "Places", v ? prettyPlace(v.name) : "Place", "");
+      if (!v) { main.appendChild(el("p", "notice", "That place is no longer available.")); return; }
+      var vexp = el("button", "btn", "Export all from here");
+      vexp.onclick = function () {
+        doVerb("/api/export", { items: v.member_ids || [] }, "Exported photos from " + prettyPlace(v.name));
+      };
+      main.appendChild(vexp);
+      var vids = {}; (v.member_ids || []).forEach(function (id) { vids[id] = 1; });
+      var vholder = el("div"); main.appendChild(vholder);
+      loadAllRows("/api/photos", function (photos) {
+        photoGrid(vholder, photos.filter(function (p) { return vids[p.id]; }));
+      });
+      return;
+    }
+    // Drill into one location's photos when ?place=NAME is present (#6).
+    if (Q.place) {
+      backLink(main, "All places", { page: "places" });
+      head(main, "Places", prettyPlace(Q.place), "");
+      var exp = el("button", "btn", "Export all from here");
+      exp.onclick = function () { exportCollection("place", Q.place, prettyPlace(Q.place)); };
+      main.appendChild(exp);
+      var ids = {}; pts.forEach(function (p) { if ((p.trip === Q.place || p.place === Q.place) && p.id) ids[p.id] = 1; });
+      var holder = el("div"); main.appendChild(holder);
+      // /api/photos is paginated now — page through the whole set to filter to
+      // this location's ids (the places drill-in needs the complete set).
+      loadAllRows("/api/photos", function (photos) {
+        photoGrid(holder, photos.filter(function (p) { return ids[p.id]; }));
+      });
+      return;
+    }
+    // Two grouping tabs (G-10): Trips (multi-day journeys) | Places (everyday venue
+    // clusters — the house/school/park). Both reuse the same map + list machinery.
+    var tab = Q.tab === "venues" ? "venues" : "trips";
+    head(main, "Places", "Places",
+      pts.length + " geotagged photos across " + trips.length + " trips and " + venues.length + " everyday places.");
+    var tabsEl = el("div", "placetabs");
+    [["trips", "Trips", trips.length], ["venues", "Places", venues.length]].forEach(function (t) {
+      var b = el("button", "ptab" + (tab === t[0] ? " active" : "")); b.type = "button";
+      b.textContent = t[1] + " (" + t[2].toLocaleString() + ")";
+      b.setAttribute("aria-pressed", tab === t[0] ? "true" : "false");
+      b.onclick = function () { if (tab !== t[0]) { setQ({ tab: t[0] }); render(); } };
+      tabsEl.appendChild(b);
+    });
+    main.appendChild(tabsEl);
+    // Two-pane: map pinned (sticky) on the left, Locations list scrolls on the right (#8).
+    var layout = el("div", "placeslayout");
+    var mapPane = el("div", "mappane"); var mapEl = el("div"); mapEl.id = "map"; mapPane.appendChild(mapEl);
+    var listPane = el("div", "listpane");
+    layout.appendChild(mapPane); layout.appendChild(listPane); main.appendChild(layout);
+    if (tab === "venues") {
+      var vMarkers = venues.map(function (x) {
+        return { lat: x.lat, lon: x.lon, key: x.name, n: x.count, target: { page: "places", venue: x.venue_id } };
+      });
+      placesMap(mapEl, vMarkers);
+      placesList(listPane, "Everyday places", venues, {
+        target: function (x) { return { page: "places", venue: x.venue_id }; },
+        exportItem: function (x) {
+          doVerb("/api/export", { items: x.member_ids || [] }, "Exported photos from " + prettyPlace(x.name));
+        },
+      });
+    } else {
+      // Trip markers from the AGGREGATE centroids (F-6); fall back to raw points only
+      // when there are no trip clusters but points exist.
+      var tMarkers = trips.length
+        ? trips.map(function (t) { return { lat: t.lat, lon: t.lon, key: t.name, n: t.count, target: { page: "places", place: t.name } }; })
+        : pts.map(function (p) { return { lat: p.lat, lon: p.lon, key: p.trip || p.place, n: 1, id: p.id, target: (p.trip || p.place) ? { page: "places", place: p.trip || p.place } : null }; });
+      placesMap(mapEl, tMarkers);
+      placesList(listPane, "Trips", trips, {
+        target: function (t) { return { page: "places", place: t.name }; },
+        exportItem: function (t) { exportCollection("place", t.name, prettyPlace(t.name)); },
+      });
+    }
+  };
+
+  // selectable document/file table (Documents, Correspondence) with verbs.
+  // Checkboxes support shift-click range selection (select one, shift-click another
+  // → the whole range takes the clicked box's new state).
+  function fileTable(container, rows) {
+    var tbl = el("table", "filetable");
+    tbl.innerHTML = "<tr><th></th><th>Name</th><th>Category</th><th>Summary</th></tr>";
+    var picks = [], lastIdx = -1;
+    rows.forEach(function (r, i) {
+      var tr = el("tr");
+      var pickTd = el("td");
+      var cb = el("input", "rowpick"); cb.type = "checkbox"; cb.checked = !!SEL[r.file];
+      function set(on) { cb.checked = on; tr.classList.toggle("sel", on); toggleSel(r.file, on); }
+      picks.push(set);
+      cb.onclick = function (e) {
+        if (e.shiftKey && lastIdx >= 0) {
+          var a = Math.min(lastIdx, i), b = Math.max(lastIdx, i);
+          for (var k = a; k <= b; k++) picks[k](cb.checked);   // extend the range to this box's state
+        } else { set(cb.checked); }
+        lastIdx = i;
+      };
+      DOC_CAT[r.file] = r.category;   // for the batch sub-move financial gate
+      pickTd.appendChild(cb); tr.appendChild(pickTd);
+      // Open in the lightbox rather than a new tab: for every office format the
+      // raw /media bytes are attachment+octet-stream, so target="_blank" only ever
+      // produced a download prompt. The lightbox renders the extracted text inline
+      // and still offers Download. Kept as a real href so middle-click/"open in new
+      // tab" (and any no-JS path) still reach the file.
+      var nameTd = el("td");
+      var nameLink = el("a", null, esc(r.name));
+      nameLink.href = mediaURL(r.file);
+      nameLink.setAttribute("rel", "noopener noreferrer");
+      nameLink.onclick = function (ev) {
+        if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button) return;  // let the browser do it
+        ev.preventDefault();
+        lightbox(r.file, mediaKind(r.file), null, { name: r.name, preview: r.preview });
+      };
+      nameTd.appendChild(nameLink);
+      nameTd.appendChild(el("span", null, " " + sig(r.significance)));
+      tr.appendChild(nameTd);
+      var catTd = el("td", null, esc(pretty(r.category)) + (r.subcategory ? " · " + esc(pretty(r.subcategory)) : ""));
+      // Per-row document-category move (Phase 2.5), examiner-only. Re-files this one
+      // doc into another category; the server re-validates (account_credentials/email/
+      // no-op refused, §13.3/§13.4), then a full re-render reflects the new bucket.
+      if (EXAMINER) {
+        var mv = el("button", "rowmove", "Move to category…");
+        mv.onclick = function () {
+          pickCategory("Move this document to which category?", r.category, function (cat) {
+            doVerb("/api/move", { view: "document", src: r.file, to: cat }, "Moved to category")
+              .then(function (x) { if (x) render(); });
+          });
+        };
+        catTd.appendChild(document.createTextNode(" "));
+        catTd.appendChild(mv);
+        // Per-row financial SUB-category move (Phase 2.6), examiner-only. Shown
+        // ONLY on rows already category=="financial" (client-side gate, §14.5) —
+        // in-financial re-filing; the server re-validates. POSTs to=financial +
+        // subcategory; a full re-render reflects the new sub-bucket.
+        if (r.category === "financial") {
+          var mvs = el("button", "rowmove", "Move to sub-category…");
+          mvs.onclick = function () {
+            pickSubcategory("Move this document to which sub-category?", r.subcategory, function (sub) {
+              doVerb("/api/move", { view: "document", src: r.file, to: "financial", subcategory: sub }, "Moved to sub-category")
+                .then(function (x) { if (x) render(); });
+            });
+          };
+          catTd.appendChild(document.createTextNode(" "));
+          catTd.appendChild(mvs);
+        }
+      }
+      tr.appendChild(catTd);
+      tr.appendChild(el("td", null, esc(r.summary || "") + (r.preview ? '<div class="preview">' + esc(r.preview) + "</div>" : "")));
+      tbl.appendChild(tr);
+    });
+    // #27: on a narrow viewport this table (4 columns, one free-text) is wider
+    // than the page — contain the overflow to a scrollable wrapper instead of
+    // letting it push the whole page body horizontally.
+    var scroller = el("div", "table-scroll");
+    scroller.appendChild(tbl);
+    container.appendChild(scroller);
+  }
+
+  // Which near-miss drawers are open, and how many rows deep — target -> row count.
+  //
+  // Outlives render(). Acting on a near-miss (promote/dismiss/reassign) changes the
+  // checklist ABOVE the drawer — the tally, the ✓/— mark, the confirmed items — so
+  // those verbs correctly trigger a full re-render rather than an in-place patch.
+  // Without this map that re-render dropped the examiner back to a collapsed panel,
+  // losing both the open drawer and any "Show more" pages: reviewing a 40-hit
+  // near-miss list meant re-expanding and re-paging after every single decision.
+  var NEARMISS_OPEN = {};
+
+  // #17: bulk-select across near-miss drawers (a decision applies to whichever
+  // rows are checked, possibly spanning more than one open target's drawer —
+  // same "selection isn't scoped to one sub-group" precedent as the Confirm
+  // queue's rsel). id -> {id, label}. Reset on every vitalDocsPanel rebuild
+  // (a promote/dismiss already triggers a full render(), so there is no
+  // in-place patch to preserve selection across — like NEARMISS_OPEN, this
+  // just needs to not leak a stale #vselbar into the new render).
+  var VITAL_SEL = {};
+
+  function vitalSelBar() {
+    var bar = document.getElementById("vselbar");
+    var items = Object.keys(VITAL_SEL).map(function (k) { return VITAL_SEL[k]; });
+    if (!items.length) { if (bar) bar.remove(); return; }
+    if (!bar) { bar = el("div", "selbar"); bar.id = "vselbar"; document.body.appendChild(bar); }
+    bar.innerHTML = '<span class="n">' + items.length + ' selected</span><span class="sep"></span>';
+    var mark = el("button", "act primary", "Mark as vital");
+    mark.onclick = function () {
+      mark.disabled = true; notv.disabled = true;
+      doVerb("/api/vital/promote", { ids: items.map(function (i) { return i.id; }) },
+             "Marked " + items.length + " as vital").then(function (x) {
+        if (x) { VITAL_SEL = {}; render(); } else { mark.disabled = false; notv.disabled = false; }
+      });
+    };
+    bar.appendChild(mark);
+    var notv = el("button", "act", "Not a vital document");
+    notv.onclick = function () {
+      mark.disabled = true; notv.disabled = true;
+      doVerb("/api/vital/dismiss", { ids: items.map(function (i) { return i.id; }) },
+             "Dismissed " + items.length + " near-miss(es)").then(function (x) {
+        if (x) { VITAL_SEL = {}; render(); } else { mark.disabled = false; notv.disabled = false; }
+      });
+    };
+    bar.appendChild(notv);
+    bar.classList.add("show");
+  }
+
+  // Scroll an element the next frame, once the panel it belongs to is in the DOM.
+  // "nearest" so a row already on screen does not jump — restoring a drawer should
+  // be invisible when nothing moved.
+  function scrollBackTo(node) {
+    if (!node.scrollIntoView) return;
+    window.requestAnimationFrame(function () {
+      node.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  // Near-miss review drawer (examiner-only): the candidate hits for one vital-doc
+  // target that did NOT make the checklist, with WHY, and a deep link to each.
+  //
+  // PAGINATED, because `vital_per_target_k` is a per-case knob (default 8) that an
+  // examiner raises precisely when they suspect a document was missed — the list is
+  // not bounded, and silently truncating the case that needed the recall would be
+  // the worst possible failure here. `offset` appends; `total` comes from the
+  // server so the count shown is the true one.
+  //
+  // Ordering (not_evaluated first, then score) is fixed SERVER-side before the
+  // slice, so the rows that matter most are on page 1 — never sort here.
+  //
+  // `want` (optional, offset 0 only) asks for that many rows in one request
+  // instead of one page — how a drawer restores itself after a verb re-renders
+  // the panel. See NEARMISS_OPEN.
+  function nearMissLoad(target, box, offset, vd, want) {
+    var more = box.querySelector(".vcand-more");
+    if (more) more.remove();
+    if (!offset) box.appendChild(el("div", "vcand-loading", "Loading…"));
+    getJSON("/api/vital/near-misses?target=" + encodeURIComponent(target) +
+            "&offset=" + offset +
+            (!offset && want ? "&limit=" + want : "")).then(function (d) {
+      var wait = box.querySelector(".vcand-loading");
+      if (wait) wait.remove();
+      box.dataset.loaded = "1";
+      (d.rows || []).forEach(function (r) { box.appendChild(nearMissRow(target, r, vd)); });
+      var shown = offset + (d.rows || []).length;
+      NEARMISS_OPEN[target] = shown;   // survive the next render()
+      if (shown < d.total) {
+        var btn = el("button", "vcand-more",
+          "Show more (" + num(shown) + " of " + num(d.total) + ")");
+        btn.onclick = function () { nearMissLoad(target, box, shown, vd); };
+        box.appendChild(btn);
+      } else if (d.total) {
+        box.appendChild(el("div", "vcand-count",
+          "Showing all " + num(d.total) + "."));
+      }
+    }).catch(function (e) {
+      var wait = box.querySelector(".vcand-loading");
+      if (wait) wait.remove();
+      box.appendChild(el("div", "vcand-err",
+        esc("Couldn't load near-misses: " + (e && e.message ? e.message : "error"))));
+    });
+  }
+
+  // One near-miss row. All estate-derived text (reason, snippet, subject, name) is
+  // escaped — it is model output and mail content, never trusted markup.
+  function nearMissRow(target, r, vd) {
+    var blind = r.disposition === "not_evaluated";
+    var rowEl = el("div", "vcand-row" + (blind ? " unread" : ""));
+
+    var head = el("div", "vcand-head");
+    // #17: bulk-select checkbox — first in the head so it reads before the link.
+    var cb = el("input"); cb.type = "checkbox";
+    cb.checked = !!VITAL_SEL[r.id];
+    cb.setAttribute("aria-label", "Select " + (r.name || r.thread_subject || r.conversation_subject || "this near-miss"));
+    cb.onclick = function (e) { e.stopPropagation(); };  // don't trigger the row link underneath
+    cb.onchange = function () {
+      if (cb.checked) VITAL_SEL[r.id] = { id: r.id, label: r.name || r.thread_subject || r.conversation_subject };
+      else delete VITAL_SEL[r.id];
+      vitalSelBar();
+    };
+    head.appendChild(cb);
+    // Link the same two ways the confirmed items do: a browsable document opens
+    // in place, an email-sourced hit deep-links to its conversation. Most hits on
+    // a mail-heavy case are the latter, so a documents-only link would be dead.
+    if (r.file_id) {
+      var a = el("a", "vcand-link", esc(r.name || "document"));
+      a.href = "#";
+      a.onclick = function (e) { e.preventDefault(); go({ open: true, file: r.file_id }); };
+      head.appendChild(a);
+    } else if (r.thread_id) {
+      var ta = el("a", "vcand-link", esc(r.thread_subject || "(no subject)"));
+      ta.href = "#";
+      ta.onclick = function (e) { e.preventDefault(); go({ page: "emails", thread: r.thread_id }); };
+      head.appendChild(ta);
+      head.appendChild(el("span", "vitals-inemails", "in Emails"));
+    } else if (r.conversation_id) {
+      var ca = el("a", "vcand-link", esc(r.conversation_subject || "(conversation)"));
+      ca.href = "#";
+      ca.onclick = function (e) { e.preventDefault(); go({ page: "messages", conversation: r.conversation_id }); };
+      head.appendChild(ca);
+      head.appendChild(el("span", "vitals-inemails", "in Messages"));
+    } else {
+      head.appendChild(el("span", "vcand-noitem", esc(r.name || "document")));
+    }
+    if (r.score != null) {
+      head.appendChild(el("span", "vcand-score", r.score.toFixed(2)));
+    }
+    // "Never read" is a stronger signal than a considered NO — say so plainly.
+    head.appendChild(el("span", "vcand-chip " + (blind ? "chip-unread" : "chip-no"),
+      blind ? "never read" : (r.disposition === "unknown" ? "no reason recorded" : "not confirmed")));
+    rowEl.appendChild(head);
+
+    if (r.reason) rowEl.appendChild(el("div", "vcand-reason", esc(r.reason)));
+    if (r.snippet) rowEl.appendChild(el("div", "preview", esc(r.snippet)));
+
+    // The same three dispositions a CONFIRMED item offers, so reviewing a
+    // near-miss is not a dead end and the two lists behave alike.
+    //
+    // "Mark as vital", NOT "this IS the document" — a category can hold several
+    // vital documents (two deeds, a will and its codicil), and the singular
+    // wording implied promoting one settled the category. vital_doc_promoted is
+    // keyed by target::path, so promoting a second path under the same target
+    // has always worked; only the label said otherwise.
+    var acts = el("div", "vcand-acts");
+
+    var promote = el("button", "vcand-act primary", "Mark as vital");
+    promote.onclick = function () {
+      doVerb("/api/vital/promote", { id: r.id }, "Marked as a vital document")
+        .then(function (x) { if (x) render(); });
+    };
+    acts.appendChild(promote);
+
+    // Dismissal is a statement about the DOCUMENT (keyed by path), so it drops
+    // this file from every vital category it is a candidate under, not just this
+    // one — same semantics as dismissing a confirmed item. It also takes the row
+    // out of the near-miss list, which is the point: a reviewed-and-rejected
+    // candidate should not keep reappearing as unreviewed.
+    var dismiss = el("button", "vcand-act", "Not a vital document");
+    dismiss.onclick = function () {
+      doVerb("/api/vital/dismiss", { id: r.id }, "Dismissed near-miss")
+        .then(function (x) { if (x) render(); });
+    };
+    acts.appendChild(dismiss);
+
+    // Reassign = promote AND file under a different category, in ONE audited
+    // action ("this is vital, but it's a deed, not a will"). No scope prompt: a
+    // near-miss promotion creates exactly one item, so the global/single choice
+    // a confirmed multi-category doc needs does not arise here.
+    var reassign = el("button", "vcand-act", "Reassign…");
+    reassign.onclick = function () {
+      pickVitalTarget("Mark as vital under which document type?",
+                      (vd && vd.all_targets) || [], target, function (to) {
+        doVerb("/api/vital/promote", { id: r.id, to_target: to },
+               "Marked as vital and reassigned")
+          .then(function (x) { if (x) render(); });
+      });
+    };
+    acts.appendChild(reassign);
+
+    rowEl.appendChild(acts);
+    return rowEl;
+  }
+
+  // "cap reached" chip for a target whose retrieval hit vital_per_target_k: the
+  // near-miss list shown is a floor, and matching documents past the k-th were
+  // never retrieved. `title` carries the how-to-see-more (raise the knob, re-run
+  // embed) without cluttering the row. Examiner-only by the call sites' gating.
+  function vitalCapChip(k) {
+    // #19: "cap reached" is examiner-jargon for what is really just "there may
+    // be more" — plainer phrasing, same detail preserved in the hover title.
+    var chip = el("span", "vcap-chip",
+      k ? "showing the top " + num(k) + " — more may exist" : "more may exist");
+    chip.title = "The pipeline retrieved at most " + (k ? num(k) : "a fixed number") +
+      " candidates for this type; more may exist. Raise vital_per_target_k in " +
+      "case_config.json and re-run the embed stage to widen the search.";
+    return chip;
+  }
+
+  // G-2: full vital-documents checklist — one row per searched-for document type,
+  // ✓ found (deep-links to the doc[s]) or "not found in this collection". All
+  // estate-derived text (labels, item names, tags) is escaped via esc().
+  function vitalDocsPanel(main, vd) {
+    // #17: a promote/dismiss (single or batched) triggers a full render(), which
+    // rebuilds this panel from scratch — drop any selection state and floating
+    // bar left over from the PREVIOUS build so a stale #vselbar (bound to rows
+    // that no longer exist) never leaks into the new one.
+    VITAL_SEL = {};
+    var staleVBar = document.getElementById("vselbar"); if (staleVBar) staleVBar.remove();
+    if (!vd) return;
+    if (vd.available === false) {
+      main.appendChild(el("p", "notice", "Vital-document scan not available for this case."));
+      return;
+    }
+    if (!vd.available) return;
+    var panel = el("section", "vitals-panel");
+    panel.appendChild(el("h2", null, "Vital documents"));
+    panel.appendChild(el("p", "vitals-tally",
+      esc(num(vd.found_count) + " of " + num(vd.total_count) +
+          " key document types found in this collection.")));
+    var rows = el("div", "vitals-rows");
+    (vd.targets || []).forEach(function (t) {
+      var row = el("div", "vitals-row " + (t.found ? "found" : "missing"));
+      var rhead = el("div", "vitals-row-head");
+      rhead.innerHTML = '<span class="vmark">' + (t.found ? "✓" : "—") + '</span>' +
+        '<span class="vlabel">' + esc(t.label) + '</span>';
+      if (EXAMINER && t.near_miss_count) {  // near-miss hits, examiner-only
+        // Was a dead span: it stated a number and gave no way to look at it, so
+        // reviewing a near-miss meant opening vital_doc_candidates.json on the
+        // workstation by hand. Now it opens the list inline.
+        var drawer = el("div", "vcand-drawer");
+        drawer.hidden = true;
+        var toggle = el("button", "vcand",
+          num(t.near_miss_count) + " near-miss" + (t.near_miss_count === 1 ? "" : "es"));
+        toggle.setAttribute("aria-expanded", "false");
+        toggle.onclick = (function (tgt, btn, box, vdoc) {
+          return function () {
+            if (!box.hidden) {                       // collapse
+              box.hidden = true;
+              btn.setAttribute("aria-expanded", "false");
+              delete NEARMISS_OPEN[tgt];             // stay closed across renders
+              return;
+            }
+            box.hidden = false;
+            btn.setAttribute("aria-expanded", "true");
+            NEARMISS_OPEN[tgt] = NEARMISS_OPEN[tgt] || 0;
+            // vd carries all_targets, which the row's Reassign picker needs.
+            if (!box.dataset.loaded) nearMissLoad(tgt, box, 0, vdoc);
+          };
+        })(t.target, toggle, drawer, vd);
+        rhead.appendChild(toggle);
+        if (t.near_miss_capped) rhead.appendChild(vitalCapChip(vd.per_target_k));
+        row.appendChild(rhead);
+        row.appendChild(drawer);
+        // Re-open a drawer the examiner had open before this render, as deep as
+        // they had paged it. One request for `want` rows, not one per page — the
+        // server clamps to MAX_PAGE_LIMIT, past which the "Show more" button is
+        // still there to carry on.
+        if (NEARMISS_OPEN[t.target] != null) {
+          drawer.hidden = false;
+          toggle.setAttribute("aria-expanded", "true");
+          nearMissLoad(t.target, drawer, 0, vd, NEARMISS_OPEN[t.target]);
+          // The panel is rebuilt from the top, so the row they were working in
+          // may be off-screen now. Put it back in front of them.
+          scrollBackTo(row);
+        }
+      } else {
+        // Retrieval can hit the cap even with no near-misses left to review (every
+        // hit already confirmed/dismissed) — the truncation still means more
+        // candidates may exist unretrieved, so flag it whether or not a drawer opened.
+        if (EXAMINER && t.near_miss_capped) rhead.appendChild(vitalCapChip(vd.per_target_k));
+        row.appendChild(rhead);
+      }
+      if (t.found) {
+        var items = el("div", "vitals-items");
+        (t.items || []).forEach(function (it) {
+          var label = it.name || it.tag || "document";
+          var itemRow = el("div", "vitals-item");
+          if (it.file_id) {
+            var a = el("a", "vitals-link", esc(label));
+            a.href = "#";
+            a.onclick = function (e) { e.preventDefault(); go({ open: true, file: it.file_id }); };
+            itemRow.appendChild(a);
+          } else if (it.thread_id) {
+            // Email-sourced vital doc: it lives in the Emails section, not the
+            // documents view, so deep-link into its conversation rather than
+            // printing a dead `message_43267.eml`. Prefer the conversation
+            // SUBJECT as the label — the .eml basename is meaningless to a family.
+            // "(no subject)" matches how the Emails list labels this same thread,
+            // so the row and its destination read alike.
+            var ta = el("a", "vitals-link", esc(it.thread_subject || "(no subject)"));
+            ta.href = "#";
+            ta.onclick = (function (tid) {
+              return function (e) { e.preventDefault(); go({ page: "emails", thread: tid }); };
+            })(it.thread_id);
+            itemRow.appendChild(ta);
+            itemRow.appendChild(el("span", "vitals-inemails", "in Emails"));
+          } else if (it.conversation_id) {
+            // Messages-equivalent of the email deep link above (#26): a vital doc
+            // sourced from a chat/SMS database chunk deep-links into Messages
+            // instead of printing a dead `chat.db#chunk=...` stub.
+            var ca = el("a", "vitals-link", esc(it.conversation_subject || "(conversation)"));
+            ca.href = "#";
+            ca.onclick = (function (cid) {
+              return function (e) { e.preventDefault(); go({ page: "messages", conversation: cid }); };
+            })(it.conversation_id);
+            itemRow.appendChild(ca);
+            itemRow.appendChild(el("span", "vitals-inemails", "in Messages"));
+          } else {
+            itemRow.appendChild(el("span", "vitals-noitem", esc(label)));
+          }
+          if (EXAMINER) {
+            // Examiner-only DECISIONS-OVERLAY actions (audited + reversible; the
+            // pipeline index vital_doc_confirmed.json is never touched). The vital-doc
+            // id contains a path — always pass it in the JSON BODY, never inline it.
+            // Confirm — the affirmative "yes, this is the document" the release gate
+            // requires (every vital item must be confirmed, dismissed, or reassigned).
+            if (it.reviewed) {
+              itemRow.appendChild(el("span", "vitals-reviewed", "✓ Confirmed"));
+            } else {
+              var confirm = el("button", "vitals-act primary", "Confirm");
+              confirm.onclick = function () {
+                doVerb("/api/vital/confirm", { id: it.id }, "Confirmed vital document")
+                  .then(function (x) { if (x) render(); });
+              };
+              itemRow.appendChild(confirm);
+            }
+            var dismiss = el("button", "vitals-act", "Not a vital document");
+            dismiss.onclick = function () {
+              doVerb("/api/vital/dismiss", { id: it.id }, "Dismissed vital match")
+                .then(function (x) { if (x) render(); });   // re-render Documents (fresh vital_docs)
+            };
+            itemRow.appendChild(dismiss);
+            var reassign = el("button", "vitals-act", "Reassign…");
+            reassign.onclick = function () {
+              pickVitalTarget("Reassign this document", vd.all_targets, t.target, function (to) {
+                // If the doc matches >1 vital category, ask whether to move all of
+                // them (global) or just this one (single); a single-category doc
+                // needs no prompt — the two scopes are identical.
+                var cats = vitalPathTargets(vd, it.path);
+                function send(scope) {
+                  doVerb("/api/vital/reassign",
+                    { id: it.id, to_target: to, scope: scope }, "Reassigned vital document")
+                    .then(function (x) { if (x) render(); });
+                }
+                if (cats.length > 1) { pickScope(cats.length, send); } else { send("single"); }
+              });
+            };
+            itemRow.appendChild(reassign);
+          }
+          items.appendChild(itemRow);
+        });
+        row.appendChild(items);
+      } else {
+        row.appendChild(el("div", "vitals-none", "Not found in this collection."));
+      }
+      rows.appendChild(row);
+    });
+    panel.appendChild(rows);
+    main.appendChild(panel);
+  }
+
+  P.documents = function (main, data) {
+    var index = data.index || [];
+    var controls = head(main, "Documents", "Documents", num(data.total || 0) + " documents.");
+    vitalDocsPanel(main, data.vital_docs);  // G-2 checklist at the top of Documents
+    // Category dropdown + (financial) sub-category dropdown in the sticky controls (#9).
+    // Both are SERVER filters now (applied before the page slice) so a category's
+    // tail is reachable via Load-more; the index (from ALL rows) drives the counts.
+    var selCat = el("select"); selCat.appendChild(new Option("All categories", ""));
+    index.forEach(function (c) { selCat.appendChild(new Option(pretty(c.category) + " (" + c.count + ")", c.category)); });
+    var fin = (index.filter(function (c) { return c.category === "financial"; })[0] || {}).subcategories || [];
+    var selSub = el("select"); selSub.style.display = "none";
+    (function fillSub() {
+      selSub.innerHTML = ""; selSub.appendChild(new Option("All sub-categories", ""));
+      fin.forEach(function (s) { selSub.appendChild(new Option(pretty(s.name) + " (" + s.count + ")", s.name)); });
+    })();
+    if (Q.cat) selCat.value = Q.cat;
+    if (Q.subcat) selSub.value = Q.subcat;
+    var expBtn = el("button", "btn", "Export filtered");
+    controls.appendChild(el("span", "flabel", "Category")); controls.appendChild(selCat);
+    controls.appendChild(selSub); controls.appendChild(expBtn);
+
+    var holder = el("div"); main.appendChild(holder);
+    var pg = pager("/api/documents", {
+      getParams: function () { return { cat: selCat.value, subcat: selSub.value }; },
+      render: function (all) { holder.innerHTML = ""; fileTable(holder, all); },
+    });
+    main.appendChild(pg.footer);
+    selCat.onchange = function () {
+      selSub.value = ""; selSub.style.display = (selCat.value === "financial" && fin.length) ? "" : "none";
+      setQ({ cat: selCat.value, subcat: "" }); pg.load(true);
+    };
+    selSub.onchange = function () { setQ({ subcat: selSub.value }); pg.load(true); };
+    expBtn.onclick = function () {
+      var cat = selCat.value;
+      if (!cat) return doVerb("/api/export", { items: pg.rows.map(function (r) { return r.file; }) }, "Exported documents");
+      var key = (cat === "financial" && selSub.value) ? cat + ":" + selSub.value : cat;
+      exportCollection("category", key, pretty(selSub.value || cat));
+    };
+    // Seed from page 1; re-fetch with the category filter if one is deep-linked.
+    selSub.style.display = (selCat.value === "financial" && fin.length) ? "" : "none";
+    if (selCat.value) pg.load(true); else pg.seed(data);
+  };
+
+  P.correspondence = function (main, d) {
+    var typed = d.typed || [], hand = d.handwritten || [];
+    var scanned = d.scanned || { rows: [], total: 0 };   // paginated envelope (F-3)
+    var scannedTotal = scanned.total || 0;
+    var controls = head(main, "Correspondence", "Correspondence",
+      typed.length + " typed · " + hand.length + " handwritten · " + num(scannedTotal) + " scanned.");
+    // Modality dropdown in the sticky controls (#10): shows/hides the groups.
+    var opts = [["typed", "Typed", typed.length], ["handwritten", "Handwritten", hand.length],
+                ["scanned", "Scanned letters & documents", scannedTotal]].filter(function (o) { return o[2]; });
+    var sel = el("select");
+    sel.appendChild(new Option("All", ""));
+    opts.forEach(function (o) { sel.appendChild(new Option(o[1] + " (" + num(o[2]) + ")", o[0])); });
+    sel.value = Q.modality || (opts.length ? opts[0][0] : "");  // restore, else first non-empty
+    controls.appendChild(el("span", "flabel", "View")); controls.appendChild(sel);
+
+    var holder = el("div"); main.appendChild(holder);
+    // Each group builds ONCE into its own section; the modality selector toggles
+    // visibility (so the scanned Load-more state survives a modality switch).
+    var secTyped = null, secHand = null, secScan = null;
+    if (typed.length) {
+      secTyped = el("div", "corr-sec"); secTyped.appendChild(el("h2", null, "Typed (" + num(typed.length) + ")"));
+      fileTable(secTyped, typed); holder.appendChild(secTyped);
+    }
+    if (hand.length) {
+      secHand = el("div", "corr-sec"); secHand.appendChild(el("h2", null, "Handwritten (" + num(hand.length) + ")"));
+      fileTable(secHand, hand); holder.appendChild(secHand);
+    }
+    if (scannedTotal) {
+      secScan = el("div", "corr-sec"); secScan.appendChild(el("h2", null, "Scanned letters & documents (" + num(scannedTotal) + ")"));
+      // #19: drag-select over the scanned grid, same infra as the Photos page
+      // (marqueeSelect + the shared selbar batch banner) — previously an
+      // examiner could only act one scanned image at a time.
+      var scanCtrls = el("div", "controls"); secScan.appendChild(scanCtrls);
+      var scanGrid = el("div"); secScan.appendChild(scanGrid);
+      if (EXAMINER) marqueeSelect(scanCtrls, scanGrid, ".card", selPick);
+      // correspondence's Load-more refetches the full payload; the paginated rows
+      // live under `.scanned`, so the pager unwraps that sub-envelope.
+      var scanCtrl = null;
+      var pg = pager("/api/correspondence", {
+        unwrap: function (resp) { return resp.scanned || resp; },
+        // Reuse one virtualized grid across Load-more pages: extend the set in place
+        // instead of tearing down and rebuilding (keeps scroll, F-4/F-8).
+        render: function (all) {
+          if (scanCtrl) scanCtrl.setRows(all); else scanCtrl = photoGrid(scanGrid, all);
+        },
+      });
+      secScan.appendChild(pg.footer);
+      pg.seed(d);   // d is the full correspondence payload; unwrap picks .scanned
+      holder.appendChild(secScan);
+    }
+    function applyModality() {
+      var pick = sel.value;
+      [[secTyped, "typed"], [secHand, "handwritten"], [secScan, "scanned"]].forEach(function (pair) {
+        if (pair[0]) pair[0].style.display = (!pick || pick === pair[1]) ? "" : "none";
+      });
+      // The scanned grid may have been built while hidden (0-width) if another
+      // modality was active — re-measure/re-window now that it's visible.
+      if (secScan && secScan.style.display !== "none" && scanCtrl) scanCtrl.refresh();
+    }
+    sel.onchange = function () { setQ({ modality: sel.value }); applyModality(); };
+    applyModality();
+    if (!typed.length && !hand.length && !scannedTotal) holder.appendChild(el("p", "notice", "No correspondence in this case."));
+  };
+
+  // Examiner toggle: demote a thread out of the top of the significance sort (it
+  // drops to the bottom band, stays visible) or restore it. Single-item → no
+  // confirm; reversible from History. The server verb toggles, so it's safe even
+  // if the row's demoted flag is briefly stale.
+  function emailDemoteBtn(r) {
+    var b = el("button", "btn small" + (r.demoted ? " primary" : ""), r.demoted ? "Restore" : "Demote");
+    b.title = r.demoted ? "Restore to its ranked position" : "Remove from top of the sort";
+    b.onclick = function (ev) {
+      ev.stopPropagation();
+      doVerb("/api/demote/email", { thread_id: r.thread_id, subject: r.subject, restore: !!r.demoted },
+        r.demoted ? "Restored email" : "Demoted email").then(function (x) { if (x) render(); });
+    };
+    return b;
+  }
+
+  // Redraw the significance-banded email list from the accumulated rows (rebuilt
+  // on each Load-more page — the bands regroup the full loaded set).
+  function drawEmailBands(container, rows) {
+    container.innerHTML = "";
+    // Group into significance bands so the (already significance-sorted) list reads
+    // as organized by importance, not a flat date jumble (#D).
+    var BANDS = [[5, "Major life events"], [4, "Emotionally resonant"], [3, "Personal"],
+                 [2, "Everyday"], [1, "Routine"], [0, "Unranked"]];
+    BANDS.forEach(function (band) {
+      var n = band[0];
+      var group = rows.filter(function (r) { return (parseInt(r.significance, 10) || 0) === n; });
+      if (!group.length) return;
+      container.appendChild(el("h2", null, band[1] + " (" + group.length + ")"));
+      var tbl = el("table");
+      tbl.innerHTML = "<tr><th>Subject</th><th>With</th><th>When</th><th>Msgs</th>" + (EXAMINER ? "<th></th>" : "") + "</tr>";
+      group.forEach(function (r) {
+        var tr = el("tr", "clickable");
+        tr.innerHTML = "<td>" + esc(r.subject) + " " + sig(r.significance) +
+          "</td><td class='preview clamp2'>" + recipients(r.participants) + "</td><td class='preview'>" +
+          esc((r.date_last || "").slice(0, 10)) + "</td><td>" + num(r.message_count) + "</td>" +
+          (EXAMINER ? "<td class='actcell'></td>" : "");
+        tr.onclick = function () { go({ page: "emails", thread: r.thread_id }); };
+        keyable(tr, null);   // F-12
+        if (EXAMINER) tr.lastChild.appendChild(emailDemoteBtn(r));
+        tbl.appendChild(tr);
+      });
+      container.appendChild(tbl);
+    });
+  }
+
+  // G-4: attachment chips under one email message. Inline cid-embedded images
+  // (logos/signatures) are suppressed so the row isn't cluttered. A resolved
+  // file_id deep-links into the doc/photo lightbox (go({open,file})); an
+  // unresolved attachment renders name + size only — never a broken link.
+  // Estate-derived filenames go through textContent only; file_id through go()
+  // (which encodeURIComponent's it). Returns null when there is nothing to show.
+  function attachmentChips(list) {
+    var atts = (list || []).filter(function (a) { return a && !a.is_inline; });
+    if (!atts.length) return null;
+    var wrap = el("div", "attrow");
+    atts.forEach(function (a) {
+      var label = "📎 " + (a.filename || "attachment") +
+        (a.size_bytes ? " · " + fmtBytes(a.size_bytes) : "");
+      var node;
+      if (a.file_id) {
+        node = el("a", "attchip");
+        node.href = "#";
+        node.onclick = function (e) { e.preventDefault(); go({ open: true, file: a.file_id }); };
+      } else {
+        node = el("span", "attchip noatt");
+      }
+      node.textContent = label;
+      node.title = a.filename || "attachment";
+      wrap.appendChild(node);
+    });
+    return wrap;
+  }
+
+  // Thread message list — the Emails detail page AND the vital-doc bulk-review
+  // pager render the same thing, so it lives in one place. `holder` gets one
+  // .emsg per message, reply nesting via `depth`.
+  function drawThreadMessages(holder, t) {
+    (t.messages || []).forEach(function (m) {
+      var it = el("div", "item emsg");
+      it.style.marginLeft = Math.min(m.depth || 0, 6) * 22 + "px";  // reply nesting (#3)
+      it.innerHTML = "<div class='emh'><strong>" + esc(m.from_display || m.from || "") + "</strong> &rarr; " + recipients(m.to) +
+        sig(m.significance) + "<span class='when'>" + esc((m.date || "").replace("T", " ")) + "</span></div>" +
+        (m.subject ? "<div class='emsub'>" + esc(m.subject) + "</div>" : "") +
+        "<div class='embody'>" + esc(m.body || "") + "</div>";
+      var atts = attachmentChips(m.attachments);   // G-4
+      if (atts) it.appendChild(atts);
+      holder.appendChild(it);
+    });
+    if (!(t.messages || []).length)
+      holder.appendChild(el("p", "notice", "No message bodies recovered."));
+  }
+
+  // Conversation transcript — messages and call events interleaved into one
+  // chronological stream. Shared by the Messages detail page and the pager.
+  function drawConversationStream(holder, c) {
+    var stream = [];
+    (c.messages || []).forEach(function (m) { stream.push({ ts: m.ts, msg: m }); });
+    (c.call_events || []).forEach(function (ce) { stream.push({ ts: ce.ts, call: ce }); });
+    stream.sort(function (a, b) {
+      var x = a.ts || "", y = b.ts || "";
+      return x < y ? -1 : x > y ? 1 : 0;
+    });
+    stream.forEach(function (s) {
+      if (s.call) {
+        var ce = s.call, dur = callDuration(ce.duration_s);
+        var cev = el("div", "callevent");
+        cev.innerHTML = "📞 <span class='calltype'>" + esc(pretty(ce.call_type || "call")) + "</span>" +
+          (dur ? " <span class='when'>" + esc(dur) + "</span>" : "") +
+          "<span class='when'>" + esc(String(ce.ts || "").replace("T", " ")) + "</span>";
+        holder.appendChild(cev);
+        return;
+      }
+      var m = s.msg;
+      var bub = el("div", "bubble " + (m.direction === "sent" ? "sent" : "received"));
+      bub.appendChild(el("div", "bubh",
+        "<strong>" + esc(m.sender_display || m.sender || "") + "</strong><span class='when'>" +
+        esc(String(m.ts || "").replace("T", " ")) + "</span>"));
+      if (m.text) bub.appendChild(el("div", "bubtext", esc(m.text)));
+      (m.attachments || []).forEach(function (a) { bub.appendChild(messageAttachment(a)); });
+      holder.appendChild(bub);
+    });
+    if (!stream.length)
+      holder.appendChild(el("p", "notice", "No messages recovered in this conversation."));
+    return stream.length;
+  }
+
+  P.emails = function (main, data) {
+    // Thread detail when ?thread=ID is present.
+    if (Q.thread) {
+      backLink(main, "All emails", { page: "emails" });
+      var holder = el("div", "reading emthread"); main.appendChild(holder);
+      getJSON("/api/email/thread?id=" + encodeURIComponent(Q.thread)).then(function (t) {
+        var ctrls = head(holder, "Emails", t.subject || "(no subject)", (t.messages || []).length + " message(s).");
+        if (EXAMINER) ctrls.appendChild(emailDemoteBtn({ thread_id: Q.thread, subject: t.subject, demoted: t.demoted }));
+        drawThreadMessages(holder, t);
+      }).catch(function (e) { holder.appendChild(el("p", "notice", "Couldn't load thread: " + esc(e.message))); });
+      return;
+    }
+    // G-6: ?participant=<address> narrows the list to threads with that person (set
+    // by clicking a correspondent card). The narrowing is SERVER-side (before the
+    // page slice), so total reflects the filtered count and the tail is reachable.
+    var participant = Q.participant || "";
+    var lead = participant
+      ? "Emails with " + participant + " — " + num((data && data.total) || 0) + " conversations."
+      : num((data && data.total) || 0) + " conversations, grouped by significance.";
+    var controls = head(main, "Emails", "Emails", lead);
+    if (participant) {
+      var clr = el("button", "btn chip", "✕ Clear filter");
+      clr.onclick = function () { location.href = "/emails"; };
+      controls.appendChild(clr);
+    }
+    // #11: in-list search (subject/participant) + date range + sort — tens of
+    // thousands of threads with no way to narrow beyond "Load more" batches was
+    // close to unusable for "find X" without falling back to full-text search.
+    var listctrls = el("div", "filterbar"); main.appendChild(listctrls);
+    var search = el("input", "listsearch"); search.type = "search";
+    search.placeholder = "Find by subject or person…"; search.autocomplete = "off";
+    search.setAttribute("aria-label", "Find emails");
+    if (Q.q) search.value = Q.q;
+    var dFrom = el("input"); dFrom.type = "date"; dFrom.title = "From date";
+    var dTo = el("input"); dTo.type = "date"; dTo.title = "To date";
+    if (Q.date_from) dFrom.value = Q.date_from;
+    if (Q.date_to) dTo.value = Q.date_to;
+    var sortSel = el("select"); sortSel.setAttribute("aria-label", "Sort emails");
+    [["", "Most significant"], ["recent", "Most recent"], ["subject", "Subject (A–Z)"]]
+      .forEach(function (o) { sortSel.appendChild(new Option(o[1], o[0])); });
+    if (Q.sort) sortSel.value = Q.sort;
+    listctrls.appendChild(search);
+    listctrls.appendChild(el("span", "flabel", "From")); listctrls.appendChild(dFrom);
+    listctrls.appendChild(el("span", "flabel", "To")); listctrls.appendChild(dTo);
+    listctrls.appendChild(sortSel);
+    var hasListFilter = !!(Q.q || Q.date_from || Q.date_to || Q.sort);
+    var body = el("div"); main.appendChild(body);
+    // Load-more paginates the thread list (no more silent 5,000-of-17k cap). A
+    // demoted thread is forced to significance 0 → the Unranked band → reachable on
+    // a later page and flagged demoted:true for its Restore button (no thread
+    // vanishes). Demote/Restore re-render (refetch page 1); the toggled thread
+    // resurfaces in its new band via Load-more.
+    var pg = pager("/api/emails", {
+      getParams: function () {
+        var p = {};
+        if (participant) p.participant = participant;
+        if (search.value) p.q = search.value;
+        if (dFrom.value) p.date_from = dFrom.value;
+        if (dTo.value) p.date_to = dTo.value;
+        if (sortSel.value) p.sort = sortSel.value;
+        return p;
+      },
+      render: function (all) { drawEmailBands(body, all); },
+      // The router's seed `data` above is the UNfiltered total (fetched before we
+      // know a participant/search/date filter is even active) — `lead` was built
+      // from it and is wrong until this fires with the real, server-filtered
+      // total. Without this, "Emails with X" (or a plain search) sits next to the
+      // global count — the exact thing that makes a filter look broken even
+      // though it isn't.
+      onData: function (raw) {
+        if (!participant) return;
+        var leadEl = main.querySelector(".pagehead-title .lead");
+        if (!leadEl) return;
+        leadEl.innerHTML = esc("Emails with " + participant + " — " +
+          num((raw && raw.total) || 0) + " conversations.");
+      },
+    });
+    main.appendChild(pg.footer);
+    var reload = debounce(function () { setQ({ q: search.value }); pg.load(true); }, 250);
+    search.oninput = reload;
+    function onDate() { setQ({ date_from: dFrom.value, date_to: dTo.value }); pg.load(true); }
+    dFrom.onchange = onDate; dTo.onchange = onDate;
+    sortSel.onchange = function () { setQ({ sort: sortSel.value }); pg.load(true); };
+    // The router's seed payload is UNfiltered (/api/emails with no params); when a
+    // participant/search/date/sort filter is active, refetch page 1 through it.
+    if (participant || hasListFilter) pg.load(true); else pg.seed(data);
+  };
+
+  // ── correspondents / relationships (G-6) ──
+  // One correspondent card. Balance-bar widths are set via CSSOM (.style.width),
+  // not inline style="" attributes, because the page CSP is style-src 'self'. All
+  // estate-derived text (name, address) is esc()'d; the address is encodeURIComponent'd
+  // into the Emails deep-link.
+  function correspondentCard(c) {
+    var addr = c.address || "";
+    var name = c.name || addr;
+    var y0 = String(c.first_seen || "").slice(0, 4), y1 = String(c.last_seen || "").slice(0, 4);
+    var span = (y0 && y1) ? (y0 === y1 ? y0 : (y0 + "–" + y1)) : "";
+    var card = el("div", "corrcard clickable");
+    card.innerHTML =
+      "<div class='cc-name'>" + esc(name) +
+        (c.bidirectional ? " <span class='cc-badge' title='Two-way correspondence'>⇄</span>" : "") + "</div>" +
+      (name !== addr ? "<div class='cc-addr'>" + esc(addr) + "</div>" : "") +
+      "<div class='cc-meta'>" + (span ? esc(span) + " · " : "") + num(c.total) + " messages</div>";
+    var sent = c.sent || 0, received = c.received || 0, tot = sent + received;
+    var bar = el("div", "cc-bar");
+    var sSeg = el("span", "cc-sent"), rSeg = el("span", "cc-recv");
+    sSeg.style.width = (tot ? sent / tot * 100 : 0) + "%";
+    rSeg.style.width = (tot ? received / tot * 100 : 0) + "%";
+    bar.appendChild(sSeg); bar.appendChild(rSeg);
+    card.appendChild(bar);
+    card.appendChild(el("div", "cc-bal", "Sent " + num(sent) + " · Received " + num(received)));
+    card.onclick = function () { location.href = "/emails?participant=" + encodeURIComponent(addr); };
+    keyable(card, "button", "Correspondence with " + name);   // F-12
+    return card;
+  }
+
+  // P2 #9: one possible-duplicate-identity suggestion card (examiner-only).
+  // `onResolved()` re-fetches both the suggestion panel and the correspondent
+  // grid after either verb succeeds, so a confirmed merge's combined stats
+  // and the shrunk suggestion list both show immediately.
+  function duplicateSuggestionCard(c, onResolved) {
+    var addrs = c.addresses || [];
+    var card = el("div", "dupecard");
+    card.innerHTML = "<div class='cc-name'>" + esc(c.name || "") + "</div>" +
+      "<p class='dupe-hint'>These addresses look like the same person — review and confirm.</p>";
+    var list = el("ul", "dupe-addrs");
+    addrs.forEach(function (a) {
+      list.appendChild(el("li", null,
+        "<span class='cc-addr'>" + esc(a.address || "") + "</span>" +
+        " <span class='dupe-total'>" + num(a.total || 0) + " messages" +
+        (a.bidirectional ? " · two-way" : "") + "</span>"));
+    });
+    card.appendChild(list);
+    var row = el("div", "qrow");
+    var addresses = addrs.map(function (a) { return a.address; });
+    var yes = el("button", "btn primary", "Same person — merge");
+    yes.onclick = function () {
+      yes.disabled = true; no.disabled = true;
+      doVerb("/api/correspondent/merge", { addresses: addresses }, "Merged").then(function (res) {
+        if (res) onResolved(); else { yes.disabled = false; no.disabled = false; }
+      });
+    };
+    var no = el("button", "btn", "Not the same person");
+    no.onclick = function () {
+      yes.disabled = true; no.disabled = true;
+      doVerb("/api/correspondent/reject", { addresses: addresses }, "Dismissed").then(function (res) {
+        if (res) onResolved(); else { yes.disabled = false; no.disabled = false; }
+      });
+    };
+    row.appendChild(yes); row.appendChild(no);
+    card.appendChild(row);
+    return card;
+  }
+
+  P.correspondents = function (main, data) {
+    head(main, "Correspondents", "Correspondents",
+      num((data && data.total) || 0) + " people the owner exchanged email with — most frequent first. Open one to see those emails.");
+    // #11: in-list search (name/address) + sort — thousands of correspondents
+    // with no way to narrow the list was close to unusable for "find person X"
+    // without falling back to full-text search first.
+    var controls = el("div", "filterbar");
+    var search = el("input", "listsearch"); search.type = "search";
+    search.placeholder = "Find a correspondent…"; search.autocomplete = "off";
+    search.setAttribute("aria-label", "Find a correspondent");
+    if (Q.q) search.value = Q.q;
+    var sort = el("select"); sort.setAttribute("aria-label", "Sort correspondents");
+    [["", "Most messages"], ["name", "Name (A–Z)"], ["recent", "Most recent"]]
+      .forEach(function (o) { sort.appendChild(new Option(o[1], o[0])); });
+    if (Q.sort) sort.value = Q.sort;
+    controls.appendChild(search); controls.appendChild(sort);
+    main.appendChild(controls);
+    var grid = el("div", "corrgrid"); main.appendChild(grid);
+    var pg = pager("/api/correspondents", {
+      getParams: function () { return { q: search.value, sort: sort.value }; },
+      render: function (all) {
+        grid.innerHTML = "";
+        if (!all.length) {
+          grid.appendChild(el("p", "notice",
+            search.value ? "No correspondents match “" + search.value + "”." : "No correspondents in this case."));
+          return;
+        }
+        all.forEach(function (c) { grid.appendChild(correspondentCard(c)); });
+      },
+    });
+    var reload = debounce(function () { setQ({ q: search.value }); pg.load(true); }, 250);
+    search.oninput = reload;
+    sort.onchange = function () { setQ({ sort: sort.value }); pg.load(true); };
+    if (EXAMINER) {
+      // Suggestions render ABOVE the grid (inserted before it was appended to
+      // main), so the panel appears first while still using pg to refresh the
+      // grid once a merge is confirmed.
+      var dupePanel = el("div", "dupepanel");
+      main.insertBefore(dupePanel, grid);
+      var loadDupes = function () {
+        getJSON("/api/correspondent-duplicates").then(function (cands) {
+          dupePanel.innerHTML = "";
+          if (!cands || !cands.length) return;
+          dupePanel.appendChild(el("h3", null, "Possible duplicate identities"));
+          cands.forEach(function (c) {
+            dupePanel.appendChild(duplicateSuggestionCard(c, function () {
+              loadDupes();
+              pg.load(true);
+            }));
+          });
+        }).catch(function () { /* non-fatal: the grid still works without suggestions */ });
+      };
+      loadDupes();
+    }
+    main.appendChild(pg.footer);
+    pg.seed(data);
+  };
+
+  // ── messages (SMS / chat / voicemail conversations) ──
+  // Human duration for a call/voicemail event (seconds → "1m 36s" / "42s").
+  function callDuration(sec) {
+    var n = parseInt(sec, 10);
+    if (isNaN(n) || n <= 0) return "";
+    var m = Math.floor(n / 60), s = n % 60;
+    return m ? (m + "m " + s + "s") : (s + "s");
+  }
+  // Conversation title. Prefer the server's display_name — the same string the
+  // Messages LIST shows (a resolved contact, or a group title composed from
+  // members). Joining participants here instead made one thread read as
+  // "Alex Rendon, Brian Okafor, Casey Lindqvist + 1" in the list and
+  // "Alex Rendon (+15035550178), Brian Okafor (+15035550179), ..." one click
+  // later. Falls back to the join for payloads without it (older cases).
+  // Estate-derived → escape at the sink; here we build a plain string, esc'd by the
+  // head() helper which esc()s its title.
+  function conversationTitle(c) {
+    if (c && c.display_name) return c.display_name;
+    var others = (c.participants || []).filter(function (p) { return p && p !== "owner"; });
+    return others.join(", ") || "(conversation)";
+  }
+  // One attachment inside a bubble. Estate-derived name → esc()/textContent only;
+  // the servable src goes through mediaURL/thumbURL (which encodeURIComponent it) set
+  // as a DOM property, never interpolated into an HTML string. src null → name-only.
+  // Typed placeholder for an attachment we cannot serve. "Not recovered" is
+  // the wrong words for ALL of them: an iMessage app payload (link preview,
+  // sticker, Apple Pay) never had a media file, so reporting it as missing
+  // invents a loss. A real photo the case does not contain IS a genuine gap and
+  // should say so plainly, naming what it was. Server sets `kind` (see
+  // attachment_kind); unknown/absent kind falls back to the neutral wording.
+  var ATT_MISSING = {
+    app_payload: "link preview or app content — no file to show",
+    image: "photo not in this archive",
+    video: "video not in this archive",
+    document: "document not in this archive"
+  };
+  function messageAttachment(a) {
+    var name = (a && a.name) || "attachment";
+    var kindKey = (a && a.kind) || "unknown";
+    // An app payload is described the same way whether or not its blob happens
+    // to have survived into the case, because the blob is not the point: the
+    // link preview's URL is already in the message text, and the payload
+    // itself is an opaque binary. Rendering the resolved ones as prominent
+    // links titled with a raw UUID promised a family reader something real and
+    // handed them a binary download — and put two spellings of the identical
+    // content in one bubble. The bytes stay reachable for the examiner role
+    // through a discreet trailing link.
+    if (kindKey === "app_payload") {
+      var w = el("span", "matt noatt att-app_payload");
+      w.appendChild(document.createTextNode("📎 " + ATT_MISSING.app_payload));
+      w.title = name;
+      if (a && a.src && EXAMINER) {
+        var raw = el("a", "attraw");
+        raw.href = mediaURL(a.src);       // already encoded by mediaURL
+        raw.textContent = "raw";
+        raw.title = name;
+        raw.onclick = function (e) { e.stopPropagation(); };
+        w.appendChild(document.createTextNode(" "));
+        w.appendChild(raw);
+      }
+      return w;
+    }
+    if (!a || !a.src) {
+      var s = el("span", "matt noatt att-" + kindKey);
+      var note = ATT_MISSING[kindKey] || "not recovered";
+      s.textContent = "📎 " + name + " (" + note + ")";
+      s.title = name;
+      return s;
+    }
+    var kind = mediaKind(a.src);
+    if (kind === "image") {
+      var wrap = el("div", "matt");
+      var im = el("img"); lazyThumb(im, a.src); im.alt = name;
+      im.title = name;
+      im.onclick = function () { lightbox(a.src, true); };
+      wrap.appendChild(im);
+      return wrap;
+    }
+    var link = el("a", "matt attlink");
+    link.href = mediaURL(a.src);            // DOM property, already encoded by mediaURL
+    link.textContent = "📎 " + name;
+    link.onclick = function (e) { e.preventDefault(); lightbox(a.src, mediaKind(a.src)); };
+    return link;
+  }
+
+  // Redraw the conversation table from the accumulated rows (rebuilt per page).
+  function drawMessagesTable(container, rows) {
+    container.innerHTML = "";
+    if (!rows.length) { container.appendChild(el("p", "notice", "No messages in this case.")); return; }
+    var tbl = el("table");
+    tbl.innerHTML = "<tr><th>With</th><th>Platform</th><th>When</th><th>Messages</th><th>Calls</th></tr>";
+    rows.forEach(function (r) {
+      var span = r.span || [null, null];
+      var when = String(span[0] || "").slice(0, 10);
+      if (span[1] && span[1] !== span[0]) when += " – " + String(span[1]).slice(0, 10);
+      // Participants beyond the named other party (group chats), owner dropped.
+      var others = (r.participants || []).filter(function (p) { return p && p !== "owner"; });
+      var extra = others.length > 1 ? recipients(others) : "";
+      var tr = el("tr", "clickable");
+      // display_name / platform / participants are all estate-derived → esc() every sink.
+      tr.innerHTML = "<td>" + esc(r.display_name || "(conversation)") +
+        (extra ? "<div class='preview clamp2'>" + extra + "</div>" : "") + "</td>" +
+        "<td class='preview'>" + esc(pretty(r.platform || "")) + "</td>" +
+        "<td class='preview'>" + esc(when) + "</td>" +
+        "<td>" + num(r.message_count) + "</td>" +
+        "<td>" + (r.call_event_count ? num(r.call_event_count) : "") + "</td>";
+      tr.onclick = function () { location.href = "/messages?conversation=" + encodeURIComponent(r.conversation_id); };
+      keyable(tr, null);   // F-12
+      tbl.appendChild(tr);
+    });
+    container.appendChild(tbl);
+  }
+
+  P.messages = function (main, data) {
+    // Conversation transcript when ?conversation=ID is present. Mirrors P.emails'
+    // thread-detail view (lazy per-conversation load, back link, notice on failure).
+    if (Q.conversation) {
+      backLink(main, "All messages", { page: "messages" });
+      var holder = el("div", "reading msgthread"); main.appendChild(holder);
+      getJSON("/api/message/conversation?id=" + encodeURIComponent(Q.conversation)).then(function (c) {
+        if (!c) { holder.appendChild(el("p", "notice", "This conversation could not be found.")); return; }
+        head(holder, "Messages · " + pretty(c.platform || ""), conversationTitle(c),
+          (c.messages || []).length + " message(s)" +
+          ((c.call_events || []).length ? " · " + c.call_events.length + " call(s)" : "") + ".");
+        drawConversationStream(holder, c);
+      }).catch(function (e) { holder.appendChild(el("p", "notice", "Couldn't load conversation: " + esc(e.message))); });
+      return;
+    }
+    head(main, "Messages", "Messages", num((data && data.total) || 0) + " conversations.");
+    var body = el("div"); main.appendChild(body);
+    var pg = pager("/api/messages", { render: function (all) { drawMessagesTable(body, all); } });
+    main.appendChild(pg.footer);
+    pg.seed(data);
+  };
+
+  // G-3: format seconds → "m:ss" for a segment/timeline label.
+  function clockTime(sec) {
+    var n = Math.max(0, Math.floor(Number(sec) || 0));
+    var m = Math.floor(n / 60), s = n % 60;
+    return m + ":" + (s < 10 ? "0" : "") + s;
+  }
+
+  // G-3: the seek-synced transcript detail for ONE recording. Fetches
+  // /api/transcript?id=<file> (segments + timings, containment-checked server-side),
+  // renders an <audio preload="metadata"> plus clickable segments; clicking a segment
+  // sets audio.currentTime to its start and the currently-playing segment highlights
+  // via 'timeupdate'. Degrades to the plain transcript_text when no timing is
+  // available, and drops the player when the audio itself was reaped (has_audio:false).
+  function recordingDetail(main, file) {
+    backLink(main, "All recordings", { page: "recordings" });
+    var holder = el("div", "reading recdetail"); main.appendChild(holder);
+    getJSON("/api/transcript?id=" + encodeURIComponent(file)).then(function (d) {
+      if (!d) { holder.appendChild(el("p", "notice", "This recording could not be found.")); return; }
+      var segs = d.segments || [];
+      var lead = [];
+      if (d.duration != null) lead.push(clockTime(d.duration));
+      if (d.language) lead.push(esc(pretty(String(d.language))));
+      head(holder, "Recording", cleanRecordingName(basename(file)), lead.join(" · "));
+
+      // Player — preload="metadata" on the OPENED detail (the LIST stays preload="none").
+      var audio = null;
+      if (d.has_audio) {
+        audio = el("audio");
+        audio.controls = true;
+        audio.preload = "metadata";
+        audio.src = mediaURL(file);            // DOM property, already encoded by mediaURL
+        holder.appendChild(audio);
+      } else {
+        holder.appendChild(el("p", "notice",
+          "The audio for this recording is not available; showing the transcript only."));
+      }
+
+      if (segs.length) {
+        // Clickable, seek-synced segments.
+        var list = el("div", "segments");
+        var segEls = [];
+        segs.forEach(function (s) {
+          var seg = el("div", "segment");
+          seg.appendChild(el("span", "segtime", esc(clockTime(s.start))));
+          seg.appendChild(el("span", "segtext", esc(s.text || "")));
+          if (audio) {
+            seg.classList.add("seekable");
+            seg.onclick = function () {
+              try { audio.currentTime = Number(s.start) || 0; audio.play(); } catch (e) {}
+            };
+          }
+          seg._start = Number(s.start) || 0;
+          seg._end = (s.end != null ? Number(s.end) : seg._start);
+          segEls.push(seg);
+          list.appendChild(seg);
+        });
+        holder.appendChild(list);
+        if (audio) {
+          // Highlight the segment covering the playhead as it moves.
+          var active = -1;
+          audio.addEventListener("timeupdate", function () {
+            var t = audio.currentTime, idx = -1;
+            for (var i = 0; i < segEls.length; i++) {
+              if (t >= segEls[i]._start && t < segEls[i]._end) { idx = i; break; }
+              if (t >= segEls[i]._start) idx = i;   // fall back to last-started segment
+            }
+            if (idx === active) return;
+            if (active >= 0) segEls[active].classList.remove("playing");
+            active = idx;
+            if (active >= 0) segEls[active].classList.add("playing");
+          });
+        }
+      } else if (d.transcript_text) {
+        // Degrade: no per-segment timing (or sidecar reaped) → plain transcript.
+        holder.appendChild(el("div", "body transcript-plain", esc(d.transcript_text)));
+      } else {
+        holder.appendChild(el("p", "notice", "No transcript is available for this recording."));
+      }
+    }).catch(function (e) {
+      holder.appendChild(el("p", "notice", "Couldn't load transcript: " + esc(e.message)));
+    });
+  }
+
+  P.recordings = function (main, rows) {
+    // Recording detail (seek-synced player + transcript) when ?rec=<file> is present.
+    if (Q.rec) { recordingDetail(main, Q.rec); return; }
+    head(main, "Recordings", "Recordings", rows.length + " recordings. Press play.");
+    var wrap = el("div", "reading");
+    rows.forEach(function (r) {
+      var it = el("div", "item card-row");
+      addPick(it, r.file);
+      var affordance = r.has_transcript
+        ? ' <span class="tchip" title="Transcript available">📝 transcript</span>' : "";
+      var body = el("div", "ibody",
+        "<h3>" + esc(r.name) + " " + sig(r.significance) + affordance + "</h3>" +
+        (r.summary ? '<div class="why">' + esc(r.summary) + "</div>" : "") +
+        '<audio controls preload="none" src="' + mediaURL(r.file) + '"></audio>' +
+        (r.preview ? '<div class="body">' + esc(r.preview) + "</div>" : ""));
+      var actrow = el("div", "actrow");  // explicit per-item Export / Discard (#12)
+      // Open the seek-synced detail (transcript + click-to-seek).
+      var open = el("button", "btn small", "Open transcript");
+      open.onclick = function () {
+        location.href = "/recordings?rec=" + encodeURIComponent(r.file);
+      };
+      actrow.appendChild(open);
+      var exp = el("button", "btn small", "Export");
+      exp.onclick = function () { doVerb("/api/export", { items: [r.file] }, "Exported " + r.name); };
+      actrow.appendChild(exp);
+      if (EXAMINER) {
+        var disc = el("button", "btn small danger", "Discard");
+        disc.onclick = function () {
+          doVerb("/api/banish", { src: r.file }, "Discarded").then(function (x) { if (x) it.remove(); });
+        };
+        actrow.appendChild(disc);
+      }
+      body.appendChild(actrow);
+      it.appendChild(body);
+      wrap.appendChild(it);
+    });
+    main.appendChild(wrap);
+  };
+
+  P.accounts = function (main, d) {
+    head(main, "Online Accounts", "Online Accounts", d.note || "");
+    var creds = d.credentials || {};
+    main.appendChild(el("div", "banner",
+      "<strong>" + num(creds.critical_count) + "</strong> critical and <strong>" + num(creds.informational_count) +
+      "</strong> informational credential finding(s)."));
+    main.appendChild(el("h2", null, "Online accounts seen in mail"));
+    var tbl = el("table"); tbl.innerHTML = "<tr><th>Service</th><th>Messages</th><th>Example subject</th></tr>";
+    (d.domains || []).slice(0, 200).forEach(function (x) {
+      tbl.appendChild(el("tr", null, "<td>" + esc(x.domain) + "</td><td>" + num(x.count) + "</td><td class='preview'>" +
+        esc((x.sample_subjects || [])[0] || "") + "</td>"));
+    });
+    main.appendChild(tbl);
+    if ((creds.items || []).length) {
+      main.appendChild(el("h2", null, "Credential documents"));
+      if (creds.guidance) main.appendChild(el("p", "notice cred-guidance", esc(creds.guidance)));
+      var ct = el("table"); ct.innerHTML = "<tr><th>File</th>" + (EXAMINER ? "<th>Types</th><th>Severity</th>" : "") + "</tr>";
+      creds.items.forEach(function (it) {
+        ct.appendChild(el("tr", null, "<td>" + esc(it.file) + "</td>" +
+          (EXAMINER ? "<td>" + esc((it.types || []).join(", ")) + "</td><td>" + esc(it.severity || "") + "</td>" : "")));
+      });
+      main.appendChild(ct);
+    }
+  };
+
+  function confirmActions(item, card) {
+    // _gone (set by reviewConfirm) also splices the queue array + refreshes
+    // counts; a bare card (lightbox-only context) just removes itself.
+    function done(lb) {
+      if (card) { if (card._gone) card._gone(); else card.remove(); }
+      if (lb) closeLB();
+    }
+    if (item.kind === "unnamed_person") {
+      return [{ label: "Name…", cls: "primary", onclick: function (lb) {
+        textPrompt("Name for " + item.guess + ":", "", function (name) {
+          if (!name) return;
+          doVerb("/api/rename/person", { person_id: item.id, new_name: name }, "Named " + name).then(function (x) { if (x) done(lb); });
+        }); return;
+      } }];
+    }
+    var acts = [
+      { label: "Confirm", cls: "primary", onclick: function (lb) {
+        doVerb("/api/confirm", { queue: item.queue, id: item.id, decision: "accept" }, "Confirmed").then(function (x) { if (x) done(lb); }); } },
+      { label: "Dismiss", onclick: function (lb) {
+        doVerb("/api/confirm", { queue: item.queue, id: item.id, decision: "reject" }, "Dismissed").then(function (x) { if (x) done(lb); }); } },
+    ];
+    // G-15: an unidentified/noise face can be ASSIGNED to a person cluster (it then
+    // joins that person and leaves the queue). item.id is the noise src.
+    if (item.kind === "unidentified_face") {
+      acts.push({ label: "Assign to…", onclick: function (lb) {
+        pickPerson("Assign this face to which person?", null, function (pid) {
+          doVerb("/api/assign/face", { src: item.id, person_id: pid }, "Assigned face")
+            .then(function (x) { if (x) done(lb); });
+        }); } });
+      // Move verb: re-file this face under a person (face_placements overlay). Same
+      // effect as Assign for a noise face, but the general person-Move entrypoint.
+      acts.push({ label: "Move to person…", onclick: function (lb) {
+        pickPerson("Move this face to which person?", null, function (pid) {
+          doVerb("/api/move", { view: "person", src: item.id, to: pid }, "Moved to person")
+            .then(function (x) { if (x) done(lb); });
+        }); } });
+    }
+    // Media-bearing guesses can also be Discarded outright (#8); item.id is a src.
+    if (isMediaKind(item.kind)) {
+      acts.push({ label: "Discard", cls: "danger", onclick: function (lb) {
+        doVerb("/api/banish", { src: item.id }, "Discarded").then(function (x) { if (x) done(lb); }); } });
+    }
+    return acts;
+  }
+
+  // ── review-queue bulk-triage PAGER (review-queue-bulk-triage.md) ─────────────
+  // A one-item-at-a-time triage spine over the two surfaces with real audited
+  // verbs today — quarantine and vital documents — reached from the Guided review
+  // checklist via /review?group=quarantine|vital. Optimistic advance (Phase 0:
+  // ~1s/action, all case.load()) with per-item pending/error state and a
+  // persistent single-token undo bar. No new verbs: it rides the existing
+  // release/discard/confirm/promote/dismiss/reassign endpoints.
+  //
+  // Verb map: pager action → endpoint + payload builder. `resolves:false` (reassign)
+  // means the item changed target but stays reviewable (§5) — the pager advances
+  // but does NOT count it cleared.
+  var PAGER_VERBS = {
+    release:  { ep: "/api/release", past: "Released",
+                pay: function (it) { return { canonical_path: it.id }; }, resolves: true },
+    discard:  { ep: "/api/discard/quarantine", past: "Discarded", cls: "danger",
+                pay: function (it) { return { canonical_path: it.id }; }, resolves: true },
+    confirm:  { ep: "/api/vital/confirm", past: "Confirmed", cls: "primary",
+                pay: function (it) { return { id: it.id }; }, resolves: true },
+    promote:  { ep: "/api/vital/promote", past: "Promoted", cls: "primary",
+                pay: function (it) { return { id: it.id }; }, resolves: true },
+    dismiss:  { ep: "/api/vital/dismiss", past: "Dismissed", cls: "danger",
+                pay: function (it) { return { id: it.id }; }, resolves: true },
+    // to_target / scope are filled by the reassign modal (pay is null here).
+    reassign: { ep: "/api/vital/reassign", past: "Reassigned", pay: null, resolves: false },
+  };
+  var PAGER_LABEL = { release: "Release", discard: "Discard", confirm: "Confirm",
+                      promote: "Promote", dismiss: "Dismiss", reassign: "Reassign…",
+                      skip: "Skip" };
+  // Keyboard: per-group accelerators. ←/→ back/forward and S skip are shared;
+  // Space reveals a blurred quarantine item.
+  var PAGER_KEYS = {
+    quarantine: { r: "release", d: "discard" },
+    vital: { c: "confirm", p: "promote", x: "dismiss", a: "reassign" },
+  };
+  var PAGER_KEYHANDLER = null;   // module-side so a re-entry unbinds the old one
+
+  function reviewPager(main, group) {
+    var title = group === "vital" ? "Vital documents — bulk review"
+                                  : "Quarantine — bulk review";
+    head(main, "Examiner · Bulk review", title,
+      "One item at a time — pick an action; the queue advances.");
+    // Escape hatch back to the classic tabbed lists for this surface.
+    var esc0 = el("a", "act small", "List view");
+    esc0.href = group === "vital" ? "/documents" : "/review?group=quarantine&list=1";
+    main.appendChild(esc0);
+    var body = el("div", "pager"); main.appendChild(body);
+    body.appendChild(el("p", "notice", "Loading…"));
+    getJSON("/api/review-pager?group=" + encodeURIComponent(group)).then(function (d) {
+      buildPager(body, group, d);
+    }).catch(function (e) {
+      body.innerHTML = "";
+      body.appendChild(el("p", "notice", "Couldn't load: " + esc((e && e.message) || "error")));
+    });
+  }
+
+  function buildPager(body, group, d) {
+    body.innerHTML = "";
+    var items = (d.items || []).map(function (it) { it._state = "pending"; return it; });
+    var allTargets = d.all_targets || [];
+    var pos = 0;
+    var revealed = false;   // per-item blur-reveal latch
+
+    if (!items.length) {
+      body.appendChild(el("p", "notice",
+        group === "vital" ? "No vital documents need review — the checklist is clear."
+                          : "Nothing in quarantine to review."));
+      body.appendChild(backToReviewLink());
+      return;
+    }
+
+    var progress = el("div", "pager-progress"); body.appendChild(progress);
+    var stage = el("div", "pager-stage"); body.appendChild(stage);
+    var acts = el("div", "pager-actions"); body.appendChild(acts);
+    var undobar = el("div", "pager-undo"); undobar.style.display = "none"; body.appendChild(undobar);
+    var tray = el("div", "pager-tray"); tray.style.display = "none"; body.appendChild(tray);
+
+    function counts() {
+      var c = { done: 0, error: 0, skipped: 0, reassigned: 0, pending: 0 };
+      items.forEach(function (it) { c[it._state] = (c[it._state] || 0) + 1; });
+      return c;
+    }
+    function curItem() { return items[pos]; }
+
+    function updateProgress() {
+      var c = counts();
+      progress.innerHTML = "";
+      progress.appendChild(el("span", "pnum", esc("Item " + Math.min(pos + 1, items.length) +
+        " of " + items.length)));
+      var bits = [];
+      if (c.done) bits.push(c.done + " resolved");
+      if (c.reassigned) bits.push(c.reassigned + " reassigned");
+      if (c.skipped) bits.push(c.skipped + " skipped");
+      if (c.error) bits.push(c.error + " need attention");
+      if (bits.length) progress.appendChild(el("span", "pmeta", esc("· " + bits.join(" · "))));
+    }
+
+    function backToReviewLink() {
+      var a = el("a", "act", "Back to Review queue"); a.href = "/review"; return a;
+    }
+
+    // ── one item's preview + metadata ──
+    // Bumped on every stage render. An inline document preview is fetched async,
+    // so a slow reply for item N must not paint itself over item N+1 when the
+    // examiner pages on before it lands — every callback re-checks its token.
+    var stageToken = 0;
+    function renderStage() {
+      stage.innerHTML = "";
+      stageToken++;
+      revealed = false;
+      var it = curItem();
+      if (!it) return renderDone();
+      var card = el("div", "pcard pcard-" + it.kind);
+      // status ribbon for an already-touched item (revisited via ← )
+      if (it._state !== "pending") {
+        var s = it._state === "done" ? "✓ " + (it._pastLabel || "Done")
+              : it._state === "reassigned" ? "→ Reassigned"
+              : it._state === "skipped" ? "Skipped" : "⚠ Action failed";
+        card.appendChild(el("div", "pribbon pribbon-" + it._state, esc(s)));
+      }
+      if (it.kind === "quarantine") renderQuar(card, it); else renderVital(card, it);
+      stage.appendChild(card);
+      renderActions(it);
+      updateProgress();
+    }
+
+    function renderQuar(card, it) {
+      card.appendChild(el("h2", "pname", esc(it.name || "(unnamed)")));
+      if (it.filters && it.filters.length) {
+        var fb = el("div", "pfilters");
+        it.filters.forEach(function (f) { fb.appendChild(el("span", "chip danger", esc(pretty(f)))); });
+        card.appendChild(fb);
+      }
+      if (it.src) {
+        var wrap = el("div", "pager-media" + (it.blur ? " blurred" : ""));
+        var node;
+        if (it.media_kind === "video") { node = el("video"); node.src = mediaURL(it.src); node.controls = true; }
+        else { node = el("img"); node.src = mediaURL(it.src); node.alt = ""; }
+        wrap.appendChild(node);
+        if (it.blur) {
+          wrap.appendChild(el("div", "pager-reveal", "Hidden — click or press Space to reveal"));
+          wrap.onclick = function () { revealCurrent(); };
+        }
+        card.appendChild(wrap);
+      } else {
+        card.appendChild(el("div", "pnobytes",
+          "No preview — the file's bytes are not available. It can still be released or discarded."));
+      }
+    }
+
+    function renderVital(card, it) {
+      var titleRow = el("div", "pvitalhead");
+      titleRow.appendChild(el("span", "chip", esc(it.vqueue === "near_miss" ? "Near-miss" : "To confirm")));
+      if (it.target) titleRow.appendChild(el("span", "chip target", esc(pretty(it.target))));
+      card.appendChild(titleRow);
+      card.appendChild(el("h2", "pname", esc(it.name || it.thread_subject || it.conversation_subject || "(unnamed)")));
+      if (it.vqueue === "near_miss") {
+        if (it.disposition) card.appendChild(el("div", "pdisp",
+          esc("Why it wasn't confirmed: " + pretty(it.disposition) +
+              (it.reason ? " — " + it.reason : ""))));
+        if (it.snippet) card.appendChild(el("blockquote", "psnip", esc(it.snippet)));
+      }
+      // Every item that HAS content shows it in the card. Confirm/dismiss/reassign
+      // is a judgement about what the thing says, so the content it depends on
+      // must not sit behind a click (or, for a thread, a navigation away from the
+      // queue that loses your place). Email is the single biggest kind across
+      // cases — 100% of jebb's 216 items, 277 of 724_vital's 670.
+      var open;
+      if (it.file_id) {
+        card.appendChild(vitalDocPreview(it, stageToken));
+        return;
+      } else if (it.thread_id) {
+        card.appendChild(vitalThreadPreview(it, stageToken));
+        return;
+      } else if (it.conversation_id) {
+        card.appendChild(vitalConversationPreview(it, stageToken));
+        return;
+      } else {
+        open = el("span", "muted", "No preview available for this item.");
+      }
+      card.appendChild(open);
+    }
+
+    // Shared shell for an embedded preview: a title bar with an "open in its own
+    // page" escape hatch, plus the bounded scroll box the content renders into.
+    function previewShell(title, href, linkLabel) {
+      var wrap = el("div", "pdoc");
+      var bar = el("div", "pdoc-bar");
+      bar.appendChild(txt("span", "pdoc-name", title));
+      var a = el("a", "act small", linkLabel);
+      a.href = href;
+      a.setAttribute("rel", "noopener noreferrer");
+      bar.appendChild(a);
+      wrap.appendChild(bar);
+      var box = el("div", "pdoc-body");
+      wrap.appendChild(box);
+      return { wrap: wrap, box: box };
+    }
+
+    // An email thread, rendered in the card by the same code the Emails detail
+    // page uses. Linking out used to cost the examiner their place in the queue.
+    function vitalThreadPreview(it, token) {
+      var sh = previewShell(it.thread_subject || it.name || "(no subject)",
+                            "/emails?thread=" + encodeURIComponent(it.thread_id),
+                            "Open in Emails");
+      sh.box.classList.add("reading", "emthread", "pdoc-reading");
+      sh.box.appendChild(el("p", "muted", "Loading thread…"));
+      getJSON("/api/email/thread?id=" + encodeURIComponent(it.thread_id)).then(function (t) {
+        if (token !== stageToken) return;          // paged on — stale reply
+        sh.box.innerHTML = "";
+        drawThreadMessages(sh.box, t);
+      }).catch(function () {
+        if (token !== stageToken) return;
+        sh.box.innerHTML = "";
+        sh.box.appendChild(el("p", "muted", "Couldn't load this thread — use Open in Emails."));
+      });
+      return sh.wrap;
+    }
+
+    // A chat/SMS conversation chunk (#26). Same treatment as a thread: 35 of
+    // joex's 142 vital items are conversations.
+    function vitalConversationPreview(it, token) {
+      var sh = previewShell(it.conversation_subject || it.name || "(conversation)",
+                            "/messages?conversation=" + encodeURIComponent(it.conversation_id),
+                            "Open in Messages");
+      sh.box.classList.add("reading", "msgthread", "pdoc-reading");
+      sh.box.appendChild(el("p", "muted", "Loading conversation…"));
+      getJSON("/api/message/conversation?id=" + encodeURIComponent(it.conversation_id)).then(function (c) {
+        if (token !== stageToken) return;
+        sh.box.innerHTML = "";
+        if (!c) { sh.box.appendChild(el("p", "muted", "This conversation could not be found.")); return; }
+        drawConversationStream(sh.box, c);
+      }).catch(function () {
+        if (token !== stageToken) return;
+        sh.box.innerHTML = "";
+        sh.box.appendChild(el("p", "muted", "Couldn't load this conversation — use Open in Messages."));
+      });
+      return sh.wrap;
+    }
+
+    // Embedded document preview for a vital-doc file item. PDFs (273 of this
+    // corpus's 392 file items) use the browser's own viewer; office formats use
+    // the text layer the ocr stage extracted; images render directly. Bounded to
+    // a scrollable box so the action row stays reachable without scrolling past
+    // a 40-page deed. "Open full size" keeps the lightbox for zooming/reading.
+    function vitalDocPreview(it, token) {
+      var kind = mediaKind(it.name || it.file_id);
+      var wrap = el("div", "pdoc");
+
+      var bar = el("div", "pdoc-bar");
+      bar.appendChild(txt("span", "pdoc-name", it.name || basename(it.file_id)));
+      var big = el("button", "act small", "Open full size");
+      big.onclick = function () {
+        lightbox(it.file_id, kind, null, { name: it.name });
+      };
+      bar.appendChild(big);
+      wrap.appendChild(bar);
+
+      // dv-body carries the document typography; the block styles are scoped to
+      // it, so an office preview must wear that class to pick them up.
+      var box = el("div", "pdoc-body" + (kind === "image" || kind === "pdf" ? "" : " dv-body"));
+      wrap.appendChild(box);
+
+      if (kind === "image") {
+        var im = el("img"); im.src = mediaURL(it.file_id); im.alt = "";
+        box.appendChild(im);
+      } else if (kind === "pdf") {
+        // Same-origin /media, served inline without the sandbox CSP that blanks
+        // the viewer (see _media_headers); the page CSP allows frame-src 'self'.
+        var fr = document.createElement("iframe");
+        fr.className = "pdoc-frame";
+        fr.src = mediaURL(it.file_id);
+        fr.setAttribute("title", esc(it.name || "Document preview"));
+        box.appendChild(fr);
+      } else {
+        box.appendChild(el("p", "muted", "Loading preview…"));
+        getJSON("/api/doctext?src=" + encodeURIComponent(it.file_id)).then(function (r) {
+          if (token !== stageToken) return;          // paged on — stale reply
+          var blocks = (r && r.blocks) || [];
+          if (!blocks.length) throw new Error("empty");
+          box.innerHTML = "";
+          blocks.forEach(function (b) {
+            var n = docBlockNode(b);
+            if (n) box.appendChild(n);
+          });
+        }).catch(function () {
+          if (token !== stageToken) return;
+          box.innerHTML = "";
+          box.appendChild(el("p", "muted",
+            "No inline preview for this file type — use Open full size."));
+        });
+      }
+      return wrap;
+    }
+
+    // ── action row (only the item's real actions, + Skip) ──
+    function renderActions(it) {
+      acts.innerHTML = "";
+      if (it._state === "done" || it._state === "reassigned") {
+        // Already acted this pass — offer Next / (undo lives in the persistent bar).
+        var nxt = el("button", "act primary", "Next →");
+        nxt.onclick = function () { advance(); };
+        acts.appendChild(nxt);
+      } else {
+        (it.actions || []).forEach(function (a) {
+          var v = PAGER_VERBS[a];
+          var b = el("button", "act" + (v && v.cls ? " " + v.cls : ""), PAGER_LABEL[a] || a);
+          b.onclick = function () { doAction(a); };
+          acts.appendChild(b);
+        });
+        var sk = el("button", "act ghost", "Skip");
+        sk.onclick = function () { skip(); };
+        acts.appendChild(sk);
+      }
+      // shared navigation
+      var back = el("button", "act ghost", "← Back");
+      back.disabled = pos <= 0;
+      back.onclick = function () { goBack(); };
+      acts.appendChild(back);
+      var kh = el("span", "pkeyhint", esc(keyHint(it)));
+      acts.appendChild(kh);
+    }
+
+    function keyHint(it) {
+      var parts = [];
+      var map = PAGER_KEYS[group] || {};
+      Object.keys(map).forEach(function (k) {
+        if ((it.actions || []).indexOf(map[k]) >= 0) parts.push(k.toUpperCase() + " " + PAGER_LABEL[map[k]]);
+      });
+      parts.push("S skip"); parts.push("←/→ back/next");
+      if (group === "quarantine" && it.blur) parts.push("Space reveal");
+      return parts.join("   ");
+    }
+
+    // ── reveal a blurred quarantine item ──
+    function revealCurrent() {
+      var w = stage.querySelector(".pager-media.blurred");
+      if (w) { w.classList.remove("blurred"); revealed = true; }
+    }
+
+    // ── advance / back / skip ──
+    function advance() {
+      if (pos < items.length) pos++;
+      if (pos >= items.length) return renderDone();
+      renderStage();
+    }
+    function goBack() { if (pos > 0) { pos--; renderStage(); } }
+    function skip() {
+      var it = curItem();
+      if (it && it._state === "pending") it._state = "skipped";
+      advance();
+    }
+
+    // ── act on the current item (optimistic advance) ──
+    function doAction(action) {
+      var it = curItem();
+      if (!it) return;
+      if (action === "reassign") return openReassign(it);
+      fire(it, action, PAGER_VERBS[action].pay(it));
+    }
+
+    function fire(it, action, payload) {
+      var v = PAGER_VERBS[action];
+      it._state = "acting";
+      it._pastLabel = v.past;
+      // Optimistic: mark the outcome and advance NOW; reconcile when the POST lands.
+      it._state = v.resolves ? "done" : "reassigned";
+      advance();
+      postJSON(v.ep, payload).then(function (res) {
+        if (res.ok && res.j && res.j.ok !== false) {
+          var tok = res.j.undo_token;
+          setUndo(it, v, tok);
+        } else {
+          it._state = "error";
+          it._error = (res.j && res.j.error) || "verb failed";
+          toast("Couldn't " + (PAGER_LABEL[action] || action) + ": " + it._error);
+          renderTray();
+          if (curItem() === it) renderStage();   // still on it → reflect the error
+          updateProgress();
+        }
+      }).catch(function (e) {
+        it._state = "error"; it._error = (e && e.message) || "server error";
+        toast("Couldn't " + (PAGER_LABEL[action] || action) + ": " + it._error);
+        renderTray(); updateProgress();
+      });
+    }
+
+    // ── reassign modal: pick a target (+ scope for dup-path items) ──
+    function openReassign(it) {
+      var box = el("div");
+      var selT = el("select");
+      allTargets.forEach(function (t) {
+        if (t.target === it.target) return;   // can't reassign to its own target
+        selT.appendChild(new Option(t.label || t.target, t.target));
+      });
+      box.appendChild(el("label", "flabel", "New document type"));
+      box.appendChild(selT);
+      // Scope only matters when a document matched more than one vital target;
+      // offered always but defaulting to the safe single-item scope.
+      var selS = el("select");
+      selS.appendChild(new Option("Only this item", "single"));
+      selS.appendChild(new Option("Every category this document matched", "global"));
+      box.appendChild(el("label", "flabel", "Apply to"));
+      box.appendChild(selS);
+      pickmodal("Reassign “" + (it.name || it.id) + "”", box, {
+        onConfirm: function (close) {
+          if (!selT.value) { toast("Pick a target"); return; }
+          close();
+          fire(it, "reassign", { id: it.id, to_target: selT.value, scope: selS.value });
+        },
+      });
+    }
+
+    // ── persistent single-token undo bar ──
+    function setUndo(it, v, token) {
+      undobar.innerHTML = "";
+      undobar.style.display = "";
+      undobar.appendChild(el("span", "ulabel",
+        esc("Last action: " + v.past + " " + (it.name || it.id))));
+      if (token) {
+        var u = el("button", "act small", "Undo");
+        u.onclick = function () {
+          u.disabled = true;
+          postJSON("/api/undo", { undo_token: token }).then(function (res) {
+            if (res.ok && res.j && res.j.ok !== false) {
+              // Server restored it → make it reviewable again and jump back to it.
+              it._state = "pending"; it._error = null;
+              pos = items.indexOf(it);
+              undobar.style.display = "none";
+              renderTray();
+              renderStage();
+            } else {
+              u.disabled = false;
+              toast("Couldn't undo: " + ((res.j && res.j.error) || "error"));
+            }
+          }).catch(function (e) {
+            u.disabled = false;
+            toast("Couldn't undo: " + ((e && e.message) || "server error"));
+          });
+        };
+        undobar.appendChild(u);
+      }
+      updateProgress();
+    }
+
+    // ── error tray (items whose verb failed — reconciliation on failure) ──
+    function renderTray() {
+      var errs = items.filter(function (it) { return it._state === "error"; });
+      tray.innerHTML = "";
+      if (!errs.length) { tray.style.display = "none"; return; }
+      tray.style.display = "";
+      tray.appendChild(el("span", "tlabel",
+        esc(errs.length + " item" + (errs.length === 1 ? "" : "s") + " need attention")));
+      var b = el("button", "act small", "Review them");
+      b.onclick = function () { pos = items.indexOf(errs[0]); renderStage(); };
+      tray.appendChild(b);
+    }
+
+    // ── completion summary ──
+    function renderDone() {
+      stage.innerHTML = ""; acts.innerHTML = "";
+      var c = counts();
+      var card = el("div", "pcard pdone");
+      card.appendChild(el("h2", null, "Queue reviewed"));
+      var parts = [c.done + " resolved"];
+      if (c.reassigned) parts.push(c.reassigned + " reassigned");
+      if (c.skipped) parts.push(c.skipped + " skipped");
+      if (c.error) parts.push(c.error + " need attention");
+      card.appendChild(el("p", null, esc(parts.join(" · "))));
+      var unresolved = items.filter(function (it) {
+        return it._state === "skipped" || it._state === "error";
+      });
+      if (unresolved.length) {
+        var again = el("button", "act primary", "Review " + unresolved.length + " unresolved");
+        again.onclick = function () { pos = items.indexOf(unresolved[0]); renderStage(); };
+        card.appendChild(again);
+      }
+      card.appendChild(backToReviewLink());
+      stage.appendChild(card);
+      updateProgress();
+    }
+
+    // ── keyboard ──
+    if (PAGER_KEYHANDLER) document.removeEventListener("keydown", PAGER_KEYHANDLER);
+    PAGER_KEYHANDLER = function (ev) {
+      if (document.querySelector(".pickmodal-back")) return;           // modal owns keys
+      if (document.body.classList.contains("lb-open")) return;         // lightbox owns keys
+      var t = ev.target;
+      if (t && /^(input|select|textarea|button)$/i.test(t.tagName) && ev.key !== "Escape") {
+        // let buttons/inputs handle their own keys, except we still want arrows
+        if (["ArrowLeft", "ArrowRight"].indexOf(ev.key) < 0) return;
+      }
+      var it = curItem();
+      if (ev.key === "ArrowRight") { advance(); ev.preventDefault(); return; }
+      if (ev.key === "ArrowLeft") { goBack(); ev.preventDefault(); return; }
+      if (!it) return;
+      if (ev.key === " " && group === "quarantine" && it.blur && !revealed) { revealCurrent(); ev.preventDefault(); return; }
+      if (ev.key === "s" || ev.key === "S") { skip(); ev.preventDefault(); return; }
+      var act = (PAGER_KEYS[group] || {})[String(ev.key).toLowerCase()];
+      if (act && (it.actions || []).indexOf(act) >= 0 && it._state === "pending") {
+        doAction(act); ev.preventDefault();
+      }
+    };
+    document.addEventListener("keydown", PAGER_KEYHANDLER);
+
+    renderStage();
+  }
+
+  // Review queue is the examiner hub (#14/#15): a group selector switches between
+  // To confirm / Quarantine / Sensitivity / Human review. The chosen group is
+  // remembered module-side so an action's render() returns to the SAME group
+  // (Release/Discard/etc. no longer bounce you back to "To confirm").
+  var REVIEW_GROUP = "confirm";
+  P.review = function (main, d) {
+    // Guided deep-link into the bulk-triage pager: /review?group=quarantine|vital
+    // opens the paged flow for that surface (unless ?list=1 asks for the classic
+    // tabbed lists). §8.3 — the review UI used to ignore Q.group entirely.
+    if ((Q.group === "quarantine" || Q.group === "vital") && Q.list !== "1") {
+      return reviewPager(main, Q.group);
+    }
+    var controls = head(main, "Examiner · Review queue", "Review queue", "Resolve the pipeline's flags.");
+    var qd = d.quarantine_entries || { entries: [], total: 0 };
+    var groups = [["confirm", "To confirm", (d.confirm_queue || []).length],
+                  ["quarantine", "Quarantine", qd.total || 0],
+                  ["sensitivity", "Sensitivity", d.sensitive_total || 0],
+                  ["human", "Human review", d.human_review_count || 0]];
+    // A guided deep-link (?group=…) also seeds the classic tabbed view — including
+    // the ?list=1 fallback from the pager's "List view" escape — so it opens on the
+    // named tab instead of always snapping to "To confirm".
+    if (Q.group && groups.some(function (g) { return g[0] === Q.group; })) REVIEW_GROUP = Q.group;
+    if (!groups.some(function (g) { return g[0] === REVIEW_GROUP; })) REVIEW_GROUP = "confirm";
+    var sel = el("select");
+    groups.forEach(function (g) { sel.appendChild(new Option(g[1] + " (" + g[2] + ")", g[0])); });
+    sel.value = REVIEW_GROUP;
+    controls.appendChild(el("span", "flabel", "Group")); controls.appendChild(sel);
+    // Group-specific banner tools (e.g. the confirm queue's Select/Deselect all);
+    // cleared on every draw() so they live in the sticky banner, not the scroll body.
+    var groupTools = el("span", "grouptools"); controls.appendChild(groupTools);
+    var tiles = el("div", "tiles");
+    groups.forEach(function (g) {
+      var t = el("div", "tile clickable" + (g[0] === REVIEW_GROUP ? " active" : ""),
+                 '<span class="n">' + num(g[2]) + '</span><span class="l">' + g[1] + "</span>");
+      t.onclick = function () { setGroup(g[0]); };
+      keyable(t, "button");   // F-12
+      tiles.appendChild(t);
+    });
+    main.appendChild(tiles);
+    var holder = el("div"); main.appendChild(holder);
+    function setGroup(g) { REVIEW_GROUP = g; sel.value = g; draw(); }
+    // Called by the sub-renderers after a targeted removal so the tile/select
+    // counts track the arrays without re-fetching the whole review payload.
+    function refreshCounts() {
+      groups[0][2] = (d.confirm_queue || []).length;
+      groups[1][2] = qd.total || 0;
+      tiles.querySelectorAll(".tile").forEach(function (t, i) {
+        var n = t.querySelector(".n"); if (n) n.textContent = num(groups[i][2]);
+      });
+      sel.querySelectorAll("option").forEach(function (o, i) {
+        o.textContent = groups[i][1] + " (" + groups[i][2] + ")";
+      });
+    }
+    function draw() {
+      holder.innerHTML = "";
+      groupTools.innerHTML = ""; document.body.classList.remove("selecting");  // reset banner tools + select mode on group switch
+      // Drop any stale confirm-queue selection bar: it lives on document.body and
+      // otherwise survives a group switch with a stale count and buttons bound to
+      // the PREVIOUS group's items (clicking Confirm re-posted decisions for cards
+      // no longer on screen). reviewConfirm recreates a fresh one when needed.
+      var staleBar = document.getElementById("rselbar"); if (staleBar) staleBar.remove();
+      var staleQBar = document.getElementById("qselbar"); if (staleQBar) staleQBar.remove();
+      var g = sel.value;
+      tiles.querySelectorAll(".tile").forEach(function (t, i) { t.classList.toggle("active", groups[i][0] === g); });
+      if (g === "confirm") reviewConfirm(holder, (d.confirm_queue = d.confirm_queue || []), groupTools, refreshCounts);
+      else if (g === "quarantine") reviewQuarantine(holder, qd, refreshCounts);
+      else if (g === "sensitivity") reviewFlagged(holder, "Sensitivity", d.sensitive || [], true);
+      else reviewFlagged(holder, "Human review", d.human_review || [], false);
+    }
+    sel.onchange = function () { REVIEW_GROUP = sel.value; draw(); };
+    draw();
+    transparencyReview(main);   // G-14: examiner suspense + significant-attachment noise
+  };
+
+  // Confirm queue with per-card actions + multi-select group actions (#13).
+  // `tools` is the sticky-banner slot that holds the Select/Deselect-all buttons.
+  // `onChange` is P.review's count refresher, called after in-place removals.
+  function reviewConfirm(holder, q, tools, onChange) {
+    if (!q.length) { holder.appendChild(el("p", "notice", "Nothing to confirm.")); return; }
+    var rsel = {};  // review selection: queue:id -> item
+    var cardOf = {};  // queue:id -> card element, for targeted removal
+    // Pull resolved items out of the view in place: card out of the DOM, item
+    // out of the queue array (so a group switch doesn't resurrect it), counts
+    // refreshed — instead of re-fetching the entire review payload per action.
+    function dropResolved(items) {
+      items.forEach(function (it) {
+        var key = it.queue + ":" + it.id;
+        var c = cardOf[key];
+        if (c) { c.remove(); delete cardOf[key]; }
+        delete rsel[key];
+        var ix = q.indexOf(it);
+        if (ix >= 0) q.splice(ix, 1);
+      });
+      if (onChange) onChange();
+      rbar();
+      refreshMore();
+      if (!q.length) holder.appendChild(el("p", "notice", "Nothing to confirm."));
+    }
+    function rbar() {
+      var bar = document.getElementById("rselbar");
+      if (!bar) { bar = el("div", "selbar"); bar.id = "rselbar"; document.body.appendChild(bar); }
+      var items = Object.keys(rsel).map(function (k) { return rsel[k]; });
+      bar.innerHTML = '<span class="n">' + items.length + ' selected</span><span class="sep"></span>';
+      [["Confirm", "accept", "primary"], ["Dismiss", "reject", ""]].forEach(function (a) {
+        var b = el("button", "act " + a[2], a[0]);
+        b.onclick = function () {
+          // accept/reject only applies to confirmable cards. unnamed_person cards
+          // need a NAME (handled per-card) — batch-confirming them recorded a
+          // decided name_person with value:null, so the "Name this person?" card
+          // vanished unnamed. Skip them here.
+          var confirmable = items.filter(function (it) { return it.kind !== "unnamed_person"; });
+          if (!confirmable.length) {
+            toast("Select photo or face cards to " + a[0].toLowerCase() + " — name people individually");
+            return;
+          }
+          // ONE batched request: the server writes family_decisions.json once
+          // for the whole selection (was N POSTs, each rewriting the file).
+          postJSON("/api/confirm/batch", {
+            items: confirmable.map(function (it) { return { queue: it.queue, id: it.id }; }),
+            decision: a[1],
+          }).then(function (res) {
+            if (!res.ok || res.j.ok === false) {
+              toast("Couldn't " + a[0].toLowerCase() + ": " + (res.j.error || "error"));
+              return;
+            }
+            toast(a[0] + "ed " + res.j.count);
+            dropResolved(confirmable);
+          }).catch(function () {
+            toast(a[0] + " failed — check the server");
+          });
+        };
+        bar.appendChild(b);
+      });
+      var dz = el("button", "act danger", "Discard");
+      dz.onclick = function () {
+        var media = items.filter(function (it) { return isMediaKind(it.kind); });
+        if (!media.length) { toast("No discardable media items selected"); return; }
+        if (media.length > 1 && !confirm("Discard " + media.length + " items? Reversible from History.")) return;
+        dz.disabled = true; dz.textContent = "Discarding…";
+        doVerb("/api/banish", { srcs: media.map(function (it) { return it.id; }) }, "Discarded " + media.length)
+          .then(function (x) { if (x) dropResolved(media); else { dz.disabled = false; dz.textContent = "Discard"; } });
+      };
+      bar.appendChild(dz);
+      bar.classList.toggle("show", items.length > 0);
+    }
+    function rPick(c, on) {   // marquee/click selection → the local rsel set
+      var it = c._item; if (!it) return;
+      var key = it.queue + ":" + it.id;
+      if (on) { rsel[key] = it; c.classList.add("sel"); } else { delete rsel[key]; c.classList.remove("sel"); }
+      rbar();
+    }
+    function rClear() {
+      rsel = {};
+      grid.querySelectorAll(".sel").forEach(function (c) { c.classList.remove("sel"); });
+      rbar();
+    }
+    var grid = el("div", "grid qgrid");
+    marqueeSelect(tools || holder, grid, ".qcard", rPick, rClear);
+    // Build ONE card for a queue item (was inline in the slice loop).
+    function buildCard(item) {
+      var c = el("div", "qcard"); c._item = item;
+      cardOf[item.queue + ":" + item.id] = c;
+      c._gone = function () { dropResolved([item]); };  // per-card verb resolution hook
+      var thumbable = isMediaKind(item.kind);
+      if (thumbable) {
+        var im = el("img"); lazyThumb(im, item.id); im.alt = item.guess || pretty(item.kind);
+        im.onclick = function () { lightbox(item.id, true, confirmActions(item, c)); };
+        c.appendChild(im);
+      } else c.appendChild(el("div", "ph", esc(pretty(item.kind))));
+      var pick = el("div", "pick"); var key = item.queue + ":" + item.id;
+      pick.onclick = function (e) {
+        e.stopPropagation();
+        var on;
+        if (rsel[key]) { delete rsel[key]; c.classList.remove("sel"); on = false; } else { rsel[key] = item; c.classList.add("sel"); on = true; }
+        pick.setAttribute("aria-pressed", on ? "true" : "false");
+        rbar();
+      };
+      keyable(pick, "button", "Select item");   // F-12
+      pick.setAttribute("aria-pressed", rsel[key] ? "true" : "false");
+      c.appendChild(pick);
+      var body = el("div", "body");
+      var label = item.kind === "scene_guess" ? "Scene: " + esc(item.guess) :
+        item.kind === "unnamed_person" ? "Name " + esc(item.guess) + "?" :
+        item.kind === "event_guess" ? "Album: " + esc(item.guess) :
+        item.kind === "unidentified_face" ? "Unidentified face" : esc(pretty(item.kind));
+      body.innerHTML = "<div>" + label + (item.confidence != null ? ' <span class="badge">' + Math.round(item.confidence * 100) + "%</span>" : "") + "</div>";
+      var row = el("div", "qrow");
+      confirmActions(item, c).forEach(function (a) {
+        var b = el("button", "btn" + (a.cls ? " " + a.cls : ""), esc(a.label));
+        b.onclick = function () { a.onclick(null); };
+        row.appendChild(b);
+      });
+      body.appendChild(row); c.appendChild(body); grid.appendChild(c);
+    }
+    // Load-more over the in-memory queue (was q.slice(0,120) — an examiner who
+    // "confirmed all" never saw items 121+ while the tile showed the full count).
+    // Rendering keys off cardOf, so it's robust to items being spliced out by a
+    // verb; the visible count and the group total now agree.
+    var CONFIRM_CHUNK = 200;
+    var moreWrap = el("div", "pager");
+    function refreshMore() {
+      moreWrap.innerHTML = "";
+      var shown = Object.keys(cardOf).length;
+      moreWrap.appendChild(el("p", "count-note", "Showing " + num(shown) + " of " + num(q.length)));
+      if (shown < q.length) {
+        var b = el("button", "btn", "Load more (" + num(q.length - shown) + " remaining)");
+        b.onclick = function () { renderChunk(); };
+        moreWrap.appendChild(b);
+      }
+    }
+    function renderChunk() {
+      var added = 0;
+      for (var i = 0; i < q.length && added < CONFIRM_CHUNK; i++) {
+        var item = q[i], key = item.queue + ":" + item.id;
+        if (cardOf[key]) continue;   // already on screen (robust to splices)
+        buildCard(item); added++;
+      }
+      refreshMore();
+    }
+    holder.appendChild(grid);
+    holder.appendChild(moreWrap);
+    renderChunk();
+  }
+
+  // Quarantine group (folded in from the old page, #15): category filter + Release/Discard.
+  // `onChange` refreshes P.review's counts after an in-place row removal.
+  function reviewQuarantine(holder, qd, onChange) {
+    var entries = qd.entries || [];
+    if (!entries.length) { holder.appendChild(el("p", "notice", "Nothing in quarantine.")); return; }
+    var cats = {}; entries.forEach(function (e) { if (e.filter) cats[e.filter] = 1; });
+    var bar = el("div", "filterbar");
+    var sel = el("select"); sel.appendChild(new Option("All categories", ""));
+    Object.keys(cats).sort().forEach(function (c) { sel.appendChild(new Option(pretty(c), c)); });
+    if (Q.qcat) sel.value = Q.qcat;
+    bar.appendChild(el("span", "flabel", "Category")); bar.appendChild(sel);
+    holder.appendChild(bar);
+    var sub = el("div"); holder.appendChild(sub);
+    // #17: bulk-select (mirrors the Confirm queue's floating-bar pattern) —
+    // qsel: canonical_path -> entry, for the selected rows.
+    var qsel = {};
+    // On success: drop every resolved entry from the cached list and redraw
+    // just this table (no full review-payload re-fetch), keeping counts honest.
+    function dropResolved(resolved) {
+      resolved.forEach(function (e) {
+        var ix = entries.indexOf(e);
+        if (ix >= 0) { entries.splice(ix, 1); qd.total = Math.max(0, (qd.total || 1) - 1); }
+        delete qsel[e.canonical_path];
+      });
+      if (onChange) onChange();
+      draw();
+    }
+    function qbar() {
+      var bar2 = document.getElementById("qselbar");
+      if (!bar2) { bar2 = el("div", "selbar"); bar2.id = "qselbar"; document.body.appendChild(bar2); }
+      var items = Object.keys(qsel).map(function (k) { return qsel[k]; });
+      bar2.innerHTML = '<span class="n">' + items.length + ' selected</span><span class="sep"></span>';
+      var rel = el("button", "act primary", "Release");
+      rel.onclick = function () {
+        rel.disabled = true; dis.disabled = true;
+        doVerb("/api/release", { canonical_paths: items.map(function (e) { return e.canonical_path; }) },
+               "Released " + items.length).then(function (x) {
+          if (x) dropResolved(items); else { rel.disabled = false; dis.disabled = false; }
+        });
+      };
+      bar2.appendChild(rel);
+      var dis = el("button", "act danger", "Discard");
+      dis.onclick = function () {
+        if (items.length > 1 && !confirm("Discard " + items.length + " items? Reversible from History.")) return;
+        rel.disabled = true; dis.disabled = true;
+        doVerb("/api/discard/quarantine", { canonical_paths: items.map(function (e) { return e.canonical_path; }) },
+               "Discarded " + items.length).then(function (x) {
+          if (x) dropResolved(items); else { rel.disabled = false; dis.disabled = false; }
+        });
+      };
+      bar2.appendChild(dis);
+      bar2.classList.toggle("show", items.length > 0);
+    }
+    // One action set per entry, reused by BOTH the row buttons and the expand
+    // (lightbox) view so Release/Discard are reachable either way. onclick(lb)
+    // closes the lightbox if it was opened from there (lb is null from the row).
+    function quarActions(e) {
+      function after(lb) {
+        return function (x) {
+          if (!x) return;
+          if (lb) closeLB();
+          dropResolved([e]);
+        };
+      }
+      return [
+        { label: "Release", onclick: function (lb) {
+            // Single-item Release is immediate (reversible from History).
+            doVerb("/api/release", { canonical_path: e.canonical_path }, "Released " + e.name).then(after(lb)); } },
+        { label: "Discard", cls: "danger", onclick: function (lb) {
+            doVerb("/api/discard/quarantine", { canonical_path: e.canonical_path }, "Discarded " + e.name).then(after(lb)); } },
+      ];
+    }
+    function draw() {
+      sub.innerHTML = "";
+      var f = sel.value;
+      var rows = entries.filter(function (e) { return !f || e.filter === f; })
+        .slice().sort(function (a, b) { return (a.filter || "").localeCompare(b.filter || ""); });
+      var tbl = el("table");
+      var selAll = el("input"); selAll.type = "checkbox";
+      selAll.setAttribute("aria-label", "Select all quarantined items shown");
+      var thead = el("tr");
+      var thCheck = el("th"); thCheck.appendChild(selAll); thead.appendChild(thCheck);
+      ["Item", "Reason", "When", ""].forEach(function (t) { thead.appendChild(el("th", null, t)); });
+      tbl.appendChild(thead);
+      var selectable = rows.filter(function (e) { return !e.locked; });
+      selAll.onchange = function () {
+        selectable.forEach(function (e) {
+          if (selAll.checked) qsel[e.canonical_path] = e; else delete qsel[e.canonical_path];
+        });
+        qbar();
+        draw();
+      };
+      selAll.checked = selectable.length > 0 && selectable.every(function (e) { return qsel[e.canonical_path]; });
+      rows.forEach(function (e) {
+        var tr = el("tr");
+        var td0 = el("td");
+        if (!e.locked) {
+          var cb = el("input"); cb.type = "checkbox";
+          cb.checked = !!qsel[e.canonical_path];
+          cb.setAttribute("aria-label", "Select " + e.name);
+          cb.onchange = function () {
+            if (cb.checked) qsel[e.canonical_path] = e; else delete qsel[e.canonical_path];
+            qbar();
+          };
+          td0.appendChild(cb);
+        }
+        tr.appendChild(td0);
+        var name = e.locked ? '<span class="locked">🔒 ' + esc(e.name) + " (locked)</span>"
+          : '<a href="#" class="viewq">' + esc(e.name) + "</a>";
+        var restCell = el("td", null, name);
+        var reasonCell = el("td", null, esc(pretty(e.filter)));
+        var whenCell = el("td", "preview", esc((e.timestamp || "").replace("T", " ")));
+        var actCell = el("td");
+        tr.appendChild(restCell); tr.appendChild(reasonCell); tr.appendChild(whenCell); tr.appendChild(actCell);
+        if (!e.locked) {
+          var acts = quarActions(e);
+          var a = tr.querySelector("a.viewq");
+          if (a) a.onclick = function (ev) { ev.preventDefault(); lightbox(e.src, mediaKind(e.src), acts); };
+          acts.forEach(function (act) {
+            var b = el("button", "btn small" + (act.cls ? " " + act.cls : ""), act.label);
+            b.onclick = function () { act.onclick(null); };   // null lb → row button
+            tr.lastChild.appendChild(b);
+          });
+        }
+        tbl.appendChild(tr);
+      });
+      sub.appendChild(tbl);
+      qbar();
+    }
+    sel.onchange = function () { setQ({ qcat: sel.value }); draw(); };
+    draw();
+  }
+
+  // Sensitivity / Human-review flagged lists (#14): openable unless the row is locked.
+  function reviewFlagged(holder, title, rows, showFilters) {
+    if (!rows.length) { holder.appendChild(el("p", "notice", "Nothing flagged for " + title.toLowerCase() + ".")); return; }
+    var tbl = el("table");
+    tbl.innerHTML = "<tr><th>Item</th>" + (showFilters ? "<th>Flags</th>" : "") + "</tr>";
+    rows.forEach(function (e) {
+      var tr = el("tr");
+      var name = e.locked ? '<span class="locked">🔒 ' + esc(e.name) + " (locked)</span>"
+        : '<a href="#" class="viewq">' + esc(e.name) + "</a>";
+      tr.innerHTML = "<td>" + name + "</td>" + (showFilters ? "<td class='preview'>" + esc((e.filters || []).map(pretty).join(", ")) + "</td>" : "");
+      if (!e.locked && e.src) {
+        var a = tr.querySelector("a.viewq");
+        if (a) a.onclick = function (ev) { ev.preventDefault(); lightbox(e.src, mediaKind(e.src)); };
+      }
+      tbl.appendChild(tr);
+      if (!e.locked && !e.src && e.chunk_text) {
+        // Flagged conversation chunk: no servable file preview exists — the
+        // flagged text itself is what the examiner must read. Click toggles it.
+        var dtr = el("tr");
+        dtr.style.display = "none";
+        var dtd = el("td");
+        dtd.colSpan = showFilters ? 2 : 1;
+        var pre = el("pre", "preview");
+        pre.style.whiteSpace = "pre-wrap";
+        pre.textContent = e.chunk_text +
+          (e.conversation_id ? "\n\n[conversation " + e.conversation_id + "]" : "");
+        dtd.appendChild(pre);
+        dtr.appendChild(dtd);
+        tbl.appendChild(dtr);
+        var ca = tr.querySelector("a.viewq");
+        if (ca) ca.onclick = function (ev) {
+          ev.preventDefault();
+          dtr.style.display = dtr.style.display === "none" ? "" : "none";
+        };
+      }
+    });
+    holder.appendChild(tbl);
+  }
+
+  // ── History: descriptive label + item type + click-through (#12) ──
+  function histType(e) {
+    var a = (e.action || "").replace(/_undo$/, "");
+    if (a === "demote_email" || a === "restore_email") return "Email";
+    if (a === "rename_person" || a === "rename_folder" || a === "remove_person"
+        || a === "merge_persons" || a === "assign_face") return "Person";
+    if (a === "confirm") {
+      var q = (e.target || "").split(":")[0];
+      return { scene: "Scene", face: "Face", face_merge: "Face", name_person: "Person", event: "Album" }[q] || "Item";
+    }
+    if (a === "release") return "Quarantine";
+    if (a === "export" || a === "export_collection") return "Export";
+    var ext = basename(e.target || "").split(".").pop().toLowerCase();
+    if (["jpg", "jpeg", "png", "gif", "heic", "tif", "tiff", "webp", "bmp"].indexOf(ext) >= 0) return "Photo";
+    if (["mp3", "wav", "m4a", "aac", "flac", "ogg"].indexOf(ext) >= 0) return "Recording";
+    if (["pdf", "doc", "docx", "txt", "rtf"].indexOf(ext) >= 0) return "Document";
+    return "Item";
+  }
+  function nameOf(ident) { return ident && typeof ident === "object" ? ident.name : ident; }
+  function histLabel(e) {
+    var und = /_undo$/.test(e.action || ""), a = (e.action || "").replace(/_undo$/, ""), base;
+    var b = e.before || {}, af = e.after || {};
+    if (a === "rename_person") base = (nameOf(b.identity) || e.target) + " → " + (nameOf(af.identity) || "(unnamed)");
+    else if (a === "confirm") base = ((af.decision === "accept") ? "Confirmed " : "Dismissed ") + basename((e.target || "").split(":").slice(1).join(":"));
+    else if (a === "banish") base = "Discarded " + basename(e.target);
+    else if (a === "release") base = "Released " + basename(e.target);
+    else if (a === "export_collection") base = "Exported " + (af.exported != null ? af.exported : "") + " item(s)" + (af.skipped ? " (" + af.skipped + " skipped)" : "");
+    else if (a === "export") base = "Exported " + (b.count != null ? b.count : "") + " item(s)";
+    else if (a === "remove_person") base = "Removed person " + e.target;
+    else if (a === "merge_persons") base = "Merged " + e.target + " → " + (af.winner || "");
+    else if (a === "assign_face") base = "Assigned face to " + (af.person_id || "");
+    else if (a === "demote_email" || a === "restore_email") base = (a === "demote_email" ? "Demoted" : "Restored") + " email" + (b.subject ? " '" + b.subject + "'" : "");
+    else if (a === "reset") base = "Reset all changes (" + ((af.reversed != null ? af.reversed : b.reversed) || 0) + " reversed)";
+    else base = pretty(a) + " " + basename(e.target);
+    return (und ? "Undo: " : "") + base;
+  }
+  // Action column reflects the real action (decision-aware), not the raw verb (#14):
+  // both Confirm and Dismiss use the "confirm" verb, so a dismissal showed "confirm".
+  function histAction(e) {
+    var und = /_undo$/.test(e.action || ""), a = (e.action || "").replace(/_undo$/, ""), af = e.after || {};
+    var label = a === "confirm" ? (af.decision === "accept" ? "Confirm" : "Dismiss")
+      : a === "banish" ? "Discard"
+      : a === "release" ? "Release"
+      : (a === "rename_person" || a === "rename_folder") ? "Rename"
+      : (a === "export" || a === "export_collection") ? "Export"
+      : a === "discard_quarantine" ? "Discard"
+      : a === "demote_ranked" ? "Demote"
+      : a === "demote_email" ? "Demote"
+      : a === "restore_email" ? "Restore"
+      : a === "remove_person" ? "Remove"
+      : a === "merge_persons" ? "Merge"
+      : a === "assign_face" ? "Assign"
+      : pretty(a);
+    return label + (und ? " (undo)" : "");
+  }
+  function histTarget(e) {
+    var a = (e.action || "").replace(/_undo$/, ""), b = e.before || {}, af = e.after || {};
+    if (a === "rename_person") return { page: "people", person: e.target };
+    if (a === "merge_persons") return { page: "people", person: (e.after || {}).winner };
+    if (a === "assign_face") return { open: true, file: e.target };
+    if (a === "confirm") {
+      var parts = (e.target || "").split(":"), q = parts[0], id = parts.slice(1).join(":");
+      if (q === "scene" || q === "face" || q === "face_merge") return { open: true, file: id };
+      if (q === "name_person") return { page: "people", person: id };
+      return { page: "review" };
+    }
+    if (a === "banish") return af.location ? { open: true, file: af.location } : null;
+    if (a === "release") return (b.entry && b.entry.canonical_path) ? { open: true, file: b.entry.canonical_path } : null;
+    return null;
+  }
+
+  // ── G-13 Junk rescue (examiner) ──
+  // A paginated grid of junk-routed images with per-item + batch Un-junk. Thumbs go
+  // through the examiner /thumb resolver (the family allow-list excludes photos_junk).
+  // Mirrors the batch-Discard UI: pick overlays + a sticky selection bar + toasts/undo.
+  P.junk = function (main, data) {
+    var controls = head(main, "Examiner · Junk rescue", "Junk review",
+      "Images the pipeline routed out as junk. Un-junk to return one to the archive (reversible).");
+    if (!EXAMINER) { main.appendChild(el("p", "notice", "Examiner only.")); return; }
+    var grid = el("div", "grid jgrid"); main.appendChild(grid);
+    var sel = {}, removed = {}, cardOf = {};
+    var bar = el("div", "selbar"); bar.id = "jselbar"; document.body.appendChild(bar);
+    function dropJunk(ids) {
+      ids.forEach(function (id) {
+        removed[id] = 1; delete sel[id];
+        var c = cardOf[id]; if (c) { c.remove(); delete cardOf[id]; }
+      });
+      rbar();
+    }
+    function unjunkOne(id, name, lb) {
+      doVerb("/api/unjunk", { id: id }, "Un-junked " + name).then(function (x) {
+        if (x) { dropJunk([id]); if (lb) closeLB(); }
+      });
+    }
+    function rbar() {
+      var ids = Object.keys(sel);
+      bar.innerHTML = '<span class="n">' + ids.length + ' selected</span><span class="sep"></span>';
+      var b = el("button", "act primary", "Un-junk");
+      b.onclick = function () {
+        if (!ids.length) return;
+        if (ids.length > 1 && !confirm("Un-junk " + ids.length + " items? They return to the archive (reversible from History).")) return;
+        b.disabled = true; b.textContent = "Un-junking…";
+        doVerb("/api/unjunk", { ids: ids }, "Un-junked " + ids.length + " item(s)").then(function (x) {
+          if (!x) { b.disabled = false; b.textContent = "Un-junk"; return; }
+          dropJunk(ids);
+        });
+      };
+      bar.appendChild(b);
+      bar.classList.toggle("show", ids.length > 0);
+    }
+    function jPick(c, on) {
+      var id = c._id; if (!id) return;
+      if (on) { sel[id] = 1; c.classList.add("sel"); } else { delete sel[id]; c.classList.remove("sel"); }
+      rbar();
+    }
+    function jClear() { sel = {}; grid.querySelectorAll(".sel").forEach(function (c) { c.classList.remove("sel"); }); rbar(); }
+    function card(r) {
+      var c = el("div", "jcard"); c._id = r.id; cardOf[r.id] = c;
+      var im = el("img"); lazyThumb(im, r.id); im.alt = r.name || "";
+      im.onclick = function () {
+        lightbox(r.id, "image", [{ label: "Un-junk", cls: "primary",
+          onclick: function (lb) { unjunkOne(r.id, r.name, lb); } }]);
+      };
+      c.appendChild(im);
+      var pick = el("div", "pick");
+      pick.onclick = function (e) {
+        e.stopPropagation();
+        var on;
+        if (sel[r.id]) { delete sel[r.id]; c.classList.remove("sel"); on = false; } else { sel[r.id] = 1; c.classList.add("sel"); on = true; }
+        pick.setAttribute("aria-pressed", on ? "true" : "false");
+        rbar();
+      };
+      keyable(pick, "button", "Select item");   // F-12
+      pick.setAttribute("aria-pressed", sel[r.id] ? "true" : "false");
+      c.appendChild(pick);
+      var body = el("div", "body");
+      body.innerHTML = '<div class="jname">' + esc(r.name) + '</div>' +
+        (r.reason ? '<div class="jreason">' + esc(pretty(r.reason)) + '</div>' : '');
+      var uj = el("button", "act small", "Un-junk");
+      uj.onclick = function (e) { e.stopPropagation(); unjunkOne(r.id, r.name, null); };
+      body.appendChild(uj);
+      c.appendChild(body);
+      return c;
+    }
+    var pg = pager("/api/junk", {
+      render: function (rows) {
+        grid.innerHTML = ""; cardOf = {};
+        rows.forEach(function (r) { if (!removed[r.id]) grid.appendChild(card(r)); });
+      }
+    });
+    main.appendChild(pg.footer);
+    marqueeSelect(controls, grid, ".jcard", jPick, jClear);
+    pg.seed(data);
+  };
+
+  // The vital-docs step's badge: two actionable numbers, both draining to 0.
+  // `M to confirm` = found vital docs the examiner hasn't confirmed/dismissed/
+  // reassigned yet (the Confirm verb drops this). `N near-miss to review` = the
+  // candidate queue (promote/dismiss drops this). Both zero reads as "clear".
+  function guidedVitalCount(ex) {
+    var span = el("span", "gcount gcount-vital");
+    var uc = ex.unconfirmed || 0, nm = ex.near_misses || 0;
+    var parts = [];
+    if (uc) parts.push(num(uc) + " to confirm");
+    if (nm) parts.push(num(nm) + " near-miss" + (nm === 1 ? "" : "es") + " to review");
+    if (!parts.length) { span.appendChild(el("span", "gcount-part", "clear")); return span; }
+    parts.forEach(function (p, i) {
+      if (i) span.appendChild(el("span", "gcount-sep", "·"));
+      span.appendChild(el("span", "gcount-part" + (i ? " gcount-muted" : ""), esc(p)));
+    });
+    return span;
+  }
+
+  // ── G-12 Guided first-session review (examiner) ──
+  // A checklist that sequences the existing review surfaces. Each step deep-links to
+  // where the action already happens; a step is done when its count is 0 or the
+  // examiner marks it done (persisted via the EXISTING confirm verb — no new verb).
+  P.guided = function (main, d) {
+    head(main, "Examiner · First-session review", "Guided review",
+      "Work these in order; each links to where the action happens.");
+    if (!EXAMINER) { main.appendChild(el("p", "notice", "Examiner only.")); return; }
+    var steps = d.steps || [];
+    var progress = el("p", "guided-progress",
+      esc((d.done_count || 0) + " of " + (d.step_count || steps.length) + " steps done"));
+    main.appendChild(progress);
+    var list = el("ol", "guided-list");
+    steps.forEach(function (s, i) {
+      var li = el("li", "guided-step" + (s.done ? " done" : ""));
+      li.appendChild(el("span", "gmark", s.done ? "✓" : String(i + 1)));
+      var gbody = el("div", "gbody");
+      var titleRow = el("div", "gtitle");
+      var a = el("a", "glink", esc(s.label)); a.href = s.link || "#";
+      titleRow.appendChild(a);
+      // The vital-docs step carries TWO numbers — a reviewable queue (near-misses)
+      // and a corpus status (types with no confirmed find) — because one number
+      // ("N missing") read as a to-do that no examiner action could ever clear.
+      // Every other step is a single drainable queue and uses the plain badge.
+      if (s.key === "vital_docs" && s.extra && s.extra.available) {
+        titleRow.appendChild(guidedVitalCount(s.extra));
+      } else {
+        titleRow.appendChild(el("span", "gcount",
+          s.count ? esc(num(s.count) + " to do") : "clear"));
+      }
+      gbody.appendChild(titleRow);
+      // Bulk-triage pager entry (review-queue-bulk-triage.md). The quarantine step's
+      // main link already IS the pager (/review?group=quarantine); the vital step's
+      // main link goes to Documents (the full checklist), so offer the paged flow as
+      // a secondary affordance whenever it has a non-empty queue.
+      if (s.key === "vital_docs" && s.extra && s.extra.available &&
+          ((s.extra.unconfirmed || 0) + (s.extra.near_misses || 0)) > 0) {
+        var pl = el("a", "glink-pager", "Bulk review →");
+        pl.href = "/review?group=vital";
+        gbody.appendChild(pl);
+      }
+      if (s.key === "vital_docs" && s.extra && s.extra.capped_targets) {
+        // The near-miss lists are a floor, not the whole field — say so, and where
+        // to look. The per-type detail (which types, and the cap) is on Documents.
+        gbody.appendChild(el("div", "gnote",
+          esc(num(s.extra.capped_targets) + " document type" +
+              (s.extra.capped_targets === 1 ? "" : "s") +
+              " hit the retrieval limit" +
+              (s.extra.per_target_k ? " of " + num(s.extra.per_target_k) : "") +
+              " — more candidates may exist; see Documents.")));
+      }
+      if (s.extra && s.extra.ocr_manual_review) {
+        gbody.appendChild(el("div", "gnote",
+          esc(num(s.extra.ocr_manual_review) + " OCR items also need a manual read")));
+      }
+      var ack = el("button", "act small" + (s.acknowledged ? " primary" : ""),
+        s.acknowledged ? "Marked done" : "Mark done");
+      ack.onclick = function () {
+        var decision = s.acknowledged ? "reject" : "accept";
+        doVerb("/api/confirm", { queue: "guided_progress", id: s.key, decision: decision },
+          s.acknowledged ? "Reopened step" : "Marked done")
+          .then(function (x) { if (x) render(); });
+      };
+      gbody.appendChild(ack);
+      li.appendChild(gbody);
+      list.appendChild(li);
+    });
+    main.appendChild(list);
+    var h = d.handoff || {};
+    var card = el("section", "handoff-card" + (h.ready ? " ready" : ""));
+    card.appendChild(el("h2", null, "Ready for family handoff?"));
+    if (h.delivery_blocked) {
+      card.appendChild(el("p", "handoff-block",
+        esc("Delivery is blocked: " + (h.reasons || []).join("; "))));
+    } else if (!h.all_steps_done) {
+      card.appendChild(el("p", "handoff-note", "Finish the steps above, then delivery is clear."));
+    } else {
+      card.appendChild(el("p", "handoff-ok",
+        "All steps done and the export gate is clear — ready to hand off."));
+    }
+    // The release signature — a named human, not the machine, releases the bundle.
+    signoffPanel(card, h);
+    main.appendChild(card);
+  };
+
+  // The examiner's sign-off panel. Shows the current release state (signed_by /
+  // signed_at / revoked / stale) and, when the gate is clear, the form that drives
+  // POST /api/signoff. The wet-ink certificate is the authoritative artifact — the
+  // panel says so, and points at output/examiner/release_certificate.md.
+  function signoffPanel(card, handoff) {
+    var st = RELEASE_STATUS || {};
+    var box = el("section", "signoff");
+    box.appendChild(el("h3", null, "Release signature"));
+    if (st.state === "released") {
+      box.appendChild(el("p", "signoff-state ok",
+        "Released" + (st.signed_by ? " by " + esc(st.signed_by) : "")
+        + (st.signed_at ? " on " + esc(st.signed_at) : "")
+        + ". The wet-ink certificate is output/examiner/release_certificate.md — "
+        + "print it, read it, and sign it by hand."));
+      return;
+    }
+    if (st.state === "revoked") {
+      box.appendChild(el("p", "signoff-state warn", "This release was revoked."));
+    } else if (st.state === "stale") {
+      box.appendChild(el("p", "signoff-state warn",
+        "The archive changed after it was released; re-sign to reopen it."));
+    }
+    if (handoff && (handoff.delivery_blocked || handoff.all_steps_done === false)) {
+      box.appendChild(el("p", "signoff-note",
+        "Finish every disposition above — release or discard each quarantine item, "
+        + "keep or waive each human-review item — before you can sign."));
+      card.appendChild(box);
+      return;
+    }
+    var form = el("div", "signoff-form");
+    var name = el("input", "signoff-input"); name.placeholder = "Your full name";
+    var cap = el("input", "signoff-input"); cap.placeholder = "Your capacity (e.g. Estate attorney)";
+    var jud = el("textarea", "signoff-judgment");
+    jud.placeholder = "In your own words: why release this set to the family? "
+      + "(You are confirming a category rule over an inspectable set — not that "
+      + "you read every item.)";
+    var btn = el("button", "signoff-btn", "Sign & release");
+    var msg = el("p", "signoff-msg");
+    btn.addEventListener("click", function () {
+      msg.textContent = "";
+      postJSON("/api/signoff", { name: name.value.trim(), capacity: cap.value.trim(),
+                                 judgment: jud.value.trim() })
+        .then(function (r) {
+          if (r.ok) { render(); }
+          else { msg.textContent = (r.j && r.j.error) || "Sign-off refused."; }
+        });
+    });
+    form.appendChild(name); form.appendChild(cap); form.appendChild(jud);
+    form.appendChild(btn); form.appendChild(msg);
+    box.appendChild(form);
+    card.appendChild(box);
+  }
+
+  // ── G-14 transparency panel (read-only) ──
+  // Overview card (both roles: numbers-only reassurance) + a Review subsection
+  // (examiner: suspense + significant-attachment noise). Fetched from /api/transparency,
+  // which gates the examiner-only detail server-side.
+  function transparencyCard(main) {
+    getJSON("/api/transparency").then(function (t) {
+      if (!t) return;
+      var card = el("section", "trust-card");
+      card.appendChild(el("h2", null, "What we set aside"));
+      var p = el("p", "trust-lead");
+      p.textContent = num(t.near_duplicate_groups || 0) +
+        " group(s) of near-duplicate photos and " + num(t.exact_duplicates_removed || 0) +
+        " exact duplicate(s) were set aside — nothing was deleted.";
+      card.appendChild(p);
+      main.appendChild(card);
+    }).catch(function () { });
+  }
+  function transparencyReview(main) {
+    if (!EXAMINER) return;
+    getJSON("/api/transparency").then(function (t) {
+      if (!t) return;
+      var sec = el("section", "trust-review");
+      sec.appendChild(el("h2", null, "Set-aside & noise (examiner)"));
+      var meta = el("p", "trust-meta");
+      meta.textContent = "Suspense (corrupt/unreadable): " + num(t.suspense_count || 0) +
+        " · Near-duplicate groups: " + num(t.near_duplicate_groups || 0);
+      sec.appendChild(meta);
+      var noise = t.significant_attachment_noise || [];
+      if (noise.length) {
+        sec.appendChild(el("h3", null,
+          "Noise-triaged emails with a significant attachment (" +
+          num(t.significant_attachment_total || noise.length) + ")"));
+        var tbl = el("table");
+        tbl.innerHTML = "<tr><th>From</th><th>Subject</th><th>When</th></tr>";
+        noise.forEach(function (e) {
+          var tr = el("tr");
+          tr.innerHTML = "<td>" + esc(e.from) + "</td><td>" + esc(e.subject) +
+            "</td><td class='preview'>" + esc((e.date || "").replace("T", " ")) + "</td>";
+          tbl.appendChild(tr);
+        });
+        sec.appendChild(tbl);
+      }
+      main.appendChild(sec);
+    }).catch(function () { });
+  }
+
+  P.history = function (main, rows) {
+    head(main, "Audit", "History", "Every action taken in this archive. " + rows.length + " entries.");
+    if (EXAMINER) {  // one-shot reset back to the as-delivered state
+      var rst = el("button", "btn danger", "Reset all changes");
+      rst.onclick = function () {
+        if (!confirm("Undo ALL changes and restore this case to its original delivered state? "
+          + "This clears every Confirm/Discard/Rename/Release and the history. It cannot be undone.")) return;
+        // Immediate disabled/label feedback (matches Discard/Move/Release elsewhere) —
+        // reversing every action on a large case can take a while, and with no
+        // in-flight state the button looked frozen/no-op'd for that whole stretch (#29).
+        rst.disabled = true; rst.textContent = "Resetting…";
+        doVerb("/api/reset", {}, "Reset to as-delivered state").then(function (x) {
+          if (!x) { rst.disabled = false; rst.textContent = "Reset all changes"; return; }
+          render();
+        });
+      };
+      main.appendChild(rst);
+    }
+    var undone = {};
+    rows.forEach(function (e) { if (e.undoes) undone[e.undoes] = 1; });
+    // #24: client-side sort (all rows are already in memory) — click When/Action/
+    // Type to toggle asc/desc, keyed on the same histAction(e)/histType(e) values
+    // the cells already display. A stable secondary sort on `ts` (desc) keeps
+    // equal Action/Type groups chronological. Default stays newest-first.
+    var SORT = { key: "ts", dir: "desc" };
+    var tbl = el("table");
+    var thead = el("tr");
+    var headerLinks = {};
+    [["ts", "When"], ["action", "Action"], ["type", "Type"]].forEach(function (c) {
+      var key = c[0], th = el("th");
+      var a = el("a", "sorth", c[1]);
+      a.href = "#";
+      keyable(a, "button", "Sort by " + c[1]);
+      a.onclick = function (ev) {
+        ev.preventDefault();
+        if (SORT.key === key) SORT.dir = SORT.dir === "asc" ? "desc" : "asc";
+        else { SORT.key = key; SORT.dir = key === "ts" ? "desc" : "asc"; }
+        draw();
+      };
+      headerLinks[key] = a;
+      th.appendChild(a);
+      thead.appendChild(th);
+    });
+    thead.appendChild(el("th", null, "What"));
+    thead.appendChild(el("th"));
+    tbl.appendChild(thead);
+    var tbody = el("tbody"); tbl.appendChild(tbody);
+    main.appendChild(tbl);
+    if (!rows.length) main.appendChild(el("p", "notice", "No actions yet."));
+
+    function sortKey(e, key) {
+      if (key === "action") return histAction(e);
+      if (key === "type") return histType(e);
+      return e.ts || "";   // "ts"
+    }
+    function draw() {
+      Object.keys(headerLinks).forEach(function (key) {
+        headerLinks[key].className = "sorth" + (SORT.key === key ? " active " + SORT.dir : "");
+      });
+      var sorted = rows.slice().sort(function (a, b) {
+        var ka = sortKey(a, SORT.key), kb = sortKey(b, SORT.key);
+        var cmp = ka < kb ? -1 : ka > kb ? 1 : 0;
+        if (SORT.dir === "desc") cmp = -cmp;
+        if (cmp !== 0) return cmp;
+        return (b.ts || "").localeCompare(a.ts || "");   // stable secondary: newest-first
+      });
+      tbody.innerHTML = "";
+      sorted.forEach(function (e) {
+        var tr = el("tr");
+        var canUndo = EXAMINER && e.reversible && !undone[e.undo_token] && !e.undoes;
+        var target = histTarget(e);
+        var what = esc(histLabel(e));
+        tr.innerHTML = "<td class='preview'>" + esc((e.ts || "").replace("T", " ")) + "</td><td>" +
+          esc(histAction(e)) +
+          "</td><td><span class='badge'>" + esc(histType(e)) + "</span></td><td>" +
+          (target ? "<a href='#' class='whatlink'>" + what + "</a>" : what) + "</td><td></td>";
+        if (target) {
+          var wl = tr.querySelector("a.whatlink");
+          if (wl) wl.onclick = function (ev) { ev.preventDefault(); go(target); };
+        }
+        if (canUndo) {
+          var bn = el("button", "btn small", "Undo");
+          bn.onclick = function () {
+            postJSON("/api/undo", { undo_token: e.undo_token }).then(function (res) {
+              if (res.ok && res.j.ok !== false) { render(); return; }
+              toast("Couldn't undo: " + (res.j.error || "error"));
+            }).catch(function (err) { toast("Couldn't undo: " + (err && err.message ? err.message : "server error")); });
+          };
+          tr.lastChild.appendChild(bn);
+        }
+        tbody.appendChild(tr);
+      });
+    }
+    draw();
+  };
+
+  // ── Search (FTS5) — full-text results page (family-archive-full-text-search.md) ──
+  // The server-produced snippet carries the intended <mark>…</mark> highlight over
+  // RAW estate text. Escape the WHOLE snippet for HTML, then un-escape ONLY the two
+  // mark tags — so estate content can never inject markup, but the highlight renders.
+  // (A body that literally contains "<mark>" would at worst show a stray highlight;
+  // <mark> has no attributes/handlers, so this is never an XSS sink.)
+  function markSnippet(s) {
+    return esc(s).replace(/&lt;mark&gt;/g, "<mark>").replace(/&lt;\/mark&gt;/g, "</mark>");
+  }
+  var KIND_LABEL = {
+    document: "Documents", email: "Emails", conversation: "Messages",
+    audio: "Recordings", photo: "Photos", person: "People"
+  };
+  function kindLabel(k) { return KIND_LABEL[k] || (pretty(k) || "Other"); }
+
+  P.search = function (main) {
+    var q = Q.q || "";
+    head(main, "Search", q ? "Results for “" + q + "”" : "Search the archive", "");
+    // On-page search box (mirrors the rail; prefilled with the current query).
+    var form = el("form", "searchpage-form");
+    var input = el("input", "searchpage-input");
+    input.type = "search"; input.value = q; input.autocomplete = "off";
+    input.placeholder = "Search letters, emails, transcripts, names…";
+    input.setAttribute("aria-label", "Search the archive");
+    var btn = el("button", "btn primary", "Search"); btn.type = "submit";
+    form.appendChild(input); form.appendChild(btn);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var v = input.value.trim();
+      location.href = v ? "/search?q=" + encodeURIComponent(v) : "/search";
+    });
+    main.appendChild(form);
+
+    var status = el("div", "search-status"); main.appendChild(status);
+    var results = el("div", "search-results"); main.appendChild(results);
+    if (!q) {
+      status.appendChild(el("p", "notice",
+        "Type a word or phrase to search across the whole archive — the text of "
+        + "letters and documents, email and message bodies, and transcripts."));
+      return;
+    }
+
+    var LIMIT = 30, loaded = 0, total = 0, polling = false, moreBtn = null;
+
+    function renderHits(hits) {
+      // Group by kind so results read as sections; preserve rank order within.
+      var order = [], byKind = {};
+      hits.forEach(function (h) {
+        var k = h.kind || "other";
+        if (!byKind[k]) { byKind[k] = []; order.push(k); }
+        byKind[k].push(h);
+      });
+      order.forEach(function (k) {
+        results.appendChild(el("h2", "search-group", esc(kindLabel(k))));
+        byKind[k].forEach(function (h) {
+          var card = el("div", "search-hit");
+          card.appendChild(el("div", "search-hit-title", esc(h.title || "(untitled)")));
+          var snip = el("div", "search-hit-snip");
+          snip.innerHTML = markSnippet(h.snippet || "");
+          card.appendChild(snip);
+          card.setAttribute("role", "button"); card.tabIndex = 0;
+          var open = function () { go(searchTarget({ p: h.page, k: h.kind, h: h.ref })); };
+          card.addEventListener("click", open);
+          card.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+          });
+          results.appendChild(card);
+        });
+      });
+    }
+
+    function load(offset, append) {
+      getJSON("/api/search?q=" + encodeURIComponent(q) + "&offset=" + offset + "&limit=" + LIMIT)
+        .then(function (d) {
+          if (d.building) {
+            polling = true;
+            status.innerHTML = "";
+            var ph = (d.progress && d.progress.phase) ? " (" + esc(d.progress.phase) + ")" : "";
+            status.appendChild(el("p", "notice",
+              "Building the full-text index for the first time…" + ph
+              + " Showing quick matches meanwhile; full results will appear shortly."));
+            results.innerHTML = ""; loaded = 0;
+            renderHits(d.hits || []);
+            loaded = (d.hits || []).length;
+            setTimeout(function () { load(0, false); }, 1500);
+            return;
+          }
+          polling = false;
+          if (!append) { results.innerHTML = ""; loaded = 0; status.innerHTML = ""; }
+          total = d.total || 0;
+          if (!total && offset === 0) {
+            status.appendChild(el("p", "notice", "No matches for “" + esc(q) + "”."));
+            return;
+          }
+          status.appendChild(el("p", "search-count",
+            num(total) + " match" + (total === 1 ? "" : "es")));
+          renderHits(d.hits || []);
+          loaded += (d.hits || []).length;
+          if (moreBtn) { moreBtn.remove(); moreBtn = null; }
+          if (loaded < total) {
+            moreBtn = el("button", "btn more", "Load more");
+            moreBtn.addEventListener("click", function () {
+              moreBtn.disabled = true; load(loaded, true);
+            });
+            main.appendChild(moreBtn);
+          }
+        }).catch(function (e) {
+          status.innerHTML = "";
+          status.appendChild(el("p", "notice", "Search failed: " + esc(e.message)));
+        });
+    }
+    load(0, false);
+  };
+
+  // ── the release gate (E5) ──
+  // The family GET surface is default-closed: bodies (/media, /api/<section>)
+  // refuse until a named human releases the case. So EVERY page branches to
+  // /api/release-status FIRST and renders a banner, BEFORE any section fetch —
+  // otherwise a default-closed page would render an empty shell of 403s (§3).
+  var RELEASE_STATUS = null;
+
+  function releaseBanner(status) {
+    if (!status) return null;
+    if (status.valid) {
+      // Released. Family sees nothing; the examiner gets a subtle confirmation.
+      if (EXAMINER && status.state === "released") {
+        var okb = el("div", "release-banner ok");
+        okb.innerHTML = "Released"
+          + (status.signed_by ? " by " + esc(status.signed_by) : "")
+          + (status.signed_at ? " on " + esc(status.signed_at) : "") + ".";
+        return okb;
+      }
+      return null;
+    }
+    var headings = { legacy_unsigned: "Not yet released", revoked: "Release revoked",
+                     stale: "Release paused", invalid: "Release unreadable" };
+    var b = el("div", "release-banner warn");
+    b.innerHTML = "<strong>" + esc(headings[status.state] || "Not released") + ".</strong> "
+      + esc(status.message || "This archive has not been released.");
+    return b;
+  }
+
+  function renderReleaseClosed(main, status) {
+    main.appendChild(el("p", "notice",
+      "The family archive is closed until a named person releases it. "
+      + "Nothing here is available yet."));
+  }
+
+  // ── boot / render ──
+  function render() {
+    document.body.classList.remove("selecting");  // exit any drag-select mode on nav/re-render
+    destroyGrids();                               // drop stale virtual-grid scroll listeners
+    VIEW.removeItems = null;                      // pages re-register their in-place hooks
+    var main = shell();
+    var page = CTX.page;
+    var api = "/api/" + page;
+    function loadSection() {
+      getJSON(api).then(function (data) {
+        (P[page] || function (m) { m.appendChild(el("p", "notice", "Page not found.")); })(main, data);
+      }).catch(function (e) {
+        main.appendChild(el("p", "notice", "Couldn't load: " + esc(e.message)));
+      });
+    }
+    getJSON("/api/release-status").then(function (status) {
+      RELEASE_STATUS = status;
+      var banner = releaseBanner(status);
+      if (banner) main.appendChild(banner);
+      // Family + not released → default-closed: show the banner, skip the body.
+      if (!EXAMINER && status && status.valid === false) {
+        return renderReleaseClosed(main, status);
+      }
+      loadSection();
+    }).catch(function () {
+      // Status endpoint missing/unreachable (older server) → normal behavior.
+      loadSection();
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", render);
+})();

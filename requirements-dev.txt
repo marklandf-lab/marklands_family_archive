@@ -1,0 +1,3 @@
+# Test-only. Not needed to run the archive server.
+-r requirements.txt
+pytest==9.1.0

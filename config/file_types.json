@@ -1,0 +1,237 @@
+{
+  "_comment": "Single source of truth for file-type handling. Loaded by wyeast.core.filetypes; mirrors its embedded defaults EXACTLY (a missing/unreadable file falls back to those defaults with no behavior change — air-gap safe). 'dispositions' = what each kind of file IS and what to DO with it at intake (collect into a bucket / read_in_place / surface / convert_raw / expand / sniff_email / sniff_message / ignore). 'engine_sets' = which downstream engine can read which format (data only; handling logic lives in the stages). This is the vetted integration of the comprehensive superset (see git history of config/comprehensive_file_types.json). Deviations from that draft, made so the live pipeline stays correct: (1) vector/editor/HDR/exotic-raster formats are routed to a SURFACE 'graphic' category, not collect->photos, so they never reach the face/scene vision stages or land in the family gallery; (2) 'archive' is limited to formats with a real expandfiles handler — container types without one (cab/zst/cpio/ar/dbx/nsf/...) are deliberately left to fall through to unknown/flag for examiner review rather than advertised-but-unhandled; (3) email is .eml only — Apple Mail .emlx/.cnm are deferred until stage 10 discovery supports them; (4) ambiguous .raw is dropped and .crm (Canon Raw Movie) is classified as video, not RAW. When adding a NEW disposition category, also add its name to _CATEGORY_ORDER in wyeast.core.filetypes (and mirror the whole file into that module's _DEFAULTS).",
+  "schema_version": 1,
+  "dispositions": {
+    "appledouble": {
+      "_note": "macOS AppleDouble resource-fork stubs (`._<name>` sidecars written to non-native filesystems / inside Mac-created zips). A few KB of Finder metadata, zero content — a `._Foo.mp4` stub is NOT a video (video_frames fails on them with 'moov atom not found'). First in _CATEGORY_ORDER so the basename pattern beats every other category's patterns and extensions. Left in place, never collected.",
+      "name_patterns": ["._*"],
+      "action": "ignore"
+    },
+    "image": {
+      "_note": "Raster stills the vision stages (face/scene/dedup) treat as family photos. HEIF-family variants (.hif/.heics/.heifs) reuse the existing HEIF path via engine_sets.heif_decode + needs_jpeg_for_llava (verified: pillow_heif opens them for CLIP, ImageMagick converts them for LLaVA). AVIF is NOT here — pillow_heif on Zone B has no AVIF decoder, so CLIP cannot open it; see 'graphic'. .jfif/.jpe are JPEG aliases; .insp is an Insta360 still (JPEG-based).",
+      "extensions": [
+        ".jpg", ".jpeg", ".jpe", ".jfif",
+        ".png", ".gif", ".bmp", ".webp",
+        ".tiff", ".tif",
+        ".heic", ".heif", ".hif", ".heics", ".heifs",
+        ".insp"
+      ],
+      "action": "collect",
+      "bucket": "photos"
+    },
+    "graphic": {
+      "_note": "Vector / editor-project / HDR / exotic-raster / icon stills. Surfaced for the examiner but kept OUT of collect->photos: the vision stages' PIL/pillow_heif path cannot open them (verified on Zone B: SVG/EPS/AI/PSD/XCF/EXR, and AVIF/.avifs — pillow_heif 1.3.0 has no AVIF decoder even though ImageMagick can convert it). JPEG XL / JPEG 2000 are surfaced here too (no PIL plugin). Revisit (AVIF especially) if pillow_heif gains AVIF decode or s06 converts before CLIP.",
+      "extensions": [
+        ".svg", ".svgz", ".eps", ".ai",
+        ".psd", ".psb", ".xcf",
+        ".exr", ".hdr", ".dds",
+        ".jxl", ".jp2", ".j2k", ".jpf", ".jpx",
+        ".avif", ".avifs",
+        ".tga", ".pcx", ".ico", ".cur", ".icns"
+      ],
+      "action": "surface",
+      "bucket": "other/graphics"
+    },
+    "video": {
+      "_note": "Container formats — the extension reveals the wrapper, not the codec. AVCHD camcorders write .mts/.m2ts/.ts; 360/action cams write .insv/.360. .hevc/.h264/.264/.265 are raw elementary streams. .crm is a Canon Raw Movie (QuickTime-based video, NOT a still RAW). 360/action sidecar proxies (.lrv/.lrf) and clip thumbnails (.thm) are NOT masters — see media_sidecar.",
+      "extensions": [
+        ".mov", ".qt", ".mp4", ".m4v", ".avi", ".mkv", ".webm",
+        ".wmv", ".asf", ".flv", ".f4v",
+        ".mpg", ".mpeg", ".mpe", ".m1v", ".m2v", ".vob",
+        ".3gp", ".3gpp", ".3g2",
+        ".mts", ".m2ts", ".m2t", ".ts",
+        ".mxf", ".ogv", ".rm", ".rmvb",
+        ".insv", ".360", ".crm",
+        ".hevc", ".h264", ".264", ".265"
+      ],
+      "action": "collect",
+      "bucket": "videos"
+    },
+    "document": {
+      "_note": ".txt and .eml intentionally excluded (OCR-sidecar false positives; email is read in place by stage 10). OOXML/ODF/iWork/EPUB entries are ZIP containers; legacy .doc/.xls/.ppt share the OLE2 signature with .msg — disambiguate by inner manifest, not magic bytes alone. OCR (stage 08) only processes engine_sets.pdf/ocr_* members; the rest are delivered as documents.",
+      "extensions": [
+        ".pdf",
+        ".doc", ".docx", ".docm", ".dot", ".dotx", ".dotm", ".wbk",
+        ".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx", ".xltm", ".xlm",
+        ".ppt", ".pptx", ".pptm", ".pps", ".ppsx", ".ppsm",
+        ".rtf",
+        ".odt", ".ott", ".ods", ".odp", ".sxw",
+        ".csv", ".tsv",
+        ".pages", ".numbers", ".key",
+        ".wpd", ".wp", ".wp5", ".wp6", ".wpt", ".wps", ".wri",
+        ".epub", ".mobi", ".azw", ".azw3", ".fb2", ".ibooks"
+      ],
+      "action": "collect",
+      "bucket": "documents"
+    },
+    "raw": {
+      "_note": "Camera RAW — converted to a JPEG proxy by convertraw; original retained. Ambiguous .raw is intentionally omitted (sniff first). .crm is video (see above). Cinema RAW (.ari/.braw/.r3d) is included for vendor completeness; convertraw will log a graceful failure for formats libraw/dcraw cannot decode and the original is retained.",
+      "extensions": [
+        ".cr2", ".cr3", ".crw",
+        ".nef", ".nrw",
+        ".arw", ".arq", ".srf", ".sr2",
+        ".raf", ".orf", ".ori", ".rw2", ".rwl",
+        ".pef", ".ptx", ".srw", ".x3f",
+        ".3fr", ".fff", ".iiq", ".cap", ".mos",
+        ".dng", ".gpr",
+        ".mrw", ".dcr", ".kdc", ".k25", ".dcs", ".drf",
+        ".erf", ".mef", ".bay", ".mdc", ".rwz",
+        ".ari", ".braw", ".r3d"
+      ],
+      "action": "convert_raw"
+    },
+    "archive": {
+      "_note": "Container formats expanded by expandfiles. Value = handler key. Limited to formats with a real handler in expandfiles.HANDLERS. .pst/.ost/.mbox/.mbx/.msg are mail containers routed into the email pipeline after expansion. Forensic disk images are NOT here — see disk_image (surfaced for examiner mount-and-recurse, not auto-expanded).",
+      "extensions": {
+        ".zip": "zip", ".rar": "rar", ".7z": "7z",
+        ".tar": "tar", ".tar.gz": "tar", ".tgz": "tar", ".tar.bz2": "tar", ".tar.xz": "tar", ".tbz2": "tar", ".txz": "tar",
+        ".gz": "gz", ".bz2": "bz2", ".xz": "xz",
+        ".pst": "pst", ".ost": "pst", ".mbox": "mbox", ".mbx": "mbox", ".msg": "msg",
+        ".dmg": "dmg", ".iso": "iso"
+      },
+      "action": "expand"
+    },
+    "email": {
+      "_note": "Leaf email files — read in place by stage 10, never moved. Apple Mail .emlx carries a byte-count/plist-trailer wrapper rather than plain RFC 2822; wyeast.core.mailformats unwraps it for every reader, so it shares this disposition with .eml. .cnm remains excluded — no format spec or real sample has ever been sourced for it, so it stays unknown/flag rather than being guessed at (see docs/specs/apple-mail-emlx-cnm-support.md Part B). Maildir/Apple Mail stores must be detected by DIRECTORY SHAPE, not extension.",
+      "extensions": [".eml", ".emlx"],
+      "action": "read_in_place"
+    },
+    "email_sniff": {
+      "_note": "Non-.eml candidates content-sniffed for RFC 2822 by stage 10 / expandfiles. winmail.dat (.tnef) is TNEF, not RFC 2822, so it is NOT listed here (it would never pass the sniff) — it needs a dedicated TNEF decoder and is left to unknown/flag for now.",
+      "extensions": [".txt", ".mail"],
+      "action": "sniff_email"
+    },
+    "message_export": {
+      "_note": "Message-corpus exports (SMS/WhatsApp/IM) recognized by BASENAME PATTERN only — .xml/.json/.html/.txt are far too common in case data to claim by extension (messaging-ingestion spec §4.1). name_patterns are case-insensitive fnmatch globs checked BEFORE any extension match, so 'WhatsApp Chat*.txt' beats email_sniff's generic .txt. 'sniff_message' is a claim to inspect, not a promise the file is handled: files stay in place (collect_dedup takes no action) and reconciliation keeps them examiner-visible until the Phase-1 message_triage stage content-sniffs and parses them.",
+      "extensions": [],
+      "name_patterns": [
+        "sms-*.xml", "calls-*.xml",
+        "message_*.json", "messages.json",
+        "result.json",
+        "Hangouts.json",
+        "WhatsApp Chat*.txt",
+        "* - Text - *.html",
+        "* - Voicemail - *.html"
+      ],
+      "action": "sniff_message"
+    },
+    "calendar": {
+      "extensions": [".ics", ".vcs"],
+      "action": "surface",
+      "bucket": "other/calendars"
+    },
+    "contact": {
+      "extensions": [".vcf"],
+      "action": "surface",
+      "bucket": "other/contacts"
+    },
+    "audio": {
+      "_note": ".ogg/.oga/.opus share the Ogg family with video .ogv (distinct extensions). .amr/.awb/.3ga are common phone voice notes. .mid/.midi are note sequences, not sampled audio.",
+      "extensions": [
+        ".mp3", ".aac", ".m4a", ".m4b", ".m4p",
+        ".wav", ".aiff", ".aif", ".aifc",
+        ".flac", ".ogg", ".oga", ".opus", ".wma",
+        ".amr", ".awb", ".3ga", ".caf",
+        ".wv", ".ape", ".mpc", ".dsf", ".dff",
+        ".aa", ".aax", ".ra", ".ram", ".au", ".snd",
+        ".mid", ".midi"
+      ],
+      "action": "surface",
+      "bucket": "other/audio"
+    },
+    "database": {
+      "_note": "May contain user data (messages, contacts, call logs, browser history). Surfaced for examiner inspection — NEVER blind-ignored. WAL/SHM/journal sidecars ride along for every SQLite naming variant: a phone-pulled store routinely carries its newest messages only in the WAL (messaging-ingestion spec §3.3), so a stranded sidecar is real data loss.",
+      "extensions": [
+        ".db", ".sqlite", ".sqlite3", ".sqlitedb",
+        ".db-wal", ".db-shm", ".db-journal",
+        ".sqlite-wal", ".sqlite-shm", ".sqlite-journal",
+        ".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal",
+        ".sqlitedb-wal", ".sqlitedb-shm", ".sqlitedb-journal",
+        ".plist", ".abcddb", ".abcdmr"
+      ],
+      "action": "surface",
+      "bucket": "other/databases"
+    },
+    "encrypted_message_store": {
+      "_note": "Encrypted message stores (WhatsApp Android crypt12/14/15, Signal backups) — unreadable without an examiner-supplied key (messaging-ingestion Phase 3); surfaced so they are never silently invisible, and reconciliation raises an examiner-attention item while any are present.",
+      "extensions": [".crypt12", ".crypt14", ".crypt15"],
+      "name_patterns": ["signal-*.backup"],
+      "action": "surface",
+      "bucket": "other/messages/encrypted"
+    },
+    "disk_image": {
+      "_note": "Forensic disk/VM images are CONTAINERS OF REAL CONTENT. Surfaced for examiner mount-and-recurse, not auto-expanded (libewf/Sleuth Kit territory). Segmented EWF (.e01/.ex01/.l01...) and AFF families included. NOTE: legacy single-file AFF v1 (.aff) is intentionally NOT here — .aff collides with the ubiquitous Hunspell affix-dictionary (Firefox/Thunderbird/LibreOffice ship them) and AFF v1 is superseded by .aff4 (~2009); .aff is ignored as app-resource non-content instead. The modern .aff4 and segmented .afd/.afm remain. .sparseimage (macOS UDIF sparse image, single-file cousin of .dmg) is surfaced here rather than added to archive/expand: expand_dmg (tools/expandfiles.py) is macOS-only and raises on Linux Zone B, so promising auto-expand for another Apple image format would be the same broken promise, not a fix. .sparsebundle (Time Machine's directory-of-band-files bundle) is NOT a leaf file and cannot be handled by an extensions entry — see docs/specs/mac-bundle-directory-intake.md.",
+      "extensions": [
+        ".e01", ".ex01", ".l01", ".lx01", ".s01",
+        ".afd", ".afm", ".aff4",
+        ".vmdk", ".vhd", ".vhdx", ".vdi", ".qcow2", ".dd",
+        ".sparseimage"
+      ],
+      "action": "surface",
+      "bucket": "other/disk_images"
+    },
+    "shortcut": {
+      "_note": "Not deliverable content, but forensically meaningful (targets + MAC times). Surfaced/logged rather than silently discarded.",
+      "extensions": [".lnk", ".url", ".webloc"],
+      "action": "surface",
+      "bucket": "other/shortcuts"
+    },
+    "media_sidecar": {
+      "_note": "Action-cam / 360 sidecars: low-res proxy videos (.lrv/.lrf) and clip thumbnails (.thm, a JPEG despite the video context). The master is the .mov/.mp4/.360/.insv, so these are ignored as duplicate-of-master content (left in place, never collected).",
+      "extensions": [".lrv", ".lrf", ".thm"],
+      "action": "ignore"
+    },
+    "ignore": {
+      "_note": "Known non-content: executables, OS/filesystem cruft, system dumps, temp/cache/partial, fonts, config/logs. Per the chain-of-custody constraint these are SKIPPED FROM CONTENT PROCESSING, not deleted. 'names' also covers intake-tool summaries and gallery sidecars (AlbumInfo.json / Subscribed Albums.json) read in place by the gallery catalog. Ambiguous .bin/.dat/.raw are intentionally NOT ignored here (sniff first). Whole OS/system subtrees ($Recycle.Bin, System Volume Information, WINDOWS, Program Files, ...) on a full system volume are pruned by the top-level skip_dirs policy (see skip_dirs), not this leaf-file table.",
+      "extensions": [
+        ".exe", ".dll", ".com", ".msi", ".sys", ".drv",
+        ".so", ".dylib", ".o", ".a", ".ko", ".elf", ".out",
+        ".deb", ".rpm", ".apk", ".appimage", ".pkg", ".jar",
+        ".class", ".pyc", ".pyo", ".obj", ".lib", ".pdb",
+        ".tmp", ".temp", ".swp", ".swo", ".swn",
+        ".part", ".partial", ".crdownload", ".crswap", ".download",
+        ".cache", ".pid", ".lock", ".aria2",
+        ".ttf", ".otf", ".ttc", ".woff", ".woff2", ".eot",
+        ".fon", ".fnt", ".dfont", ".pfb", ".pfm",
+        ".aff",
+        ".log", ".ini", ".cfg", ".conf", ".reg", ".inf", ".manifest",
+        ".ds_store"
+      ],
+      "names": [
+        "expandfiles_summary.json", "raw_metadata.json",
+        "mms_parts_map.json",
+        "AlbumInfo.json", "Subscribed Albums.json",
+        "thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", "desktop.ini",
+        ".ds_store", ".localized",
+        "hiberfil.sys", "pagefile.sys", "swapfile.sys"
+      ],
+      "action": "ignore"
+    }
+  },
+  "skip_dirs": {
+    "_note": "Top-level directory subtrees pruned from intake collection (stage 01) when a source is a full OS/system volume. Matching is ANCHORED: a name matches only when it is a directory directly under original_files/ (depth 1) and the case looks like a system volume (a root_marker file is present), so a user folder named e.g. 'Windows trip 2019' deeper in the tree is never caught. Pruned files are NOT deleted — they stay in original_files/, are counted in the stage-01 summary (skipped_dirs), and accounted as 'excluded_system_dir' in stage-14 reconciliation for the examiner, who can opt to recurse a specific subtree. A case may override this block in case_config.json (top-level skip_dirs): set names to [] to disable, or supply a custom list; omitted keys inherit these defaults. Embedded defaults in wyeast.core.filetypes must match.",
+    "names": [
+      "WINDOWS", "WinNT", "Program Files", "Program Files (x86)",
+      "ProgramData", "Windows.old", "$WINDOWS.~BT", "$WINDOWS.~WS",
+      "$Recycle.Bin", "RECYCLER", "System Volume Information",
+      "MSOCache", "PerfLogs", "Recovery"
+    ],
+    "root_markers": ["boot.ini", "ntldr", "NTDETECT.COM", "pagefile.sys", "bootmgr"]
+  },
+  "bundle_containers": {
+    "_note": "Directory-shaped containers: a bundle DIRECTORY whose real payload is an extensionless file inside it. Apple Mail stores a mailbox as a directory 'INBOX.mbox/' holding a file literally named 'mbox' (alongside 'table_of_contents'). Neither half is reachable by the extension table — every intake caller filters to is_file() so the bundle directory is never classified, and 'mbox'.endswith('.mbox') is False for the inner file — so without this rule the entire mailbox falls to unknown/flag and contributes ZERO messages. That is silent data loss, not a duplication problem. Keyed by bundle-directory suffix; the value names the inner payload file(s) and the expandfiles handler key that reads them. The parent-suffix gate is deliberate: a bare file named 'mbox' outside a '*.mbox' directory is NOT assumed to be a mail container. Embedded defaults in wyeast.core.filetypes must match.",
+    ".mbox": {"inner_names": ["mbox"], "handler": "mbox"}
+  },
+  "engine_sets": {
+    "_note": "Which downstream engine can read which format. Data only — the convert/skip branches live in the stages. HEIF-family stills are decoded via PIL (heif_decode) and converted to JPEG before LLaVA (needs_jpeg_for_llava).",
+    "pdf": [".pdf"],
+    "transcription": [".mp3", ".aac", ".m4a", ".m4b", ".m4p", ".wav", ".aiff", ".aif", ".aifc", ".flac", ".ogg", ".oga", ".opus", ".wma", ".amr", ".awb", ".3ga", ".caf", ".au", ".snd"],
+    "ocr_tesseract": [".pdf", ".tiff", ".tif", ".bmp", ".png"],
+    "ocr_paddle": [".jpg", ".jpeg", ".png", ".tiff", ".tif"],
+    "scene_exclude": [".webp"],
+    "needs_jpeg_for_llava": [".webp", ".heic", ".heif", ".hif", ".heics", ".heifs"],
+    "scene_tiff_skip": [".tiff", ".tif"],
+    "heif_decode": [".heic", ".heif", ".hif", ".heics", ".heifs"],
+    "exif_untaggable": [".bmp"]
+  }
+}

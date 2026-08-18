@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# A case tree dropped next to the checkout for local use — never commit case data.
+/cases/
+.DS_Store

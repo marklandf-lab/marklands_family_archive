@@ -1,0 +1,129 @@
+/* Wyeast Case Explorer — brand: cream / navy / brass.
+   Vendored Fraunces/Inter/IBM Plex Mono (see fonts.css), with system-font
+   fallbacks so it degrades gracefully. Works fully offline from file://. */
+@import url("fonts.css");
+:root {
+  --cream: #FAF6EF;
+  --cream-2: #F3EBDD;
+  --navy: #1B3A6B;
+  --navy-deep: #0B1120;
+  --ink: #1C2433;
+  --brass: #A8843B;
+  --brass-2: #C9A964;
+  --slate: #5B6472;
+  --slate-2: #8B92A0;
+  --line: #e3dccc;
+  --ok: #2f7d4f;
+  --warn: #b9791f;
+  --crit: #b3322c;
+  --serif: "Fraunces", Georgia, "Times New Roman", serif;
+  --sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  font-family: var(--sans);
+  color: var(--ink);
+  background: var(--cream);
+  line-height: 1.5;
+}
+a { color: var(--navy); }
+
+/* header / nav / footer ---------------------------------------------------- */
+.site-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 24px; background: var(--navy-deep); color: var(--cream);
+  border-bottom: 3px solid var(--brass);
+}
+.brand .mark { font-family: var(--serif); font-size: 22px; font-weight: 700; letter-spacing: .5px; }
+.brand .sub { margin-left: 10px; color: var(--brass-2); font-size: 13px; text-transform: uppercase; letter-spacing: 2px; }
+.case-meta { display: flex; align-items: center; gap: 12px; }
+.case-id { font-family: var(--serif); font-size: 16px; color: var(--cream); }
+.role-badge { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; padding: 3px 9px; border-radius: 3px; }
+.role-badge.examiner { background: var(--brass); color: var(--navy-deep); }
+.role-badge.family { background: var(--cream-2); color: var(--navy); }
+.site-nav {
+  display: flex; flex-wrap: wrap; gap: 2px; padding: 0 16px;
+  background: var(--navy); position: sticky; top: 0; z-index: 500;
+}
+.site-nav a {
+  color: var(--cream); text-decoration: none; padding: 11px 16px; font-size: 14px;
+  border-bottom: 3px solid transparent;
+}
+.site-nav a:hover { background: rgba(255,255,255,.08); }
+.site-nav a.active { border-bottom-color: var(--brass-2); color: #fff; font-weight: 600; }
+.site-nav a[data-review] { color: var(--brass-2); }
+.site-foot { padding: 18px 24px; color: var(--slate); font-size: 12px; border-top: 1px solid var(--line); margin-top: 40px; }
+main { max-width: 1180px; margin: 0 auto; padding: 26px 24px 0; }
+
+/* typography --------------------------------------------------------------- */
+h1 { font-family: var(--serif); font-size: 28px; color: var(--navy); margin: 0 0 6px; }
+h2 { font-family: var(--serif); font-size: 20px; color: var(--navy); margin: 30px 0 12px; }
+.lead { color: var(--slate); margin-top: 0; }
+.notice { background: var(--cream-2); border-left: 4px solid var(--brass); padding: 12px 16px; border-radius: 3px; }
+
+/* stat tiles --------------------------------------------------------------- */
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; margin: 18px 0; }
+.tile { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 16px; text-decoration: none; color: var(--ink); }
+.tile:hover { border-color: var(--brass); }
+.tile .n { font-family: var(--serif); font-size: 30px; color: var(--navy); display: block; }
+.tile .l { font-size: 13px; color: var(--slate); text-transform: uppercase; letter-spacing: 1px; }
+
+/* banners ------------------------------------------------------------------ */
+.banner { padding: 14px 18px; border-radius: 6px; margin: 16px 0; }
+.banner.crit { background: #fbeae9; border: 1px solid var(--crit); color: #7a211d; }
+.banner.warn { background: #fdf4e3; border: 1px solid var(--warn); color: #6d4a12; }
+.banner.ok { background: #eaf5ee; border: 1px solid var(--ok); color: #1e5234; }
+.banner h3 { margin: 0 0 6px; }
+
+/* cards / gallery ---------------------------------------------------------- */
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 14px 0; }
+.toolbar select, .toolbar input { padding: 7px 10px; border: 1px solid var(--line); border-radius: 4px; font-size: 14px; background: #fff; }
+.count-note { color: var(--slate); font-size: 13px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.card { background: #fff; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.card img { width: 100%; height: 130px; object-fit: cover; display: block; background: var(--cream-2); }
+.card .ph { width: 100%; height: 130px; display: flex; align-items: center; justify-content: center; background: var(--cream-2); color: var(--slate-2); font-size: 12px; }
+.card .cap { padding: 7px 9px; font-size: 12px; }
+.card .cap .nm { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.card .cap .meta { color: var(--slate); font-size: 11px; }
+
+/* people ------------------------------------------------------------------- */
+.person { display: flex; gap: 14px; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 14px; margin-bottom: 12px; }
+.person .faces { display: flex; gap: 4px; }
+.person .faces img { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; }
+.person .body h3 { margin: 0 0 4px; font-family: var(--serif); color: var(--navy); }
+.person .body p { margin: 4px 0 0; color: var(--slate); font-size: 14px; }
+
+/* tables ------------------------------------------------------------------- */
+table { border-collapse: collapse; width: 100%; background: #fff; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 14px; vertical-align: top; }
+th { background: var(--cream-2); color: var(--navy); font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+tr:last-child td { border-bottom: none; }
+.preview { color: var(--slate); font-size: 12px; }
+
+/* badges ------------------------------------------------------------------- */
+.badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--cream-2); color: var(--navy); }
+.sig { font-weight: 700; }
+.sig-5, .sig-4 { color: var(--crit); }
+.sig-3 { color: var(--warn); }
+.stars { color: var(--brass); letter-spacing: 1px; }
+
+/* map ---------------------------------------------------------------------- */
+#map { height: 520px; border: 1px solid var(--line); border-radius: 6px; }
+.leaflet-popup-content { font-family: var(--sans); }
+
+/* search ------------------------------------------------------------------- */
+.search-box { width: 100%; padding: 12px 14px; font-size: 16px; border: 2px solid var(--navy); border-radius: 6px; }
+.results { margin-top: 16px; }
+.result { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; margin-bottom: 8px; }
+.result a { font-weight: 600; }
+.result .k { font-size: 11px; text-transform: uppercase; color: var(--brass); letter-spacing: 1px; margin-left: 8px; }
+.result .s { color: var(--slate); font-size: 13px; margin-top: 3px; }
+
+/* timeline ----------------------------------------------------------------- */
+.tl-group { margin-bottom: 18px; }
+.tl-group h3 { font-family: var(--serif); color: var(--navy); border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.load-more { display: block; margin: 18px auto; padding: 10px 22px; background: var(--navy); color: #fff; border: none; border-radius: 5px; font-size: 14px; cursor: pointer; }
+.load-more:hover { background: var(--navy-deep); }
