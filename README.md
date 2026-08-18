@@ -29,6 +29,10 @@ have no macOS build at all.
 
 ## Install
 
+**[INSTALL.md](INSTALL.md) is the step-by-step guide** — installing Python on
+macOS, getting this private repo onto the Mac, offline installs, and a
+troubleshooting table. The short version, if you already have Python 3.10+:
+
 ```bash
 git clone https://github.com/WyeastCorp/mac_family_archive.git
 cd mac_family_archive
