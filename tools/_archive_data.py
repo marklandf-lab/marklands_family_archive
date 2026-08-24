@@ -22,9 +22,10 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from wyeast.core.audience import (  # noqa: E402
-    can_see_conversation, filter_message_chunks, load_conversation_index,
-    load_thread_index,
+    can_see_conversation, filter_message_chunks, install_index_loader,
+    load_conversation_index, load_thread_index,
 )
+from wyeast.core import rebase as _rebase  # noqa: E402
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic"}
 THUMB_MAX = 320  # px, longest edge
@@ -110,11 +111,37 @@ def log(msg):
     print(f"[archive] {msg}", flush=True)
 
 
+# The choke point for reading a metadata/ index — which makes it one of the two
+# places a relocated case has to be corrected (wyeast/core/audience is the other,
+# and both share the registry in wyeast/core/rebase so they cannot diverge).
+# Process-global on purpose: one server process serves exactly one case, and
+# threading the rebaser through every builder signature would put the burden of
+# remembering it on ~40 call sites, any one of which could quietly forget and
+# reintroduce the dead paths. Defaults to the no-op, so an in-place case (and
+# every test that does not opt in) behaves byte-for-byte as before.
+
+
+def install_rebaser(rebaser):
+    """Point every case-index reader at `rebaser` for the rest of this process.
+    Passing None restores the no-op. ArchiveCase calls this before its first
+    load().
+
+    BOTH readers are wired here, together, because they join on path: the thread
+    index names the message files whose bodies email_index carries. Wiring only
+    one leaves threads with no messages and reports no error at all."""
+    rb = _rebase.install(rebaser)
+    install_index_loader(rb.load_json_file)
+    return rb
+
+
+def active_rebaser():
+    return _rebase.active()
+
+
 def load_json(path, default=None):
     try:
-        with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return _rebase.load_json_file(path)
+    except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError):
         return default
 
 
@@ -3547,8 +3574,16 @@ def conversation_detail(conv, *, index_record=None, attachment_resolver=None,
 
 
 def actions_history(paths):
-    """Parse output/metadata/family_actions.ndjson, newest first (for History)."""
+    """Parse output/metadata/family_actions.ndjson, newest first (for History).
+
+    Entries are rebased on the way in for the same reason the indexes are: a row's
+    `target` is an ITEM ID, and History links on it. Written de-rebased by
+    append_action, so the log stays portable across a move — see
+    wyeast/core/rebase.py. Line-at-a-time rather than through load_json because
+    this is NDJSON, not a document.
+    """
     path = paths.metadata_dir / "family_actions.ndjson"
+    to_local = _rebase.active().to_local
     rows = []
     try:
         with open(path, encoding="utf-8") as fh:
@@ -3557,7 +3592,7 @@ def actions_history(paths):
                 if not line:
                     continue
                 try:
-                    rows.append(json.loads(line))
+                    rows.append(to_local(json.loads(line)))
                 except json.JSONDecodeError:
                     continue
     except (FileNotFoundError, OSError):

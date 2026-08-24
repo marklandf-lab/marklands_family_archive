@@ -58,6 +58,32 @@ AUDIENCES = (FAMILY, EXAMINER)
 log = logging.getLogger(__name__)
 
 
+# ── index loader (injected) ─────────────────────────────────────────────────
+# These indexes JOIN on path against the ones tools/_archive_data reads — a thread
+# names the message files whose bodies email_index carries — so when a case is
+# served away from the machine that produced it, BOTH sides have to be rewritten
+# or the join silently empties (threads with no messages, no error anywhere).
+# The rewriting lives in wyeast.core.rebase, but importing it here would break
+# this module's stdlib purity: wyeast.core is imported by stages running under six
+# different venvs, and the guard in tests/unit/test_audience.py exists to keep it
+# importable under all of them. So the loader is INJECTED instead — one call, made
+# beside the rebaser install in tools/_archive_data.install_rebaser.
+_INDEX_LOADER = None
+
+
+def install_index_loader(fn):
+    """Read this module's case indexes through `fn(path) -> parsed`. None restores
+    the plain stdlib parse."""
+    global _INDEX_LOADER
+    _INDEX_LOADER = fn
+
+
+def _read_index(path):
+    if _INDEX_LOADER is not None:
+        return _INDEX_LOADER(path)
+    return json.loads(Path(path).read_text())
+
+
 def _check(audience: str) -> str:
     if audience not in AUDIENCES:
         raise ValueError(
@@ -108,7 +134,7 @@ def load_email_index(paths, audience: str = FAMILY) -> list:
     if not path.exists():
         return []
     try:
-        entries = json.loads(path.read_text())
+        entries = _read_index(path)
     except Exception as exc:
         log.warning("could not parse %s: %s", path.name, exc)
         return []
@@ -189,7 +215,7 @@ def load_conversation_index(paths, audience: str = FAMILY) -> list:
     if not path.exists():
         return []
     try:
-        convs = json.loads(path.read_text())
+        convs = _read_index(path)
     except Exception as exc:
         log.warning("could not parse %s: %s", path.name, exc)
         return []
@@ -299,7 +325,7 @@ def load_thread_index(paths, audience: str = FAMILY) -> dict:
     path = thread_index_path(paths, audience)
     if path.exists():
         try:
-            return json.loads(path.read_text()) or {}
+            return _read_index(path) or {}
         except Exception as exc:
             log.warning("could not parse %s: %s", path.name, exc)
             return {}
@@ -312,7 +338,7 @@ def load_thread_index(paths, audience: str = FAMILY) -> dict:
             "Rebuild the examiner bundle to refresh it.",
             path.name, legacy.name)
         try:
-            return json.loads(legacy.read_text()) or {}
+            return _read_index(legacy) or {}
         except Exception as exc:
             log.warning("could not parse %s: %s", legacy.name, exc)
             return {}
