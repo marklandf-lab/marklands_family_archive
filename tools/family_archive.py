@@ -62,9 +62,10 @@ from wyeast.core.audience import (  # noqa: E402
 from wyeast.core.config import cases_root, load_case_config, load_pipeline_config  # noqa: E402
 from wyeast.core.custody import ChainOfCustody, sha256_of  # noqa: E402
 from wyeast.core.delivery import canonical_for, relative_symlink  # noqa: E402
-from wyeast.core.io import atomic_write_json  # noqa: E402
+from wyeast.core.io import atomic_write_json as _atomic_write_json_raw  # noqa: E402
 from wyeast.core.moves import MoveLedger, move_tracked  # noqa: E402
 from wyeast.core.paths import CasePaths, display_person_folder, sanitize_person_name  # noqa: E402
+from wyeast.core.rebase import PathRebaser, detect_recorded_root  # noqa: E402
 from wyeast.core import release  # noqa: E402
 
 from tools._archive_data import (  # noqa: E402
@@ -75,7 +76,7 @@ from tools._archive_data import (  # noqa: E402
     confirm_queue_data, conversation_detail, document_rows, documents_index,
     file_identity,
     email_rows, email_thread_detail, event_album_titles, event_albums_data,
-    load_json, log,
+    active_rebaser, install_rebaser, load_json, log,
     message_rows, overview_data, people_rows, person_detail, photo_rows,
     person_display_name, places_data, ranked_key, review_data, _identity_name,
     scanned_image_rows, timeline_rows, timeline_data, on_this_day_data, venues_data,
@@ -87,6 +88,79 @@ from tools._archive_data import (  # noqa: E402
     VITAL_DOC_LABELS,
 )
 from tools import build_fts  # noqa: E402
+
+# ── relocated-case support ───────────────────────────────────────────────────────
+# A delivered case records the paths its WORKSTATION used; served from anywhere
+# else, every one of them is dead (see wyeast/core/rebase.py for the full story).
+# Reads are corrected inside load_json; writes are corrected here.
+
+
+def atomic_write_json(path, data, indent: int = 2) -> None:
+    """Write a case sidecar with its paths back in RECORDED form.
+
+    Shadows the wyeast.core.io helper for every writer in this module, which is
+    the point: ~20 verbs do `load_json → mutate → atomic_write_json`, and each one
+    would otherwise persist whatever local paths this particular machine happens to
+    use. Decisions are keyed BY PATH — doc_placements, junk_rescued,
+    scanned_released, vital_doc_dismissed, face_assignments — so storing them
+    against a location rather than against the case's own id space would orphan
+    every one of them the next time the folder moves. Round-tripping through the
+    recorded form keeps the sidecar as portable as the indexes beside it.
+
+    A no-op for an in-place case: the rebaser is the identity there.
+    """
+    _atomic_write_json_raw(path, active_rebaser().to_recorded(data), indent)
+
+
+# Cap for the no-archive_map fallback below. case_summary.json runs to tens of MB
+# on a real case and we need three path strings out of it, not all of them.
+_ROOT_SAMPLE_BYTES = 1 << 20
+_ROOT_SAMPLE_RE = re.compile(r'"(/[^"]{0,240}?)"')
+
+
+def _recorded_root_samples(paths):
+    """A few absolute-looking path strings from the head of case_summary.json, for
+    detect_recorded_root's fallback. Bounded read, best effort, never raises — a
+    case with no archive_map.json is legitimate (build_archive is optional) and
+    must not fail startup just because detection has less to go on."""
+    try:
+        with open(paths.metadata_dir / "case_summary.json", encoding="utf-8",
+                  errors="replace") as fh:
+            head = fh.read(_ROOT_SAMPLE_BYTES)
+    except OSError:
+        return ()
+    return _ROOT_SAMPLE_RE.findall(head)[:200]
+
+
+def install_case_rebaser(paths, recorded_root=None):
+    """Work out whether this case has moved since the pipeline wrote it and, if so,
+    install the rebaser that load_json reads through. Returns the rebaser.
+
+    Called before the first load(), so no index is ever parsed unrebased. Detection
+    reads archive_map.json with a PLAIN parse on purpose — it is the thing being
+    used to configure the rewriting, so it cannot be read through it.
+    """
+    if recorded_root is None:
+        raw = {}
+        map_path = paths.metadata_dir / "archive_map.json"
+        if map_path.exists():
+            try:
+                with open(map_path, encoding="utf-8") as fh:
+                    raw = json.load(fh) or {}
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
+                raw = {}          # build_case already refuses a corrupt map loudly
+        recorded_root = detect_recorded_root(
+            raw, paths.case_id, samples=_recorded_root_samples(paths))
+    rebaser = PathRebaser.for_case(paths.case_dir, recorded_root)
+    install_rebaser(rebaser)
+    if rebaser.active:
+        log(rebaser.describe())
+        for r in rebaser.relocation_report:
+            note = f", {r['ambiguous']} ambiguous skipped" if r["ambiguous"] else ""
+            log(f"  {r['recorded']}/ was not delivered — "
+                f"{r['mapped']} files matched under {r['delivered']}/{note}")
+    return rebaser
+
 
 ASSETS_SRC = _ROOT / "report_assets"
 ACTIONS_FILE = "family_actions.ndjson"
@@ -502,10 +576,19 @@ class ArchiveCase:
     """Holds paths/role/config + cached indexes + the audit primitives. Verbs
     take an instance, so they are unit-testable without a live socket."""
 
-    def __init__(self, paths: CasePaths, role: str, cfg: dict):
+    def __init__(self, paths: CasePaths, role: str, cfg: dict, recorded_root=None,
+                 rebaser=None):
         self.paths = paths
         self.role = role
         self.cfg = cfg
+        # BEFORE anything reads an index: a case served away from the machine that
+        # produced it carries dead absolute paths in every index, and load_json is
+        # where they get corrected. Identity for an in-place case. `recorded_root`
+        # overrides detection (--recorded-root) for a case whose archive_map is
+        # absent and whose paths detection cannot place; `rebaser` reuses one
+        # build_case already made, so startup does not detect twice.
+        self.rebaser = (install_rebaser(rebaser) if rebaser is not None
+                        else install_case_rebaser(paths, recorded_root))
         self.ledger = MoveLedger.for_metadata_dir(paths.metadata_dir)
         self.custody = ChainOfCustody(paths.custody_log)
         self._email_by_file = None  # lazily built (email_index.json is large)
@@ -1800,6 +1883,12 @@ def append_action(case, action, target, before, after, reversible, undoes=None):
              "undo_token": token}
     if undoes is not None:
         entry["undoes"] = undoes
+    # Persist item ids in RECORDED form, exactly like the decision sidecars, so a
+    # later move rebases the audit trail instead of orphaning it. AFTER the token
+    # is computed, never before: the token is stored verbatim and only ever
+    # compared, so rewriting its inputs here would have no effect but rewriting the
+    # token itself would break every stored `undoes` reference.
+    entry = active_rebaser().to_recorded(entry)
     path = case.paths.metadata_dir / ACTIONS_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     line = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
@@ -5025,6 +5114,11 @@ def parse_args(argv=None):
     p.add_argument("--role", choices=["examiner", "family"], default="examiner")
     p.add_argument("--port", type=int, default=7766)
     p.add_argument("--cases-root", default=None)
+    p.add_argument("--recorded-root", default=None,
+                   help="The case root the indexes were written against, when this "
+                        "case is served from somewhere other than the machine that "
+                        "produced it (e.g. /data/cases/CASE_ID). Normally detected "
+                        "from archive_map.json; pass it only when detection fails.")
     p.add_argument("--force", action="store_true", help="serve even if case looks incomplete")
     return p.parse_args(argv)
 
@@ -5056,6 +5150,10 @@ def build_case(args):
             sys.exit(1)
     if not args.force:
         assert_complete(paths)
+    # Before the first index read below: a case served away from the machine that
+    # produced it needs its recorded paths corrected, and load_json is where that
+    # happens. Handed to ArchiveCase so startup detects once, not twice.
+    rebaser = install_case_rebaser(paths, getattr(args, "recorded_root", None))
     summary = load_json(paths.metadata_dir / "case_summary.json")
     if summary is None:
         print("[family_archive] case_summary.json missing — cannot serve.", file=sys.stderr)
@@ -5063,7 +5161,7 @@ def build_case(args):
     if args.role == "family":
         assert_family_allowed(summary)
         _assert_family_release_startup(paths)   # E3
-    return ArchiveCase(paths, args.role, cfg)
+    return ArchiveCase(paths, args.role, cfg, rebaser=rebaser)
 
 
 def _assert_family_release_startup(paths):
