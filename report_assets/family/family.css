@@ -994,3 +994,10 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
 
 /* Provenance on the review card, matching the Documents rows. */
 .pfiled { font-size: 13px; color: var(--muted); margin: -2px 0 12px; }
+
+/* The one line that stops "14 of 27 found" reading as finished. Sits under the
+   meter, deliberately quieter than the tally above it — it is a correction to an
+   impression, not a second headline. */
+.ovunchecked { margin: 8px 0 0; font-size: 13.5px; }
+.ovunchecked a { color: var(--accent); text-decoration: none; }
+.ovunchecked a:hover { text-decoration: underline; }
