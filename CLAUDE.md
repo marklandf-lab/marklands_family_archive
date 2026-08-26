@@ -139,6 +139,23 @@ as complete.
 - Tests build a real case tree on disk via `tests/unit/_case_fixture.py::make_case` (lifted from an
   upstream module outside this closure). Extend the fixture rather than mocking the filesystem.
 
+## This fork's purpose
+
+`origin` is `marklandf-lab/marklands_family_archive`, a fork of `WyeastCorp/mac_family_archive`
+(remote `wyeast`). It exists so a **non-coder can experiment with the family-facing UI** and make
+it more usable. That inverts the mirror rule below for one directory: `report_assets/family/` is
+where this fork is *supposed* to diverge from upstream. Everything else still belongs upstream.
+
+Two consequences worth holding onto:
+
+- **Verify in a browser, always.** UI-navigation defects are structurally invisible to
+  `./run_tests.sh` — every function returns what it promises; the failure only exists in the
+  sequence of clicks. Run `/walk` (`.claude/skills/walk/SKILL.md`) after any change here.
+- **A sync will destroy this work.** `sync_from_wyeast.sh` replaces `report_assets/` wholesale.
+  It now warns loudly instead of reverting in silence — read its output, do not skim it.
+
+Never open a PR against the `wyeast` remote. `/ship` targets the fork.
+
 ## Known drift
 
 `UPSTREAM.md` states that nothing in `wyeast/core/` is modified. That is **no longer true**:

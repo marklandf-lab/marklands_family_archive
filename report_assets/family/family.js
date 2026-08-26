@@ -192,20 +192,152 @@
     return "doc";
   }
 
+  // ── breadcrumbs: the navigation trail (N-1) ──────────────────────────────
+  // Every drill-down carries a `from` param holding the crumbs BEHIND it, as a
+  // flat JSON list [{l: label, u: "/path?query"}, ...], oldest first.
+  //
+  // Flat, not nested. The obvious design embeds each parent URL inside its
+  // child's `from`, which re-percent-encodes the entire chain at every hop
+  // (`%` -> `%25` -> `%2525`); four levels deep ran past 2 KB of URL for a
+  // three-word trail. A flat list costs exactly one encode no matter how deep.
+  //
+  // A crumb's `u` deliberately OMITS its own `from`. Clicking crumb i rebuilds
+  // the trail as trail.slice(0, i), so going back up re-enters that view with
+  // precisely the history that led to it and never with a stale tail behind it.
+  //
+  // The trail is the *path you walked*, not a fixed tree: arriving at Emails
+  // from Correspondents and arriving from Search are different trails, and both
+  // are truthful. Landing cold on a URL with no `from` yields no crumbs at all,
+  // which is why backLink() still carries its old single-link fallback.
+  var TRAIL_MAX = 6;   // deepest trail kept; older crumbs fall off the front
+
+  // The label for the CURRENT view. Pages that render a *filtered* view (Emails
+  // narrowed to one correspondent, Photos narrowed to one album) overwrite this
+  // so the crumb they leave behind says "Alex Rendon" and not just "Emails".
+  // render() resets it, so a page that forgets falls back to its nav label.
+  var CRUMB = { label: null, node: null };
+  // Pages call this while rendering — often after an async fetch resolves, by which
+  // time the trail is already on screen — so it updates the live tail node too.
+  function setCrumb(label) {
+    if (!label) return;
+    CRUMB.label = String(label);
+    if (CRUMB.node) CRUMB.node.textContent = CRUMB.label;
+  }
+
+  function navLabel(page) {
+    var hit = (CTX.nav || []).filter(function (n) { return n.key === page; })[0];
+    return hit ? hit.label : pretty(String(page || "overview"));
+  }
+  // Three sources, most-specific first:
+  //   CRUMB.label  the page named itself while rendering (it knows the most)
+  //   Q.crumb      the link that sent us here named us — go(t, {label: ...}).
+  //                The referrer usually holds the only human name available:
+  //                /emails?participant=a.rendon@example.com can render a
+  //                truthful crumb from the address, but only the correspondent
+  //                card it was clicked from knows that address is "Alex Rendon".
+  //   navLabel     the section name from the rail ("Emails")
+  function crumbLabel() { return CRUMB.label || Q.crumb || navLabel(CTX.page); }
+
+  // This view's own URL, without its `from` — what a child stores as a crumb.
+  function bareURL() {
+    var saved = Q.from;
+    delete Q.from;
+    var u = encodeURL();
+    if (saved != null) Q.from = saved;
+    return u;
+  }
+
+  // Same-view test. urlFor() and encodeURL() emit their params in different
+  // orders (each has its own hand-maintained list), so a raw string compare
+  // reported two spellings of one view as different places — and the cycle guard
+  // that depends on it silently stopped guarding. Sort the params, drop `from`
+  // (the trail is the thing being compared, not part of the identity).
+  function canonURL(u) {
+    u = String(u || "");
+    var i = u.indexOf("?");
+    if (i < 0) return u;
+    var path = u.slice(0, i);
+    var parts = u.slice(i + 1).split("&").filter(function (kv) {
+      return kv && kv.split("=")[0] !== "from";
+    });
+    parts.sort();
+    return path + (parts.length ? "?" + parts.join("&") : "");
+  }
+
+  function parseTrail(raw) {
+    if (!raw) return [];
+    var t;
+    try { t = JSON.parse(raw); } catch (e) { return []; }   // tampered/truncated -> no crumbs
+    if (!Array.isArray(t)) return [];
+    return t.filter(function (c) {
+      // Only same-origin absolute paths. A crumb is rendered as an href, so a
+      // "//evil.example" or "javascript:" u would be an open redirect straight
+      // out of the estate viewer.
+      return c && typeof c.l === "string" && typeof c.u === "string" &&
+             c.u.charAt(0) === "/" && c.u.charAt(1) !== "/";
+    }).slice(-TRAIL_MAX);
+  }
+  function trailParam(trail) {
+    return trail && trail.length ? "from=" + encodeURIComponent(JSON.stringify(trail)) : "";
+  }
+
+  // The trail a child of the current view should carry. Appends this view as a
+  // crumb — unless this view is ALREADY in the trail, in which case the trail is
+  // truncated back to it. Without that, Correspondents -> Emails -> a
+  // correspondent -> Emails walks a cycle that grows the trail forever.
+  function nextTrail(replace) {
+    var trail = parseTrail(Q.from);
+    var here = { l: crumbLabel(), u: bareURL() };
+    var hereKey = canonURL(here.u);
+    for (var i = 0; i < trail.length; i++) {
+      if (canonURL(trail[i].u) === hereKey) return trail.slice(0, i + 1);
+    }
+    if (replace) return trail;          // sibling move: stand in for the current crumb
+    trail = trail.concat([here]);
+    return trail.slice(-TRAIL_MAX);
+  }
+
   // Navigate to a click-through target {page, person_id?, scene?, place?, thread_id?,
   // conversation?, open?, file?}.
-  function go(target) {
+  // `opts.replace` marks a SIBLING move (clearing a filter, switching tabs): the
+  // current view stands in for itself rather than becoming another crumb.
+  // `opts.trail: false` resets the trail — for a jump that is genuinely a fresh
+  // start rather than a step deeper.
+  function go(target, opts) {
     if (!target) return;
     if (target.open && target.file) { lightbox(target.file, mediaKind(target.file)); return; }  // inline, not a new tab (#16)
+    location.href = urlFor(target, opts);
+  }
+
+  // The URL a click-through target resolves to, trail included. Split out of go()
+  // so a real <a href> carries the same crumbs a scripted navigation does —
+  // otherwise middle-clicking "Open album" opened a tab with no way back, and the
+  // two paths to the same view disagreed about where the visitor had been.
+  function urlFor(target, opts) {
+    opts = opts || {};
     var url = "/" + (target.page || "overview"), q = [];
     ["person", "scene", "place", "event", "thread", "conversation", "venue", "tab",
      "media", "vperson", "vscene", "favorite_curation", "collection_curation", "people",
+     "participant", "cat", "subcat", "album", "favorite", "date_from", "date_to",
      "rec"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
+    // The destination's own crumb name, supplied by whoever linked to it.
+    if (opts.label) q.push("crumb=" + encodeURIComponent(String(opts.label)));
+    if (opts.trail !== false) {
+      // If the target is somewhere we have already been, this click is a step
+      // BACK up the trail, not a step deeper — drop everything past it.
+      var bare = canonURL(url + (q.length ? "?" + q.join("&") : ""));
+      var trail = nextTrail(opts.replace);
+      for (var i = 0; i < trail.length; i++) {
+        if (canonURL(trail[i].u) === bare) { trail = trail.slice(0, i); break; }
+      }
+      var tp = trailParam(trail);
+      if (tp) q.push(tp);
+    }
     if (q.length) url += "?" + q.join("&");
-    location.href = url;
+    return url;
   }
 
   // G-9: turn a /api/search record ({p:page, k:type, h:href}) into a go() target so
@@ -236,9 +368,14 @@
   // the URL via replaceState; the page fn reads it back from Q on the next render.
   function encodeURL() {
     var q = [];
+    // `from` (the breadcrumb trail) rides along here for a reason: setQ() rewrites
+    // the whole URL from this list on every filter change, so a param missing from
+    // it is DELETED the first time the user touches a dropdown. Leaving `from` out
+    // made the trail vanish the moment you sorted the list you had drilled into.
+    // It is last so the human-meaningful params stay readable in the address bar.
     ["person", "scene", "place", "event", "thread", "media", "cat", "subcat", "modality", "qcat",
      "album", "favorite", "hidden", "participant", "venue", "tab", "date_from", "date_to",
-     "vperson", "vscene", "favorite_curation", "collection_curation", "people"]
+     "vperson", "vscene", "favorite_curation", "collection_curation", "people", "q", "crumb", "from"]
       .forEach(function (k) { if (Q[k]) q.push(k + "=" + encodeURIComponent(Q[k])); });
     return location.pathname + (q.length ? "?" + q.join("&") : "");
   }
@@ -577,10 +714,49 @@
     return controls;
   }
 
+  // The way back. When the visitor walked here, render the whole trail so one
+  // click reaches ANY level above — that is the point of a breadcrumb over a
+  // back link, and it is what the single hardcoded "All emails" link could never
+  // do: it always jumped to the top of the section, discarding the correspondent
+  // (or album, or search) the visitor had drilled through to get here.
+  //
+  // With no trail (a bookmarked URL, a fresh tab, a reload of a deep link) there
+  // is no honest history to show, so the caller's original single link stands in.
+  // `label`/`target` are therefore still required at every call site.
   function backLink(main, label, target) {
+    // Walked here → render() already drew the full trail above the page head;
+    // a second "← All emails" underneath it would be redundant and, worse, would
+    // disagree with the crumbs about where "back" goes.
+    if (parseTrail(Q.from).length) return;
     var a = el("a", "backlink", "← " + esc(label));
-    a.href = "#"; a.onclick = function (e) { e.preventDefault(); go(target); };
+    a.href = "#"; a.onclick = function (e) { e.preventDefault(); go(target, { trail: false }); };
     main.appendChild(a);
+  }
+
+  // Render a crumb trail plus the current view as the (unlinked) tail. Crumb i
+  // links to its own URL carrying trail.slice(0, i) — the history that led to it.
+  // Real <a href>s, so middle-click/open-in-new-tab work and the destination
+  // shows in the status bar on hover.
+  function breadcrumb(main, trail) {
+    trail = trail || parseTrail(Q.from);
+    var nav = el("nav", "crumbs");
+    nav.setAttribute("aria-label", "Breadcrumb");
+    var ol = el("ol", "crumblist");
+    trail.forEach(function (c, i) {
+      var li = el("li", "crumb");
+      var a = el("a", null, esc(c.l));
+      var tp = trailParam(trail.slice(0, i));
+      a.href = c.u + (tp ? (c.u.indexOf("?") >= 0 ? "&" : "?") + tp : "");
+      li.appendChild(a);
+      ol.appendChild(li);
+    });
+    var here = el("li", "crumb current", esc(crumbLabel()));
+    here.setAttribute("aria-current", "page");
+    CRUMB.node = here;
+    ol.appendChild(here);
+    nav.appendChild(ol);
+    main.appendChild(nav);
+    return nav;
   }
 
   // ── targeted view updates ──
@@ -1574,7 +1750,8 @@
       chip.title = "Show videos with " + (p.name || p.person_id);
       chip.addEventListener("click", function (e) {
         e.stopPropagation();
-        go({ page: "photos", media: "videos", vperson: p.person_id });
+        go({ page: "photos", media: "videos", vperson: p.person_id },
+           { label: "Videos of " + (p.display_name || p.name || "this person") });
       });
       wrap.appendChild(chip);
     });
@@ -1583,7 +1760,7 @@
       chip.title = "Show " + pretty(s) + " videos";
       chip.addEventListener("click", function (e) {
         e.stopPropagation();
-        go({ page: "photos", media: "videos", vscene: s });
+        go({ page: "photos", media: "videos", vscene: s }, { label: "Videos · " + pretty(s) });
       });
       wrap.appendChild(chip);
     });
@@ -2201,7 +2378,8 @@
       // album_id rides the query via encodeURIComponent.
       var h = el("h2", "collcard-h");
       var titleLink = el("a", "collcard-hlink", esc(a.title || "Untitled album"));
-      titleLink.href = "/photos?event=" + encodeURIComponent(a.album_id);
+      titleLink.href = urlFor({ page: "photos", event: a.album_id },
+                              { label: a.title || "Untitled album" });
       h.appendChild(titleLink);
       card.appendChild(h);
       var meta = [a.place, a.date_range].filter(Boolean).join(" · ");
@@ -2213,7 +2391,9 @@
       if ((a.sample_ids || []).length) card.appendChild(thumbs);
       card.appendChild(el("p", "collcard-n", num(a.count) + " photo(s)"));
       var open = el("button", "btn", "Open album");
-      open.onclick = function () { go({ page: "photos", event: String(a.album_id) }); };
+      open.onclick = function () {
+        go({ page: "photos", event: String(a.album_id) }, { label: a.title || "Untitled album" });
+      };
       card.appendChild(open);
       grid.appendChild(card);
     });
@@ -2234,7 +2414,7 @@
     favCard.appendChild(el("p", "collcard-n", num(favN) + " starred item(s)"));
     var favTools = el("div", "collcard-tools");
     var favOpen = el("button", "btn", "Open");
-    favOpen.onclick = function () { go({ page: "photos", favorite_curation: "1" }); };
+    favOpen.onclick = function () { go({ page: "photos", favorite_curation: "1" }, { label: "Favorites" }); };
     var favExp = el("button", "btn", "Export Favorites");
     favExp.onclick = function () { exportCollection("favorites", "", "Favorites"); };
     favTools.appendChild(favOpen); favTools.appendChild(favExp);
@@ -2253,7 +2433,9 @@
       card.appendChild(el("p", "collcard-n", num(c.count) + " item(s)"));
       var tools = el("div", "collcard-tools");
       var open = el("button", "btn", "Open");
-      open.onclick = function () { go({ page: "photos", collection_curation: c.slug }); };
+      open.onclick = function () {
+        go({ page: "photos", collection_curation: c.slug }, { label: c.title || c.slug });
+      };
       tools.appendChild(open);
       var exp = el("button", "btn", "Export");
       exp.onclick = function () { exportCollection("curation_collection", c.slug, c.title); };
@@ -2400,7 +2582,11 @@
         num(r.photo_count) + " photos" + (r.video_count ? " · " + num(r.video_count) + " videos" : "") +
         "</span>" + (r.summary ? "<p>" + esc(r.summary) + "</p>" : "");
       p.appendChild(body);
-      p.onclick = function (e) { if (e.target.tagName !== "BUTTON") go({ page: "people", person: r.person_id, people: selPeople.value }); };
+      p.onclick = function (e) {
+        if (e.target.tagName !== "BUTTON")
+          go({ page: "people", person: r.person_id, people: selPeople.value },
+             { label: r.display_name || r.name || "Person" });
+      };
       keyable(p, "button", "View " + (r.name || "person"));
       if (EXAMINER) {
         var btn = el("button", "btn", r.named ? "Rename" : "Name this person");
@@ -2476,7 +2662,7 @@
       var row = el("div", "otd-year");
       var link = el("a", "otd-yearlabel", esc(yr.year) + " · " + num(yr.count));
       var day = yr.year + "-" + od.mmdd;   // YYYY-MM-DD for the day filter
-      link.href = "/photos?date_from=" + encodeURIComponent(day) + "&date_to=" + encodeURIComponent(day);
+      link.href = urlFor({ page: "photos", date_from: day, date_to: day }, { label: day });
       row.appendChild(link);
       var strip = el("div", "otd-strip");
       var ctx = { list: yr.photos };       // ←/→ pages within this year's set
@@ -2603,6 +2789,7 @@
     if (Q.venue) {
       var v = venues.filter(function (x) { return x.venue_id === Q.venue; })[0];
       backLink(main, "All places", { page: "places", tab: "venues" });
+      setCrumb(v ? prettyPlace(v.name) : "Place");
       head(main, "Places", v ? prettyPlace(v.name) : "Place", "");
       if (!v) { main.appendChild(el("p", "notice", "That place is no longer available.")); return; }
       var vexp = el("button", "btn", "Export all from here");
@@ -2620,6 +2807,7 @@
     // Drill into one location's photos when ?place=NAME is present (#6).
     if (Q.place) {
       backLink(main, "All places", { page: "places" });
+      setCrumb(prettyPlace(Q.place));
       head(main, "Places", prettyPlace(Q.place), "");
       var exp = el("button", "btn", "Export all from here");
       exp.onclick = function () { exportCollection("place", Q.place, prettyPlace(Q.place)); };
@@ -2888,13 +3076,20 @@
     } else if (r.thread_id) {
       var ta = el("a", "vcand-link", esc(r.thread_subject || "(no subject)"));
       ta.href = "#";
-      ta.onclick = function (e) { e.preventDefault(); go({ page: "emails", thread: r.thread_id }); };
+      ta.onclick = function (e) {
+        e.preventDefault();
+        go({ page: "emails", thread: r.thread_id }, { label: r.thread_subject || "(no subject)" });
+      };
       head.appendChild(ta);
       head.appendChild(el("span", "vitals-inemails", "in Emails"));
     } else if (r.conversation_id) {
       var ca = el("a", "vcand-link", esc(r.conversation_subject || "(conversation)"));
       ca.href = "#";
-      ca.onclick = function (e) { e.preventDefault(); go({ page: "messages", conversation: r.conversation_id }); };
+      ca.onclick = function (e) {
+        e.preventDefault();
+        go({ page: "messages", conversation: r.conversation_id },
+           { label: r.conversation_subject || "(conversation)" });
+      };
       head.appendChild(ca);
       head.appendChild(el("span", "vitals-inemails", "in Messages"));
     } else {
@@ -3067,9 +3262,9 @@
             // so the row and its destination read alike.
             var ta = el("a", "vitals-link", esc(it.thread_subject || "(no subject)"));
             ta.href = "#";
-            ta.onclick = (function (tid) {
-              return function (e) { e.preventDefault(); go({ page: "emails", thread: tid }); };
-            })(it.thread_id);
+            ta.onclick = (function (tid, subj) {
+              return function (e) { e.preventDefault(); go({ page: "emails", thread: tid }, { label: subj }); };
+            })(it.thread_id, it.thread_subject || "(no subject)");
             itemRow.appendChild(ta);
             itemRow.appendChild(el("span", "vitals-inemails", "in Emails"));
           } else if (it.conversation_id) {
@@ -3078,9 +3273,9 @@
             // instead of printing a dead `chat.db#chunk=...` stub.
             var ca = el("a", "vitals-link", esc(it.conversation_subject || "(conversation)"));
             ca.href = "#";
-            ca.onclick = (function (cid) {
-              return function (e) { e.preventDefault(); go({ page: "messages", conversation: cid }); };
-            })(it.conversation_id);
+            ca.onclick = (function (cid, subj) {
+              return function (e) { e.preventDefault(); go({ page: "messages", conversation: cid }, { label: subj }); };
+            })(it.conversation_id, it.conversation_subject || "(conversation)");
             itemRow.appendChild(ca);
             itemRow.appendChild(el("span", "vitals-inemails", "in Messages"));
           } else {
@@ -3280,7 +3475,9 @@
           "</td><td class='preview clamp2'>" + recipients(r.participants) + "</td><td class='preview'>" +
           esc((r.date_last || "").slice(0, 10)) + "</td><td>" + num(r.message_count) + "</td>" +
           (EXAMINER ? "<td class='actcell'></td>" : "");
-        tr.onclick = function () { go({ page: "emails", thread: r.thread_id }); };
+        tr.onclick = function () {
+          go({ page: "emails", thread: r.thread_id }, { label: r.subject || "(no subject)" });
+        };
         keyable(tr, null);   // F-12
         if (EXAMINER) tr.lastChild.appendChild(emailDemoteBtn(r));
         tbl.appendChild(tr);
@@ -3376,6 +3573,7 @@
       backLink(main, "All emails", { page: "emails" });
       var holder = el("div", "reading emthread"); main.appendChild(holder);
       getJSON("/api/email/thread?id=" + encodeURIComponent(Q.thread)).then(function (t) {
+        setCrumb(t.subject || "(no subject)");
         var ctrls = head(holder, "Emails", t.subject || "(no subject)", (t.messages || []).length + " message(s).");
         if (EXAMINER) ctrls.appendChild(emailDemoteBtn({ thread_id: Q.thread, subject: t.subject, demoted: t.demoted }));
         drawThreadMessages(holder, t);
@@ -3386,13 +3584,14 @@
     // by clicking a correspondent card). The narrowing is SERVER-side (before the
     // page slice), so total reflects the filtered count and the tail is reachable.
     var participant = Q.participant || "";
+    if (participant) setCrumb(Q.crumb || ("Emails with " + participant));
     var lead = participant
       ? "Emails with " + participant + " — " + num((data && data.total) || 0) + " conversations."
       : num((data && data.total) || 0) + " conversations, grouped by significance.";
     var controls = head(main, "Emails", "Emails", lead);
     if (participant) {
       var clr = el("button", "btn chip", "✕ Clear filter");
-      clr.onclick = function () { location.href = "/emails"; };
+      clr.onclick = function () { go({ page: "emails" }, { replace: true }); };
       controls.appendChild(clr);
     }
     // #11: in-list search (subject/participant) + date range + sort — tens of
@@ -3482,7 +3681,9 @@
     bar.appendChild(sSeg); bar.appendChild(rSeg);
     card.appendChild(bar);
     card.appendChild(el("div", "cc-bal", "Sent " + num(sent) + " · Received " + num(received)));
-    card.onclick = function () { location.href = "/emails?participant=" + encodeURIComponent(addr); };
+    // The card is the only place that knows this address is "Alex Rendon",
+    // so it names the destination crumb; Emails itself only ever sees the address.
+    card.onclick = function () { go({ page: "emails", participant: addr }, { label: name }); };
     keyable(card, "button", "Correspondence with " + name);   // F-12
     return card;
   }
@@ -3689,7 +3890,10 @@
         "<td class='preview'>" + esc(when) + "</td>" +
         "<td>" + num(r.message_count) + "</td>" +
         "<td>" + (r.call_event_count ? num(r.call_event_count) : "") + "</td>";
-      tr.onclick = function () { location.href = "/messages?conversation=" + encodeURIComponent(r.conversation_id); };
+      tr.onclick = function () {
+        go({ page: "messages", conversation: r.conversation_id },
+           { label: conversationTitle(r) || "Conversation" });
+      };
       keyable(tr, null);   // F-12
       tbl.appendChild(tr);
     });
@@ -3704,6 +3908,7 @@
       var holder = el("div", "reading msgthread"); main.appendChild(holder);
       getJSON("/api/message/conversation?id=" + encodeURIComponent(Q.conversation)).then(function (c) {
         if (!c) { holder.appendChild(el("p", "notice", "This conversation could not be found.")); return; }
+        setCrumb(conversationTitle(c));
         head(holder, "Messages · " + pretty(c.platform || ""), conversationTitle(c),
           (c.messages || []).length + " message(s)" +
           ((c.call_events || []).length ? " · " + c.call_events.length + " call(s)" : "") + ".");
@@ -3740,6 +3945,7 @@
       var lead = [];
       if (d.duration != null) lead.push(clockTime(d.duration));
       if (d.language) lead.push(esc(pretty(String(d.language))));
+      setCrumb(cleanRecordingName(basename(file)));
       head(holder, "Recording", cleanRecordingName(basename(file)), lead.join(" · "));
 
       // Player — preload="metadata" on the OPENED detail (the LIST stays preload="none").
@@ -3820,7 +4026,8 @@
       // Open the seek-synced detail (transcript + click-to-seek).
       var open = el("button", "btn small", "Open transcript");
       open.onclick = function () {
-        location.href = "/recordings?rec=" + encodeURIComponent(r.file);
+        go({ page: "recordings", rec: r.file },
+           { label: cleanRecordingName(basename(r.file)) });
       };
       actrow.appendChild(open);
       var exp = el("button", "btn small", "Export");
@@ -5282,6 +5489,7 @@
   function kindLabel(k) { return KIND_LABEL[k] || (pretty(k) || "Other"); }
 
   P.search = function (main) {
+    if (Q.q) setCrumb("Search: " + Q.q);
     var q = Q.q || "";
     head(main, "Search", q ? "Results for “" + q + "”" : "Search the archive", "");
     // On-page search box (mirrors the rail; prefilled with the current query).
@@ -5327,7 +5535,12 @@
           snip.innerHTML = markSnippet(h.snippet || "");
           card.appendChild(snip);
           card.setAttribute("role", "button"); card.tabIndex = 0;
-          var open = function () { go(searchTarget({ p: h.page, k: h.kind, h: h.ref })); };
+          // The hit's own title names the destination crumb, so a search result
+          // opened from here reads "Search › Re: kombucha order" and one click
+          // returns to the result list with the query intact.
+          var open = function () {
+            go(searchTarget({ p: h.page, k: h.kind, h: h.ref }), { label: h.title || "(untitled)" });
+          };
           card.addEventListener("click", open);
           card.addEventListener("keydown", function (e) {
             if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
@@ -5419,7 +5632,14 @@
     document.body.classList.remove("selecting");  // exit any drag-select mode on nav/re-render
     destroyGrids();                               // drop stale virtual-grid scroll listeners
     VIEW.removeItems = null;                      // pages re-register their in-place hooks
+    CRUMB.label = null;                           // filtered views re-declare their crumb label
+    CRUMB.node = null;
     var main = shell();
+    // One central call, not one per page. Per-page breadcrumb calls are exactly how
+    // this app ended up with a back link on People and nothing at all on Events,
+    // Collections and the video views — every new page had to remember. Drawn from
+    // the URL's own trail, so a page that carries no trail shows nothing.
+    if (parseTrail(Q.from).length) breadcrumb(main);
     var page = CTX.page;
     var api = "/api/" + page;
     function loadSection() {

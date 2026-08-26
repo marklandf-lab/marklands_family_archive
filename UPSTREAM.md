@@ -65,6 +65,17 @@ readable:
 4. `tests/unit/test_config.py` — not carried; it imports
    `wyeast.core.registry`, the pipeline stage table.
 
+5. `report_assets/family/family.js`, `report_assets/family/family.css` — **breadcrumb
+   navigation**, added by this fork. Every drill-down carries a `from` trail in its URL and
+   renders a clickable breadcrumb, replacing the hardcoded single "← All emails"-style back
+   links that always returned to the top of a section and discarded the filter the visitor had
+   drilled through. See `.claude/skills/walk/SKILL.md` for what it covers and how to re-check it.
+
+   This one is **not re-applied by `sync_from_wyeast.sh`** — that script replaces
+   `report_assets/` wholesale (`rm -rf` + `cp -r`), so a sync destroys it. The script now
+   detects the loss and says so loudly rather than reverting in silence; recover with
+   `git checkout HEAD -- report_assets/family/` and re-run `/walk`.
+
 Nothing in `wyeast/core/` is modified. It is byte-identical to upstream,
 including the now-dead `DEFAULT_SCRIPTS_DIR = Path("/opt/estate-pipeline/app")`
 constant — left alone precisely so the files stay diffable.
