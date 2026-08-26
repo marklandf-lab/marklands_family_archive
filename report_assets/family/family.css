@@ -57,7 +57,7 @@ body[data-theme="atlas"] .rail .brand .mark, body[data-theme="atlas"] .rail .nav
 
 .main { flex: 1; min-width: 0; padding: 0 40px 90px; max-width: 1180px; }
 /* Section header stays visible while the content below scrolls (#6). */
-.pagehead { position: sticky; top: 0; z-index: 50; background: var(--bg); padding: 26px 0 12px; margin-bottom: 14px; border-bottom: 1px solid var(--line);
+.pagehead { position: sticky; top: 0; z-index: 50; background: var(--bg); padding: 24px 0 12px; margin-bottom: 16px; border-bottom: 1px solid var(--line);
   display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
 .pagehead-title { min-width: 0; }
 .pagehead .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -70,7 +70,7 @@ h2 { font-family: var(--serif); font-size: 20px; color: var(--head); margin: 30p
 .notice { background: var(--chip); border-left: 3px solid var(--accent); padding: 12px 16px; border-radius: 5px; }
 
 /* tiles */
-.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap: 13px; margin: 20px 0; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap: 12px; margin: 20px 0; }
 .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; text-decoration: none; color: var(--ink); }
 .tile:hover { border-color: var(--accent); }
 .tile .n { font-family: var(--serif); font-size: 28px; color: var(--head); display: block; }
@@ -217,7 +217,7 @@ a { color: var(--accent); }
 .tile.clickable:hover { border-color: var(--accent); }
 .tile.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 /* overview: ranked cards with multi-thumb/icon + demote (#5/#12) */
-.ranked { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+.ranked { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 .rkcard { position: relative; display: flex; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
 .rkcard.clickable { cursor: pointer; }
 .rkcard.clickable:hover { border-color: var(--accent); }
@@ -805,4 +805,98 @@ body.selecting .jgrid .jcard, body.selecting .jgrid .jcard img { cursor: crossha
   .pribbon-error, .pager-tray { background: #3a2320; }
   .pcard .chip.danger, .pribbon-error { background: #3a2320; color: #e88; }
   .pnobytes { color: var(--muted); }
+}
+
+/* ── overview: the working index (B) ──
+   Replaces the six count tiles that used to open this page. Elevation does the
+   grouping now instead of hairline borders — with every surface at one
+   elevation the page could only signal importance with size, which is how a row
+   of counts ended up as the largest thing on screen. Two levels, no more. */
+:root { --lift: 0 1px 2px rgba(44,37,32,.04), 0 6px 18px -10px rgba(44,37,32,.14); }
+
+.ovfind { display: flex; gap: 12px; margin: 8px 0 8px; }
+.ovfind-in { flex: 1; min-width: 0; padding: 14px 16px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--panel); font: 16px var(--sans); color: inherit;
+  box-shadow: var(--lift); }
+.ovfind-in:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+.ovfind-go { padding: 14px 24px; border: 0; border-radius: 10px; background: var(--accent);
+  color: var(--accent-ink); font: 500 15px var(--sans); cursor: pointer; }
+.ovfind-hint { color: var(--muted); font-size: 14px; margin: 0 0 28px; }
+
+.ovcols { display: grid; grid-template-columns: 1.35fr 1fr; gap: 24px; align-items: start; }
+.ovcol { min-width: 0; }
+.ovcard { background: var(--panel); border-radius: 12px; box-shadow: var(--lift); padding: 20px 20px 16px; }
+.ovcard + .ovcard { margin-top: 16px; }
+.ovcard-h { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+.ovcard-h h2 { font-family: var(--serif); font-size: 17px; font-weight: 500; color: var(--head); margin: 0; }
+.ovcard-h a { font-size: 13px; color: var(--accent); text-decoration: none; white-space: nowrap; }
+.ovcard-h a:hover { text-decoration: underline; }
+
+.ovtable { width: 100%; border-collapse: collapse; font-size: 15px; }
+.ovtable td { padding: 8px 0; vertical-align: baseline; }
+.ovtable tr + tr td { border-top: 1px solid var(--line); }
+.ovsec { color: var(--ink); text-decoration: none; font-weight: 500; }
+.ovsec:hover { color: var(--accent); text-decoration: underline; }
+.ovwhat { color: var(--muted); font-size: 13px; text-align: right; }
+.ovnum { font-family: var(--mono); font-size: 14px; color: var(--head); text-align: right;
+  width: 76px; white-space: nowrap; }
+
+.ovtally { font-size: 14px; color: var(--muted); margin: 0 0 6px; }
+.ovtally b { color: var(--head); font-weight: 500; }
+.ovtally-sub { margin-top: 16px; }
+.ovmeter { height: 7px; border-radius: 4px; background: var(--chip); overflow: hidden; margin-bottom: 4px; }
+.ovmeter i { display: block; height: 100%; background: var(--accent); }
+.ovchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ovchips span { font-size: 12.5px; background: var(--chip); color: var(--ink);
+  padding: 3px 10px; border-radius: 20px; }
+.ovkept { font-size: 14px; color: var(--muted); margin: 16px 4px 0; }
+
+/* Most significant / On this day rows */
+.siglist { list-style: none; margin: 0; padding: 0; }
+.sigrow { display: flex; gap: 12px; align-items: center; padding: 8px 0; }
+.sigrow + .sigrow { border-top: 1px solid var(--line); }
+.sigrow.clickable { cursor: pointer; }
+.sigrow.clickable:hover .siglab { color: var(--accent); }
+.sigrow img, .sigph { width: 46px; height: 46px; border-radius: 8px; flex: none;
+  object-fit: cover; background: var(--chip); }
+.sigph { display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.siglab { font-size: 15px; color: var(--ink); flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.siglab i { display: block; font-style: normal; font-size: 13px; color: var(--muted); margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Was position:absolute over the card and printed through the label. A real
+   flex child now, so it can never overlap; hidden until hover/focus so a
+   destructive-sounding verb is not sitting on every row of a keepsake. */
+.sigdrop { flex: none; border: none; background: transparent; color: var(--muted);
+  font: 12px var(--sans); cursor: pointer; padding: 4px 8px; border-radius: 6px; visibility: hidden; }
+.sigrow:hover .sigdrop, .sigdrop:focus-visible { visibility: visible; }
+.sigdrop:hover { background: var(--chip); color: var(--ink); }
+
+/* ── photos & videos: the keepsake opening (A) ── */
+.phero { margin: 4px 0 28px; }
+.phero-fig { position: relative; height: 380px; border-radius: 12px; overflow: hidden;
+  cursor: pointer; box-shadow: var(--lift); background: var(--chip); }
+.phero-fig img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.phero-veil { position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(20,15,12,.05) 0%, rgba(20,15,12,.30) 45%, rgba(20,15,12,.78) 100%); }
+.phero-say { position: absolute; left: 32px; right: 32px; bottom: 26px; color: #fff; }
+/* Never grey-on-colour: these are tinted white, not var(--muted). */
+.phero-when { font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
+  text-transform: uppercase; color: rgba(255,255,255,.74); }
+.phero-h { font-family: var(--serif); font-size: 30px; font-weight: 400; line-height: 1.2;
+  letter-spacing: -.015em; color: #fff; margin: 8px 0 0; max-width: 24ch; }
+.phero-say p { margin: 6px 0 0; font-size: 15px; color: rgba(255,255,255,.82); max-width: 52ch; }
+.phero-fig:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.phero-strip { display: flex; gap: 12px; margin-top: 12px; overflow-x: auto; padding-bottom: 4px; }
+.phero-strip figure { flex: 0 0 148px; margin: 0; border-radius: 10px; overflow: hidden;
+  background: var(--panel); box-shadow: var(--lift); cursor: pointer; }
+.phero-strip img { width: 100%; height: 96px; object-fit: cover; display: block; }
+.phero-strip figcaption { font-size: 12px; color: var(--muted); padding: 6px 10px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.phero-strip figure:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (max-width: 900px) {
+  .ovcols { grid-template-columns: 1fr; }
+  .phero-fig { height: 260px; }
+  .phero-h { font-size: 23px; }
 }

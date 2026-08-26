@@ -319,7 +319,7 @@
     ["person", "scene", "place", "event", "thread", "conversation", "venue", "tab",
      "media", "vperson", "vscene", "favorite_curation", "collection_curation", "people",
      "participant", "cat", "subcat", "album", "favorite", "date_from", "date_to",
-     "rec"].forEach(function (k) {
+     "q", "otd", "rec"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -1952,77 +1952,272 @@
   // ── pages ──
   var P = {};
 
+  // ── overview ──────────────────────────────────────────────────────────────
+  // The front door is a TOOL, not a poster: search first, then everything the
+  // archive holds visible at once, with nothing that matters below the fold.
+  //
+  // What this replaced, and why: six count tiles rendered at 28px display serif
+  // — the loudest thing on the page — each linking to a section that is already
+  // in the left rail, permanently, four inches away. The screen spent its most
+  // valuable region restating the navigation, and the only section that exercises
+  // editorial judgment sat three screens down. Counts are inventory; inventory is
+  // what you check on visit forty, not visit one.
+  //
+  // Every number here comes off /api/overview, /api/places or /api/transparency.
+  // Nothing on this screen is derived by guesswork — if a figure is not in a
+  // payload it does not get printed.
+
+  // "imessage: Dan Okafor (+15550100123), Ana Ruiz (+15550100456), owner"
+  //   → "Dan Okafor & Ana Ruiz"
+  // The ranked-item label is the raw corpus handle: platform prefix, every
+  // participant, and their phone numbers. It is the least readable text in the
+  // archive and it was being shown, truncated mid-number, in the section that
+  // claims to say what matters most. Strip to the people; the platform and the
+  // digits tell a grieving family nothing they want.
+  function conversationLabel(raw) {
+    var s = String(raw || "");
+    var colon = s.indexOf(":");
+    if (colon > -1 && colon < 24) s = s.slice(colon + 1);          // drop "imessage:" / "whatsapp:"
+    var names = s.split(",").map(function (part) {
+      return part.replace(/\([^)]*\)/g, "").trim();                 // drop "(+15035551234)"
+    }).filter(function (n) { return n && n !== "owner"; });         // "owner" is the deceased
+    if (!names.length) return "Conversation";
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return names[0] + " & " + names[1];
+    // Name all three rather than "& 1 more" — eliding one person is longer than
+    // saying it and tells the reader strictly less.
+    if (names.length === 3) return names[0] + ", " + names[1] + " & " + names[2];
+    return names.slice(0, 2).join(", ") + " & " + (names.length - 2) + " more";
+  }
+
+  // Human words for the message-category slugs in case_config.json.
+  var CONV_CATEGORY = {
+    close_personal: "Family and close friends",
+    romantic: "Someone they loved",
+    logistics: "Day-to-day arrangements",
+    work: "Work",
+    transactional: "Services and appointments",
+    miscellaneous: "Messages"
+  };
+
+  // One row in Most significant. `signals` carries the only real counts the
+  // ranker exposes (photo_count for scenes and people, chunk_count for
+  // conversations) — so a row prints a count when there is one and stays silent
+  // when there is not, rather than inventing a plausible number.
+  function sigRow(r) {
+    var li = el("li", "sigrow");
+    var thumb = (r.thumbs && r.thumbs[0]) || r.thumb;
+    if (thumb) {
+      var im = el("img"); im.loading = "lazy"; im.src = thumbURL(thumb); im.alt = "";
+      li.appendChild(im);
+    } else {
+      li.appendChild(el("div", "sigph", typeIcon(r.type)));
+    }
+    var sg = r.signals || {}, label, sub;
+    if (r.type === "conversation") {
+      label = conversationLabel(r.label);
+      sub = CONV_CATEGORY[r.category] || "Messages";
+    } else if (r.type === "photo_cluster") {
+      label = r.label || r.person_id || "Person";
+      sub = sg.photo_count ? num(sg.photo_count) + " photographs" : "A face that recurs";
+      if (sg.cross_scene) sub += " · often at a " + pretty(sg.cross_scene);   // reads "· often at a wedding"
+    } else {
+      label = sentenceCase(r.label);
+      sub = sg.photo_count ? num(sg.photo_count) + " photographs" : "";
+    }
+    var body = el("div", "siglab", esc(label));
+    if (sub) body.appendChild(el("i", null, esc(sub)));
+    li.appendChild(body);
+
+    // Conversations carry no `target` from the ranker, so they cannot deep-link
+    // to their own transcript. Rather than render a card that looks clickable and
+    // does nothing, send them to Messages by name — an honest "it is in here".
+    var target = r.target || (r.type === "conversation" ? { page: "messages" } : null);
+    if (target) {
+      li.classList.add("clickable");
+      li.onclick = function (e) {
+        if (e.target.tagName !== "BUTTON") go(target, { label: label });
+      };
+      keyable(li, "button", label);
+    }
+    if (EXAMINER && r.key) {
+      // Was position:absolute over the label and printed straight through it on
+      // any card whose text reached the top-right corner. It is now a real
+      // flex child with its own column, revealed on hover or keyboard focus.
+      var dm = el("button", "sigdrop", "Remove");
+      dm.title = "Remove from Most Significant (keeps the item; ranking only)";
+      dm.onclick = function (e) {
+        e.stopPropagation();
+        doVerb("/api/demote", { key: r.key, label: r.label }, "Removed from Most Significant")
+          .then(function (x) { if (x) li.remove(); });
+      };
+      li.appendChild(dm);
+    }
+    return li;
+  }
+
+  function ovCard(parent, title, moreLabel, moreTarget) {
+    var card = el("section", "ovcard");
+    var h = el("div", "ovcard-h");
+    h.appendChild(el("h2", null, esc(title)));
+    if (moreLabel) {
+      var a = el("a", null, esc(moreLabel) + " →");
+      a.href = urlFor(moreTarget, { label: title });
+      h.appendChild(a);
+    }
+    card.appendChild(h);
+    parent.appendChild(card);
+    return card;
+  }
+
   P.overview = function (main, d) {
-    head(main, (d.case_id || "") + " · Family Archive", "The archive is sorted and waiting.",
-      "Everything we recovered, organized so you can find what matters.");
+    var c = d.counts || {};
     var g = d.export_gate || {};
     if (g.delivery_blocked) main.appendChild(el("div", "banner crit",
       "<strong>Delivery blocked.</strong> " + esc((g.reasons || []).join("; ")) + " — examiner review only."));
-    var c = d.counts || {}, tiles = el("div", "tiles");
-    [["photos", "Photos & Videos", "photos"], ["people", "People", "people"], ["places", "Places", "places"],
-     ["documents", "Documents", "documents"], ["emails", "Emails", "emails"],
-     ["audio", "Recordings", "recordings"]].forEach(function (p) {
-      var t = el("a", "tile"); t.href = "/" + p[2];
-      t.innerHTML = '<span class="n">' + num(c[p[0]]) + '</span><span class="l">' + p[1] + '</span>';
-      tiles.appendChild(t);
+
+    // ── search, first and largest ──
+    var find = el("form", "ovfind");
+    var fi = el("input", "ovfind-in");
+    fi.type = "search"; fi.name = "q"; fi.autocomplete = "off";
+    fi.placeholder = "Search every photo, email, document and recording…";
+    fi.setAttribute("aria-label", "Search the archive");
+    var fb = el("button", "ovfind-go", "Search"); fb.type = "submit";
+    find.appendChild(fi); find.appendChild(fb);
+    find.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var v = fi.value.trim();
+      if (v) go({ page: "search", q: v });
     });
-    main.appendChild(tiles);
-    onThisDayCard(main, d.on_this_day);   // G-8: photos taken on today's date, across years
-    transparencyCard(main);               // G-14: dedup/set-aside reassurance (numbers only)
-    var vd = d.vital_docs;
-    if (vd && vd.available) {  // G-2: compact vital-documents tally + type list
-      var vcard = el("section", "vitals-card");
-      var vhead = el("div", "vitals-card-head");
-      vhead.appendChild(el("h2", null, "Vital documents"));
-      vhead.appendChild(el("a", "vitals-more", "See all on Documents →")).href = "/documents";
-      vcard.appendChild(vhead);
-      vcard.appendChild(el("p", "vitals-tally",
-        esc(num(vd.found_count) + " of " + num(vd.total_count) + " key document types found")));
-      var vlist = el("ul", "vitals-list");
-      (vd.types || []).forEach(function (t) {
-        var li = el("li", "vitals-item " + (t.found ? "found" : "missing"));
-        li.innerHTML = '<span class="vmark">' + (t.found ? "✓" : "—") + '</span>' +
-          '<span class="vlabel">' + esc(t.label) + '</span>';
-        vlist.appendChild(li);
-      });
-      vcard.appendChild(vlist);
-      main.appendChild(vcard);
-    }
+    main.appendChild(find);
+    main.appendChild(el("p", "ovfind-hint",
+      "Search a name, a place, an account number, or a phrase you remember from a letter."));
+
+    var cols = el("div", "ovcols");
+    var left = el("div", "ovcol"), right = el("div", "ovcol");
+    cols.appendChild(left); cols.appendChild(right);
+    main.appendChild(cols);
+
+    // ── what is in the archive ──
+    var inv = ovCard(left, "What is in the archive");
+    var tbl = el("table", "ovtable");
+    var rows = [
+      ["Photos & videos", c.photos, c.videos ? num(c.videos) + " of them videos" : "", { page: "photos" }],
+      ["Emails", c.emails, "", { page: "emails" }],
+      ["Documents", c.documents,
+        (d.vital_docs && d.vital_docs.available)
+          ? num(d.vital_docs.found_count) + " of " + num(d.vital_docs.total_count) + " vital types found" : "",
+        { page: "documents" }],
+      ["Recordings", c.audio, "", { page: "recordings" }],
+      ["Messages", c.messages, "conversations", { page: "messages" }],
+      ["People", c.people, "recognised by face", { page: "people" }],
+      ["Places", c.places, "trips", { page: "places" }]
+    ];
+    rows.forEach(function (r) {
+      if (r[1] == null) return;
+      var tr = el("tr");
+      var td = el("td");
+      var a = el("a", "ovsec", esc(r[0]));
+      a.href = urlFor(r[3], { label: r[0] });
+      td.appendChild(a); tr.appendChild(td);
+      tr.appendChild(el("td", "ovwhat", esc(r[2] || "")));
+      tr.appendChild(el("td", "ovnum", num(r[1])));
+      tbl.appendChild(tr);
+    });
+    inv.appendChild(tbl);
+
+    // ── most significant ──
     if ((d.ranked_top || []).length) {
-      main.appendChild(el("h2", null, "Most significant"));
-      var box = el("div", "ranked");
-      d.ranked_top.slice(0, 18).forEach(function (r) {
-        var row = el("div", "rkcard" + (r.target ? " clickable" : ""));
-        var thumbs = r.thumbs && r.thumbs.length ? r.thumbs : (r.thumb ? [r.thumb] : []);
-        var media;
-        if (thumbs.length) {  // #5: 1 medium + up to 4 small previews
-          var small = thumbs.slice(1, 5).map(function (id) {
-            return '<img loading="lazy" src="' + thumbURL(id) + '">';
-          }).join("");
-          media = '<div class="rk-medium"><img loading="lazy" src="' + thumbURL(thumbs[0]) + '"></div>' +
-            (small ? '<div class="rk-small">' + small + "</div>" : "");
-        } else {
-          media = '<span class="ticon">' + typeIcon(r.type) + "</span>";  // doc/email/audio → icon
-        }
-        row.innerHTML = '<div class="rk-media">' + media + '</div><div class="rk-body">' +
-          '<div class="rk-label">' + esc(r.label || r.person_id || "item") + "</div>" +
-          '<span class="badge">' + esc(pretty(r.type)) + "</span></div>";
-        if (r.target) { row.onclick = function (e) { if (e.target.tagName !== "BUTTON") go(r.target); }; keyable(row, "button"); }
-        if (EXAMINER && r.key) {  // #12 demote (ranking only — not a discard)
-          var dm = el("button", "rk-demote", "Remove");
-          dm.title = "Remove from Most Significant (keeps the item; ranking only)";
-          dm.onclick = function (e) {
-            e.stopPropagation();
-            doVerb("/api/demote", { key: r.key, label: r.label }, "Removed from Most Significant")
-              .then(function (x) { if (x) row.remove(); });
-          };
-          row.appendChild(dm);
-        }
-        box.appendChild(row);
-      });
-      main.appendChild(box);
+      var sig = ovCard(left, "Most significant");
+      var ul = el("ul", "siglist");
+      d.ranked_top.slice(0, 8).forEach(function (r) { ul.appendChild(sigRow(r)); });
+      sig.appendChild(ul);
     }
+
+    // ── vital documents ──
+    var vd = d.vital_docs;
+    if (vd && vd.available) {
+      var vc = ovCard(right, "Vital documents", "Open Documents", { page: "documents" });
+      var pct = vd.total_count ? Math.round(vd.found_count / vd.total_count * 100) : 0;
+      var tal = el("p", "ovtally");
+      tal.innerHTML = "<b>" + num(vd.found_count) + " of " + num(vd.total_count) +
+        "</b> key document types found";
+      vc.appendChild(tal);
+      var meter = el("div", "ovmeter");
+      meter.setAttribute("role", "img");
+      meter.setAttribute("aria-label", pct + "% of key document types found");
+      var fill = el("i"); fill.style.width = pct + "%";     // CSSOM, not style="" (CSP)
+      meter.appendChild(fill); vc.appendChild(meter);
+      var missing = (vd.types || []).filter(function (t) { return !t.found; });
+      if (missing.length) {
+        vc.appendChild(el("p", "ovtally ovtally-sub", "Still missing"));
+        var chips = el("div", "ovchips");
+        missing.forEach(function (t) { chips.appendChild(el("span", null, esc(t.label))); });
+        vc.appendChild(chips);
+      }
+    }
+
+    // ── on this day ──
+    var od = d.on_this_day;
+    if (od && (od.years || []).length) {
+      var oc = ovCard(right, "On this day",
+        "All " + num(od.total_count || 0), { page: "photos", media: "" });
+      var oul = el("ul", "siglist");
+      var shown = 0;
+      (od.years || []).forEach(function (y) {
+        (y.photos || []).forEach(function (ph) {
+          if (shown >= 3) return;
+          shown++;
+          var li = el("li", "sigrow clickable");
+          var im = el("img"); im.loading = "lazy"; im.src = thumbURL(ph.id); im.alt = "";
+          li.appendChild(im);
+          // Name it by where it was taken, then by what it is. "IMG_0999" is a
+          // camera's filing reference, not a thing a person recognises — it was
+          // the fallback and it read as broken next to "Beverly Hills, California".
+          var place = prettyPlace(ph.place || "");
+          var scene = sentenceCase(ph.scene || "");
+          var body = el("div", "siglab", esc(place || scene || "Photograph"));
+          body.appendChild(el("i", null,
+            esc([fmtDay(ph.ts), (place && scene) ? scene : ""].filter(Boolean).join(" · "))));
+          li.appendChild(body);
+          li.onclick = function () { go({ open: true, file: ph.id }); };
+          keyable(li, "button", "Open photograph");
+          oul.appendChild(li);
+        });
+      });
+      oc.appendChild(oul);
+    }
+
+    // ── what was set aside ──
+    getJSON("/api/transparency").then(function (t) {
+      if (!t) return;
+      // Was: "11,022 group(s) of near-duplicate photos and 23,816 exact
+      // duplicate(s) were set aside". Parenthetical plurals are the tell that
+      // nobody read it aloud, and this is the one sentence on the page whose
+      // whole job is to be believed. Say why, not only what.
+      right.appendChild(el("p", "ovkept",
+        esc(num(t.exact_duplicates_removed || 0) + " exact copies and " +
+            num(t.near_duplicate_groups || 0) + " sets of near-identical photographs were set " +
+            "aside, so you would not scroll past the same picture nine times. Nothing was " +
+            "deleted — they are all still here.")));
+    }).catch(function () { });
   };
+
+  // "2025-08-26T21:09:53" → "26 August 2025". The archive is read by families,
+  // not by machines; ISO timestamps on a keepsake page read as a database dump.
+  var MONTHS = ["January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"];
+  // Scene and category labels arrive lowercase from the classifier
+  // ("birthday party"). Fine as a filter value, wrong as a heading.
+  function sentenceCase(v) {
+    v = pretty(String(v || ""));
+    return v ? v.charAt(0).toUpperCase() + v.slice(1) : "";
+  }
+  function fmtDay(ts) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ts || ""));
+    if (!m) return "";
+    return String(Number(m[3])) + " " + MONTHS[Number(m[2]) - 1] + " " + m[1];
+  }
 
   // Inline SVG type icons (no CDN — Zone-B safe) for ranked items without a thumb.
   function typeIcon(t) {
@@ -2030,13 +2225,106 @@
       document: '<path d="M6 2h8l4 4v16H6z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M14 2v4h4" fill="none" stroke="currentColor" stroke-width="1.6"/>',
       email: '<rect x="3" y="5" width="18" height="14" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4 6l8 6 8-6" fill="none" stroke="currentColor" stroke-width="1.6"/>',
       audio: '<path d="M9 18V7l9-2v11" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="7" cy="18" r="2.2" fill="currentColor"/><circle cx="16" cy="16" r="2.2" fill="currentColor"/>',
+      // A conversation with no thumbnail used to fall through to the default
+      // circle, which reads as a missing image rather than as "this is a chat".
+      conversation: '<path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>',
       scene: '<rect x="3" y="4" width="18" height="16" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8.5" cy="9.5" r="1.8" fill="currentColor"/><path d="M5 18l5-5 4 3 3-2 4 4" fill="none" stroke="currentColor" stroke-width="1.6"/>'
     };
     var body = p[t] || '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.6"/>';
     return '<svg viewBox="0 0 24 24" width="26" height="26">' + body + "</svg>";
   }
 
+  // ── the Photos & Videos opening ───────────────────────────────────────────
+  // The Overview is a tool; this page is a keepsake, and it opens like one — one
+  // photograph taken on today's date, full width, with the rest of that day's
+  // pictures across the years beneath it. The grid and its filters are unchanged
+  // and sit directly below.
+  //
+  // Only on the UNFILTERED page. Once a visitor has narrowed to an album, a
+  // person or a scene they have asked a question, and a large unrelated
+  // photograph on top of the answer is an obstacle. `heroSuppressed()` names
+  // every param that counts as a question.
+  //
+  // The hero degrades in one step: today's photographs if the archive has any,
+  // otherwise the single most recent photograph in it. Both come out of a real
+  // payload; if neither is available the page renders exactly as it did before.
+  function heroSuppressed() {
+    return !!(Q.event || Q.scene || Q.place || Q.album || Q.media || Q.cat ||
+              Q.vperson || Q.vscene || Q.favorite || Q.hidden || Q.date_from ||
+              Q.date_to || Q.favorite_curation || Q.collection_curation);
+  }
+
+  function photosHero(main, newestRow) {
+    if (heroSuppressed()) return;
+    var host = el("section", "phero");
+    main.appendChild(host);
+
+    function paint(photo, headline, stand, strip) {
+      var fig = el("div", "phero-fig");
+      var im = el("img"); im.src = mediaURL(photo.id); im.alt = ""; im.loading = "eager";
+      fig.appendChild(im);
+      fig.appendChild(el("div", "phero-veil"));
+      var say = el("div", "phero-say");
+      say.appendChild(el("div", "phero-when",
+        esc([fmtDay(photo.ts), prettyPlace(photo.place || "")].filter(Boolean).join(" · "))));
+      say.appendChild(el("h2", "phero-h", esc(headline)));
+      if (stand) say.appendChild(el("p", null, esc(stand)));
+      fig.appendChild(say);
+      fig.onclick = function () { go({ open: true, file: photo.id }); };
+      keyable(fig, "button", "Open this photograph");
+      host.appendChild(fig);
+
+      if (strip && strip.length) {
+        var row = el("div", "phero-strip");
+        strip.forEach(function (ph) {
+          var f = el("figure");
+          var i2 = el("img"); i2.loading = "lazy"; i2.src = thumbURL(ph.id); i2.alt = "";
+          f.appendChild(i2);
+          // Just the year here — the day and month are the same for every photo
+          // in this strip, which is the entire premise of "on this day".
+          f.appendChild(el("figcaption", null,
+            esc(fmtDay(ph.ts).replace(/^\d+\s\w+\s/, "") +
+                (ph.scene ? " · " + sentenceCase(ph.scene) : ""))));
+          f.onclick = function () { go({ open: true, file: ph.id }); };
+          keyable(f, "button", "Open photograph");
+          row.appendChild(f);
+        });
+        host.appendChild(row);
+      }
+    }
+
+    getJSON("/api/overview").then(function (d) {
+      var od = (d && d.on_this_day) || {}, years = od.years || [];
+      var all = [];
+      years.forEach(function (y) { (y.photos || []).forEach(function (ph) { all.push(ph); }); });
+      if (all.length) {
+        var span = years.length > 1
+          ? ("Across " + years.length + " years — " + years[years.length - 1].year + " to " + years[0].year + ".")
+          : "";
+        paint(all[0],
+          all.length === 1
+            ? "One photograph was taken on this day."
+            : num(all.length) + " photographs were taken on this day.",
+          span, all.slice(1, 9));
+        return;
+      }
+      if (newestRow) fallback();
+    }).catch(function () { if (newestRow) fallback(); });
+
+    function fallback() {
+      paint(newestRow, "The most recent photograph in the archive.", "", []);
+    }
+  }
+
   P.photos = function (main, data) {
+    // Before head(), deliberately. The filter controls render into the sticky
+    // .pagehead, so a hero appended afterwards sits BELOW them — which puts the
+    // working controls above the photograph and loses the whole point of the
+    // opening. Default sort is "newest", so row 0 of the seed payload is the
+    // archive's most recent photograph: the hero's fallback for a date with
+    // nothing on it. photosHero() appends its container synchronously and fills
+    // it when the fetch resolves, so document order holds.
+    photosHero(main, (data && data.rows && data.rows[0]) || null);
     var controls = head(main, "Photos & Videos", "Photos & Videos",
       "Filter, then select to export or discard.");
     // Curation: when a collection filter is active (?collection_curation=<slug>),
@@ -2647,31 +2935,6 @@
     drawPeople();
   };
 
-  // G-8: "On this day" Overview module — today's month-day across years. Hidden
-  // when nothing matches (server sends total_count 0). Each year links to the
-  // gallery pre-filtered to that exact day (date_from == date_to).
-  function onThisDayCard(main, od) {
-    if (!od || !od.total_count) return;   // nothing on this day → don't render the card
-    var card = el("section", "otd-card");
-    var h = el("div", "otd-head");
-    h.appendChild(el("h2", null, "On this day"));
-    h.appendChild(el("span", "otd-sub",
-      esc(num(od.total_count) + " photo" + (od.total_count === 1 ? "" : "s") + " taken on this date")));
-    card.appendChild(h);
-    (od.years || []).forEach(function (yr) {
-      var row = el("div", "otd-year");
-      var link = el("a", "otd-yearlabel", esc(yr.year) + " · " + num(yr.count));
-      var day = yr.year + "-" + od.mmdd;   // YYYY-MM-DD for the day filter
-      link.href = urlFor({ page: "photos", date_from: day, date_to: day }, { label: day });
-      row.appendChild(link);
-      var strip = el("div", "otd-strip");
-      var ctx = { list: yr.photos };       // ←/→ pages within this year's set
-      (yr.photos || []).forEach(function (p) { strip.appendChild(photoCard(p, ctx)); });
-      row.appendChild(strip);
-      card.appendChild(row);
-    });
-    main.appendChild(card);
-  }
 
   // G-5: Timeline — chapter bands (collapsible) → event rows → capped photo strips.
   // Bands render collapsed; each band's events/photos DOM is built lazily on first
@@ -5331,23 +5594,6 @@
     card.appendChild(box);
   }
 
-  // ── G-14 transparency panel (read-only) ──
-  // Overview card (both roles: numbers-only reassurance) + a Review subsection
-  // (examiner: suspense + significant-attachment noise). Fetched from /api/transparency,
-  // which gates the examiner-only detail server-side.
-  function transparencyCard(main) {
-    getJSON("/api/transparency").then(function (t) {
-      if (!t) return;
-      var card = el("section", "trust-card");
-      card.appendChild(el("h2", null, "What we set aside"));
-      var p = el("p", "trust-lead");
-      p.textContent = num(t.near_duplicate_groups || 0) +
-        " group(s) of near-duplicate photos and " + num(t.exact_duplicates_removed || 0) +
-        " exact duplicate(s) were set aside — nothing was deleted.";
-      card.appendChild(p);
-      main.appendChild(card);
-    }).catch(function () { });
-  }
   function transparencyReview(main) {
     if (!EXAMINER) return;
     getJSON("/api/transparency").then(function (t) {
