@@ -55,6 +55,25 @@ page you were told about.**
 | Search | any hit | `Search: <query> › <title>` — the crumb must return **with the query** |
 | Documents / Review | a vital doc that lives in an email | `<section> › <subject>` |
 
+### The two redesigned screens
+
+**Overview** is a working index: search first, then a two-column layout — what is in
+the archive / Most significant on the left, Vital documents / On this day on the right. It
+must show **no big count tiles**; those duplicated the left rail and were the whole reason it
+was rebuilt. Every figure on it comes from `/api/overview`, `/api/places` or
+`/api/transparency` — if you find a number on that screen you cannot trace to a payload, that
+is a bug, not a rounding choice.
+
+**Photos & Videos** opens with a hero photograph taken on today's date, then a strip of the
+rest of that day across the years, and only then the title and filter bar. Two things to
+check every time:
+- The hero must come **above** the filter controls. Those controls render into the sticky
+  `.pagehead`, so anything appended after `head()` lands below them.
+- The hero must **vanish** the moment any filter is set (`?scene=`, `?event=`, `?person=`,
+  a date range, an album, a collection…). See `heroSuppressed()`. A visitor who has narrowed
+  to an album asked a question; a large unrelated photograph on top of the answer is an
+  obstacle. Load `/photos?scene=wedding` and confirm there is no hero.
+
 ### The three that break quietly
 
 - **Filter changes.** On a drilled-into view, change a dropdown. Every filter control calls
