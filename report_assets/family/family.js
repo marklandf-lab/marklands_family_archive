@@ -319,7 +319,7 @@
     ["person", "scene", "place", "event", "thread", "conversation", "venue", "tab",
      "media", "vperson", "vscene", "favorite_curation", "collection_curation", "people",
      "participant", "cat", "subcat", "album", "favorite", "date_from", "date_to",
-     "q", "otd", "rec"].forEach(function (k) {
+     "q", "otd", "group", "target", "list", "rec"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -375,7 +375,8 @@
     // It is last so the human-meaningful params stay readable in the address bar.
     ["person", "scene", "place", "event", "thread", "media", "cat", "subcat", "modality", "qcat",
      "album", "favorite", "hidden", "participant", "venue", "tab", "date_from", "date_to",
-     "vperson", "vscene", "favorite_curation", "collection_curation", "people", "q", "crumb", "from"]
+     "vperson", "vscene", "favorite_curation", "collection_curation", "people", "q",
+     "group", "target", "list", "crumb", "from"]
       .forEach(function (k) { if (Q[k]) q.push(k + "=" + encodeURIComponent(Q[k])); });
     return location.pathname + (q.length ? "?" + q.join("&") : "");
   }
@@ -3469,8 +3470,9 @@
     return st;
   }
 
-  function vitalStat(bar, n, label, work) {
-    var d = el("div", "vstat" + (work ? " work" : ""));
+  function vitalStat(bar, n, label, work, href) {
+    var d = el(href ? "a" : "div", "vstat" + (work ? " work" : "") + (href ? " go" : ""));
+    if (href) { d.href = href; d.title = "Open the review queue"; }
     d.appendChild(el("b", null, esc(num(n))));
     d.appendChild(el("span", null, esc(label)));
     bar.appendChild(d);
@@ -3588,9 +3590,12 @@
     var bar = el("div", "vstats");
     vitalStat(bar, st.found, "types have a candidate");
     if (EXAMINER) {
+      var queue = urlFor({ page: "review", group: "vital" }, { label: "Vital review" });
       vitalStat(bar, st.signed, "signed off");
-      vitalStat(bar, st.undecided, "candidates undecided", st.undecided > 0);
-      vitalStat(bar, st.near, "near-misses unreviewed", st.near > 0);
+      vitalStat(bar, st.undecided, "candidates undecided", st.undecided > 0,
+                st.undecided ? queue : null);
+      vitalStat(bar, st.near, "near-misses unreviewed", st.near > 0,
+                st.near ? queue : null);
       var hint = el("p", "vstats-hint");
       hint.textContent = (st.undecided || st.near)
         ? "Nothing is released to the family until every one of those has a decision."
@@ -3659,6 +3664,18 @@
       function build() {
         if (built) return;
         built = true;
+        // The two jobs, side by side and clearly separated: work this type's
+        // candidates one at a time (the queue), or scan its weaker matches in
+        // place (the drawer, further down). Reading what has already been decided
+        // is this panel's own job and needs neither.
+        if (EXAMINER && (open || t.near_miss_count)) {
+          var goq = el("a", "vgo",
+            open ? "Review " + num(open) + " undecided" : "Work this type in the queue");
+          goq.href = urlFor({ page: "review", group: "vital", target: t.target },
+                            { label: t.label });
+          goq.onclick = function (e) { e.stopPropagation(); };
+          detail.appendChild(goq);
+        }
         if (items.length) {
           items.forEach(function (it) { detail.appendChild(vitalItemRow(t, it, vd)); });
         } else {
@@ -4562,17 +4579,32 @@
   var PAGER_KEYHANDLER = null;   // module-side so a re-entry unbinds the old one
 
   function reviewPager(main, group) {
-    var title = group === "vital" ? "Vital documents — bulk review"
+    // ?target=<vital target key> scopes the queue to ONE document type. The
+    // endpoint takes only a group, so the filter is applied here — the payload is
+    // fetched whole either way (1,316 items on this case), so scoping client-side
+    // costs nothing and needs no change to a file that is mirrored from upstream.
+    var scope = (group === "vital" && Q.target) ? String(Q.target) : "";
+    var title = group === "vital" ? "Vital documents — review"
                                   : "Quarantine — bulk review";
-    head(main, "Examiner · Bulk review", title,
-      "One item at a time — pick an action; the queue advances.");
-    // Escape hatch back to the classic tabbed lists for this surface.
-    var esc0 = el("a", "act small", "List view");
-    esc0.href = group === "vital" ? "/documents" : "/review?group=quarantine&list=1";
+    // Prefer the human label the linking page passed us ("Will / testament") over
+    // sentence-casing the raw key ("Will testament"). Falls back when someone
+    // types the URL by hand.
+    if (scope) title = (Q.crumb || sentenceCase(scope)) + " — review";
+    head(main, "Examiner · Review", title,
+      "One at a time. Read it, decide, and the queue moves on.");
+    var esc0 = el("a", "act small", scope ? "← All vital documents" : "List view");
+    esc0.href = group === "vital"
+      ? (scope ? "/review?group=vital" : "/documents")
+      : "/review?group=quarantine&list=1";
     main.appendChild(esc0);
     var body = el("div", "pager"); main.appendChild(body);
     body.appendChild(el("p", "notice", "Loading…"));
     getJSON("/api/review-pager?group=" + encodeURIComponent(group)).then(function (d) {
+      if (scope) {
+        d = { group: d.group, all_targets: d.all_targets,
+              items: (d.items || []).filter(function (it) { return it.target === scope; }) };
+        d.total = d.items.length;
+      }
       buildPager(body, group, d);
     }).catch(function (e) {
       body.innerHTML = "";
@@ -4677,9 +4709,15 @@
     function renderVital(card, it) {
       var titleRow = el("div", "pvitalhead");
       titleRow.appendChild(el("span", "chip", esc(it.vqueue === "near_miss" ? "Near-miss" : "To confirm")));
-      if (it.target) titleRow.appendChild(el("span", "chip target", esc(pretty(it.target))));
+      if (it.target) titleRow.appendChild(el("span", "chip target", esc(sentenceCase(it.target))));
       card.appendChild(titleRow);
       card.appendChild(el("h2", "pname", esc(it.name || it.thread_subject || it.conversation_subject || "(unnamed)")));
+      // Where the CLASSIFIER put this document, from its own delivered path. The
+      // reviewer is being asked "is this a marriage certificate?" — knowing the
+      // pipeline filed it under legal/court_filing is the cheapest possible check
+      // against the wrong answer, and it is already on the client.
+      var pw = filedUnder(it.file_id);
+      if (pw) card.appendChild(el("div", "pfiled", esc("The pipeline filed this under " + pw)));
       if (it.vqueue === "near_miss") {
         if (it.disposition) card.appendChild(el("div", "pdisp",
           esc("Why it wasn't confirmed: " + pretty(it.disposition) +
