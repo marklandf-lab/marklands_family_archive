@@ -977,3 +977,20 @@ a.vrow-name:hover { color: var(--accent); text-decoration: underline; }
   .vrow { grid-template-columns: 1fr; gap: 8px; }
   .vrow-acts { flex-wrap: wrap; }
 }
+
+/* The two stats that represent WORK are links into the review queue. The panel
+   used to state 172 undecided and point nowhere — the tool for it lived on
+   /review?group=vital, which nothing in the app linked to. */
+a.vstat.go { text-decoration: none; color: inherit; border-radius: 8px;
+  padding: 4px 8px; margin: -4px -8px; display: block; }
+a.vstat.go:hover { background: var(--chip); }
+a.vstat.go:hover b { text-decoration: underline; }
+a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.vgo { display: inline-block; margin: 6px 0 12px; font: 500 13px var(--sans);
+  background: var(--accent); color: var(--accent-ink); text-decoration: none;
+  padding: 8px 16px; border-radius: 8px; }
+.vgo:hover { filter: brightness(1.08); }
+
+/* Provenance on the review card, matching the Documents rows. */
+.pfiled { font-size: 13px; color: var(--muted); margin: -2px 0 12px; }
