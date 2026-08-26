@@ -11,7 +11,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./run_tests.sh tests/unit/test_rebase.py::test_name  # one test
 ./family_archive.sh CASE_ID --cases-root /path/to/cases   # serve, then open http://127.0.0.1:7766/
 ./sync_from_wyeast.sh /path/to/Wyeast                # re-copy the closure from upstream
+./jscheck.sh report_assets/family/family.js          # JS parse check — there is no node on this Mac
 ```
+
+**Read `STATE.md` first.** It is the session-handoff doc: what shipped, what is blocked and
+on whom, known issues not yet filed, and the one command to start the next session with.
+Newest entry at the top. Keep it current when shipping, inside the feature branch.
 
 `$WYEAST_PYTHON` overrides the interpreter; `$WYEAST_CASES_ROOT` the cases root.
 There is no linter or formatter configured — pytest is the only check.
