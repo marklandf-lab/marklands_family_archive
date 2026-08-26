@@ -2149,6 +2149,29 @@
       meter.setAttribute("aria-label", pct + "% of key document types found");
       var fill = el("i"); fill.style.width = pct + "%";     // CSSOM, not style="" (CSP)
       meter.appendChild(fill); vc.appendChild(meter);
+      // "14 of 27 found", with a meter filled halfway, reads as "you are halfway
+      // done". It is not a measure of done — it says only that SOMETHING turned up
+      // for 14 types, not that anyone checked the something was right. Mostly
+      // nobody has. One line fixes the impression; the four-number breakdown stays
+      // on Documents, where working the queue actually happens. A summary should
+      // point at its detail, not restate it.
+      //
+      // The count comes off /api/guided (4 KB) rather than /api/documents (1.4 MB
+      // of document rows) — and it is the same figure the guided-review step and
+      // the release gate read, so this card cannot drift away from them.
+      if (EXAMINER) {
+        var unchecked = el("p", "ovunchecked");
+        vc.appendChild(unchecked);
+        getJSON("/api/guided").then(function (g) {
+          var step = ((g && g.steps) || []).filter(function (x) { return x.key === "vital_docs"; })[0];
+          var x = (step && step.extra) || {};
+          if (!x.unconfirmed) { unchecked.remove(); return; }   // nothing outstanding → say nothing
+          var a = el("a", null, esc("Nobody has checked " + num(x.unconfirmed) +
+                                    " of the documents behind them") + " →");
+          a.href = urlFor({ page: "review", group: "vital" }, { label: "Vital review" });
+          unchecked.appendChild(a);
+        }).catch(function () { unchecked.remove(); });
+      }
       var missing = (vd.types || []).filter(function (t) { return !t.found; });
       if (missing.length) {
         vc.appendChild(el("p", "ovtally ovtally-sub", "Still missing"));
