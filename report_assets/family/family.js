@@ -3198,7 +3198,11 @@
         }
       }
       tr.appendChild(catTd);
-      tr.appendChild(el("td", null, esc(r.summary || "") + (r.preview ? '<div class="preview">' + esc(r.preview) + "</div>" : "")));
+      // The row used to print the summary AND ~200 characters of raw extracted
+      // text beneath it — "OMAHA NE 68103-2577 BD) Ameritrade °°?”…" — which
+      // roughly tripled row height and buried the one line written to be read.
+      // The full text is already in the lightbox; that is where it belongs.
+      tr.appendChild(el("td", null, esc(r.summary || "")));
       tbl.appendChild(tr);
     });
     // #27: on a narrow viewport this table (4 columns, one free-text) is wider
@@ -3417,29 +3421,148 @@
     return rowEl;
   }
 
-  // "cap reached" chip for a target whose retrieval hit vital_per_target_k: the
-  // near-miss list shown is a floor, and matching documents past the k-th were
-  // never retrieved. `title` carries the how-to-see-more (raise the knob, re-run
-  // embed) without cluttering the row. Examiner-only by the call sites' gating.
-  function vitalCapChip(k) {
-    // #19: "cap reached" is examiner-jargon for what is really just "there may
-    // be more" — plainer phrasing, same detail preserved in the hover title.
-    var chip = el("span", "vcap-chip",
-      k ? "showing the top " + num(k) + " — more may exist" : "more may exist");
-    chip.title = "The pipeline retrieved at most " + (k ? num(k) : "a fixed number") +
-      " candidates for this type; more may exist. Raise vital_per_target_k in " +
-      "case_config.json and re-run the embed stage to widen the search.";
-    return chip;
-  }
 
   // G-2: full vital-documents checklist — one row per searched-for document type,
   // ✓ found (deep-links to the doc[s]) or "not found in this collection". All
   // estate-derived text (labels, item names, tags) is escaped via esc().
+  // ── vital documents: where the estate stands (N-2) ────────────────────────
+  // Rebuilt from a wall of buttons into a statement of position.
+  //
+  // What it replaced: twenty-seven headings, each spilling its candidates inline
+  // as wrapping text, every one carrying Confirm / Not a vital document /
+  // Reassign… — about 538 buttons above a page named for 4,643 documents. Two
+  // documents routinely shared a line, so the gap inside a candidate's button
+  // group equalled the gap between groups and you could not see which control
+  // belonged to which file. The panel's only summary line, "14 of 27 key document
+  // types found", read as a finished score while 172 candidates sat undecided and
+  // 1,147 near-misses unreviewed — the exact work the release gate is waiting on.
+  //
+  // Two jobs live here and they are not the same job: reviewing candidates, and
+  // reading what review has already concluded. This screen is built for the
+  // second. It answers "where does this estate stand, and can I trust the
+  // answer?" — the per-item decision controls survive inside an expanded type,
+  // one row each, but they are no longer what the page is about.
+
+  // Where the PIPELINE filed a document, read out of its own delivered path:
+  // /output/documents/legal/court_filing/DISSOLUTION JUDGMENT.pdf → "legal · court filing"
+  //
+  // This is the evidence that was missing from every decision on the old screen.
+  // A reviewer looking at a filename alone signed off a divorce judgment as a
+  // marriage certificate, a will draft and a power of attorney as property deeds.
+  // The classifier had already disagreed with all three, in the path, on the
+  // client, for free. No claim is made about who is right — the two readings are
+  // simply shown side by side, which is all a human needs to catch it.
+  function filedUnder(path) {
+    var m = /\/output\/documents\/([^\/]+)(?:\/([^\/]+))?\/[^\/]+$/.exec(String(path || ""));
+    if (!m) return "";
+    return sentenceCase(m[1]) + (m[2] ? " · " + pretty(m[2]) : "");
+  }
+
+  function vitalStats(targets) {
+    var st = { types: targets.length, found: 0, signed: 0, undecided: 0, near: 0, capped: 0 };
+    targets.forEach(function (t) {
+      if (t.found) st.found++;
+      (t.items || []).forEach(function (it) { it.reviewed ? st.signed++ : st.undecided++; });
+      st.near += t.near_miss_count || 0;
+      if (t.near_miss_capped) st.capped++;
+    });
+    return st;
+  }
+
+  function vitalStat(bar, n, label, work) {
+    var d = el("div", "vstat" + (work ? " work" : ""));
+    d.appendChild(el("b", null, esc(num(n))));
+    d.appendChild(el("span", null, esc(label)));
+    bar.appendChild(d);
+  }
+
+  // One candidate, one row. The old layout let these wrap inline like words.
+  function vitalItemRow(t, it, vd) {
+    var row = el("div", "vrow" + (it.reviewed ? " done" : ""));
+    var main_ = el("div", "vrow-main");
+    var label = it.name || it.thread_subject || it.conversation_subject || it.tag || "document";
+
+    var link;
+    if (it.file_id) {
+      link = el("a", "vrow-name", esc(label));
+      link.href = "#";
+      link.onclick = function (e) { e.preventDefault(); go({ open: true, file: it.file_id }); };
+    } else if (it.thread_id) {
+      link = el("a", "vrow-name", esc(it.thread_subject || "(no subject)"));
+      link.href = "#";
+      link.onclick = (function (tid, subj) {
+        return function (e) { e.preventDefault(); go({ page: "emails", thread: tid }, { label: subj }); };
+      })(it.thread_id, it.thread_subject || "(no subject)");
+    } else if (it.conversation_id) {
+      link = el("a", "vrow-name", esc(it.conversation_subject || "(conversation)"));
+      link.href = "#";
+      link.onclick = (function (cid, subj) {
+        return function (e) { e.preventDefault(); go({ page: "messages", conversation: cid }, { label: subj }); };
+      })(it.conversation_id, it.conversation_subject || "(conversation)");
+    } else {
+      link = el("span", "vrow-name", esc(label));
+    }
+    main_.appendChild(link);
+
+    // Provenance and decision state are EXAMINER vocabulary. "The pipeline filed
+    // this under Legal · court filing" is meaningless to a family, and "Not yet
+    // decided" on their own father's will reads as an alarm they cannot act on.
+    // audience.py's asymmetry applies here as everywhere: a leak on the family
+    // side fails open, so gate rather than reword.
+    var where = filedUnder(it.path || it.file_id);
+    var prov = it.thread_id ? "Found in an email"
+             : it.conversation_id ? "Found in a message thread"
+             : (EXAMINER && where) ? "The pipeline filed this under " + where
+             : "";
+    if (prov) main_.appendChild(el("div", "vrow-prov", esc(prov)));
+    row.appendChild(main_);
+
+    if (EXAMINER) {
+      var state = el("div", "vrow-state");
+      state.appendChild(el("span", "vpill " + (it.reviewed ? "yes" : "open"),
+        it.reviewed ? "Signed off" : "Not yet decided"));
+      row.appendChild(state);
+    }
+
+    if (EXAMINER) {
+      // Same three audited, reversible overlay verbs as before. What changed is
+      // their weight: Confirm was the only filled button in the group, first in
+      // reading order, repeated 172 times — the cheapest thing on screen to click,
+      // asking for a judgement the row gave no evidence for. Three equal buttons
+      // is the honest signal when the system genuinely does not know.
+      var acts = el("div", "vrow-acts");
+      if (!it.reviewed) {
+        var confirm = el("button", "vact", "Yes, this is it");
+        confirm.onclick = function () {
+          doVerb("/api/vital/confirm", { id: it.id }, "Signed off").then(function (x) { if (x) render(); });
+        };
+        acts.appendChild(confirm);
+      }
+      var dismiss = el("button", "vact", it.reviewed ? "Undo — not this" : "No");
+      dismiss.onclick = function () {
+        doVerb("/api/vital/dismiss", { id: it.id }, "Dismissed").then(function (x) { if (x) render(); });
+      };
+      acts.appendChild(dismiss);
+      var reassign = el("button", "vact", "Another type…");
+      reassign.onclick = function () {
+        pickVitalTarget("Reassign this document", vd.all_targets, t.target, function (to) {
+          var cats = vitalPathTargets(vd, it.path);
+          function send(scope) {
+            doVerb("/api/vital/reassign", { id: it.id, to_target: to, scope: scope }, "Reassigned")
+              .then(function (x) { if (x) render(); });
+          }
+          if (cats.length > 1) { pickScope(cats.length, send); } else { send("single"); }
+        });
+      };
+      acts.appendChild(reassign);
+      row.appendChild(acts);
+    }
+    return row;
+  }
+
   function vitalDocsPanel(main, vd) {
-    // #17: a promote/dismiss (single or batched) triggers a full render(), which
-    // rebuilds this panel from scratch — drop any selection state and floating
-    // bar left over from the PREVIOUS build so a stale #vselbar (bound to rows
-    // that no longer exist) never leaks into the new one.
+    // #17: a promote/dismiss triggers a full render(); drop selection state and
+    // any floating bar left over from the previous build.
     VITAL_SEL = {};
     var staleVBar = document.getElementById("vselbar"); if (staleVBar) staleVBar.remove();
     if (!vd) return;
@@ -3448,156 +3571,174 @@
       return;
     }
     if (!vd.available) return;
-    var panel = el("section", "vitals-panel");
-    panel.appendChild(el("h2", null, "Vital documents"));
-    panel.appendChild(el("p", "vitals-tally",
-      esc(num(vd.found_count) + " of " + num(vd.total_count) +
-          " key document types found in this collection.")));
-    var rows = el("div", "vitals-rows");
-    (vd.targets || []).forEach(function (t) {
-      var row = el("div", "vitals-row " + (t.found ? "found" : "missing"));
-      var rhead = el("div", "vitals-row-head");
-      rhead.innerHTML = '<span class="vmark">' + (t.found ? "✓" : "—") + '</span>' +
-        '<span class="vlabel">' + esc(t.label) + '</span>';
-      if (EXAMINER && t.near_miss_count) {  // near-miss hits, examiner-only
-        // Was a dead span: it stated a number and gave no way to look at it, so
-        // reviewing a near-miss meant opening vital_doc_candidates.json on the
-        // workstation by hand. Now it opens the list inline.
-        var drawer = el("div", "vcand-drawer");
-        drawer.hidden = true;
-        var toggle = el("button", "vcand",
-          num(t.near_miss_count) + " near-miss" + (t.near_miss_count === 1 ? "" : "es"));
-        toggle.setAttribute("aria-expanded", "false");
-        toggle.onclick = (function (tgt, btn, box, vdoc) {
-          return function () {
-            if (!box.hidden) {                       // collapse
-              box.hidden = true;
-              btn.setAttribute("aria-expanded", "false");
-              delete NEARMISS_OPEN[tgt];             // stay closed across renders
-              return;
-            }
-            box.hidden = false;
-            btn.setAttribute("aria-expanded", "true");
-            NEARMISS_OPEN[tgt] = NEARMISS_OPEN[tgt] || 0;
-            // vd carries all_targets, which the row's Reassign picker needs.
-            if (!box.dataset.loaded) nearMissLoad(tgt, box, 0, vdoc);
-          };
-        })(t.target, toggle, drawer, vd);
-        rhead.appendChild(toggle);
-        if (t.near_miss_capped) rhead.appendChild(vitalCapChip(vd.per_target_k));
-        row.appendChild(rhead);
-        row.appendChild(drawer);
-        // Re-open a drawer the examiner had open before this render, as deep as
-        // they had paged it. One request for `want` rows, not one per page — the
-        // server clamps to MAX_PAGE_LIMIT, past which the "Show more" button is
-        // still there to carry on.
-        if (NEARMISS_OPEN[t.target] != null) {
-          drawer.hidden = false;
-          toggle.setAttribute("aria-expanded", "true");
-          nearMissLoad(t.target, drawer, 0, vd, NEARMISS_OPEN[t.target]);
-          // The panel is rebuilt from the top, so the row they were working in
-          // may be off-screen now. Put it back in front of them.
-          scrollBackTo(row);
+
+    var targets = (vd.targets || []).slice();
+    var st = vitalStats(targets);
+    var panel = el("section", "vitals2");
+
+    var h = el("div", "vitals2-head");
+    h.appendChild(el("h2", null, "Vital documents"));
+    h.appendChild(el("p", "vitals2-lead",
+      esc(num(st.types) + " document types an estate needs, and where each one stands.")));
+    panel.appendChild(h);
+
+    // The state bar. The old panel had ONE number and it flattered: "14 of 27
+    // found" says nothing about whether anyone has looked. Four numbers, because
+    // four things are true at once and only one of them is a score.
+    var bar = el("div", "vstats");
+    vitalStat(bar, st.found, "types have a candidate");
+    if (EXAMINER) {
+      vitalStat(bar, st.signed, "signed off");
+      vitalStat(bar, st.undecided, "candidates undecided", st.undecided > 0);
+      vitalStat(bar, st.near, "near-misses unreviewed", st.near > 0);
+      var hint = el("p", "vstats-hint");
+      hint.textContent = (st.undecided || st.near)
+        ? "Nothing is released to the family until every one of those has a decision."
+          + (st.capped ? " Each list stops at " + num(vd.per_target_k || 25)
+              + " candidates, so " + num(st.near) + " is a floor, not a total." : "")
+        : "Every candidate and near-miss has a decision.";
+      bar.appendChild(hint);
+    }
+    panel.appendChild(bar);
+
+    // Sorted by what is waiting on you, not alphabetically: the types with
+    // undecided candidates first (most first), then the types already worked,
+    // then the ones nothing was found for. The old panel used the config's
+    // declaration order, which buried the 45-candidate types among the empties.
+    function rank(t) {
+      var open = (t.items || []).filter(function (i) { return !i.reviewed; }).length;
+      if (t.found && open) return [0, -open];
+      if (t.found) return [1, 0];
+      return [2, -(t.near_miss_count || 0)];
+    }
+    if (EXAMINER) {
+      targets.sort(function (a, b) {
+        var ra = rank(a), rb = rank(b);
+        return ra[0] - rb[0] || ra[1] - rb[1];
+      });
+    }
+
+    // The examiner grid carries four numeric columns, the family view one.
+    var tbl = el("div", "vtable" + (EXAMINER ? " ex" : ""));
+    var hd = el("div", "vtr vthead");
+    hd.appendChild(el("div", "vc-name", "Document type"));
+    hd.appendChild(el("div", "vc-n", "Candidates"));
+    if (EXAMINER) {
+      hd.appendChild(el("div", "vc-n", "Signed off"));
+      hd.appendChild(el("div", "vc-n", "Undecided"));
+      hd.appendChild(el("div", "vc-n", "Near-misses"));
+    }
+    tbl.appendChild(hd);
+
+    targets.forEach(function (t) {
+      var items = t.items || [];
+      var signed = items.filter(function (i) { return i.reviewed; }).length;
+      var open = items.length - signed;
+
+      var tr = el("div", "vtr" + (open ? " todo" : "") + (t.found ? "" : " none"));
+      var nameCell = el("div", "vc-name");
+      var caret = el("span", "vcaret", "▸");
+      nameCell.appendChild(caret);
+      nameCell.appendChild(el("span", "vdot " + (t.found ? "ok" : "no")));
+      nameCell.appendChild(el("span", "vlabel2", esc(t.label)));
+      tr.appendChild(nameCell);
+      tr.appendChild(el("div", "vc-n", items.length ? esc(num(items.length)) : "—"));
+      if (EXAMINER) {
+        tr.appendChild(el("div", "vc-n" + (signed ? "" : " nil"), signed ? esc(num(signed)) : "—"));
+        tr.appendChild(el("div", "vc-n" + (open ? " todo" : " nil"), open ? esc(num(open)) : "—"));
+        tr.appendChild(el("div", "vc-n" + (t.near_miss_count ? " todo" : " nil"),
+          t.near_miss_count ? esc(num(t.near_miss_count)) : "—"));
+      }
+
+      var detail = el("div", "vdetail");
+      detail.hidden = true;
+      tbl.appendChild(tr);
+      tbl.appendChild(detail);
+
+      var built = false;
+      function build() {
+        if (built) return;
+        built = true;
+        if (items.length) {
+          items.forEach(function (it) { detail.appendChild(vitalItemRow(t, it, vd)); });
+        } else {
+          detail.appendChild(el("p", "vnone",
+            EXAMINER && t.near_miss_count
+              ? "Nothing matched well enough to be a candidate. "
+                + num(t.near_miss_count) + " weaker matches are listed below."
+              : "Nothing in this collection matched."));
         }
-      } else {
-        // Retrieval can hit the cap even with no near-misses left to review (every
-        // hit already confirmed/dismissed) — the truncation still means more
-        // candidates may exist unretrieved, so flag it whether or not a drawer opened.
-        if (EXAMINER && t.near_miss_capped) rhead.appendChild(vitalCapChip(vd.per_target_k));
-        row.appendChild(rhead);
-      }
-      if (t.found) {
-        var items = el("div", "vitals-items");
-        (t.items || []).forEach(function (it) {
-          var label = it.name || it.tag || "document";
-          var itemRow = el("div", "vitals-item");
-          if (it.file_id) {
-            var a = el("a", "vitals-link", esc(label));
-            a.href = "#";
-            a.onclick = function (e) { e.preventDefault(); go({ open: true, file: it.file_id }); };
-            itemRow.appendChild(a);
-          } else if (it.thread_id) {
-            // Email-sourced vital doc: it lives in the Emails section, not the
-            // documents view, so deep-link into its conversation rather than
-            // printing a dead `message_43267.eml`. Prefer the conversation
-            // SUBJECT as the label — the .eml basename is meaningless to a family.
-            // "(no subject)" matches how the Emails list labels this same thread,
-            // so the row and its destination read alike.
-            var ta = el("a", "vitals-link", esc(it.thread_subject || "(no subject)"));
-            ta.href = "#";
-            ta.onclick = (function (tid, subj) {
-              return function (e) { e.preventDefault(); go({ page: "emails", thread: tid }, { label: subj }); };
-            })(it.thread_id, it.thread_subject || "(no subject)");
-            itemRow.appendChild(ta);
-            itemRow.appendChild(el("span", "vitals-inemails", "in Emails"));
-          } else if (it.conversation_id) {
-            // Messages-equivalent of the email deep link above (#26): a vital doc
-            // sourced from a chat/SMS database chunk deep-links into Messages
-            // instead of printing a dead `chat.db#chunk=...` stub.
-            var ca = el("a", "vitals-link", esc(it.conversation_subject || "(conversation)"));
-            ca.href = "#";
-            ca.onclick = (function (cid, subj) {
-              return function (e) { e.preventDefault(); go({ page: "messages", conversation: cid }, { label: subj }); };
-            })(it.conversation_id, it.conversation_subject || "(conversation)");
-            itemRow.appendChild(ca);
-            itemRow.appendChild(el("span", "vitals-inemails", "in Messages"));
-          } else {
-            itemRow.appendChild(el("span", "vitals-noitem", esc(label)));
-          }
-          if (EXAMINER) {
-            // Examiner-only DECISIONS-OVERLAY actions (audited + reversible; the
-            // pipeline index vital_doc_confirmed.json is never touched). The vital-doc
-            // id contains a path — always pass it in the JSON BODY, never inline it.
-            // Confirm — the affirmative "yes, this is the document" the release gate
-            // requires (every vital item must be confirmed, dismissed, or reassigned).
-            if (it.reviewed) {
-              itemRow.appendChild(el("span", "vitals-reviewed", "✓ Confirmed"));
-            } else {
-              var confirm = el("button", "vitals-act primary", "Confirm");
-              confirm.onclick = function () {
-                doVerb("/api/vital/confirm", { id: it.id }, "Confirmed vital document")
-                  .then(function (x) { if (x) render(); });
-              };
-              itemRow.appendChild(confirm);
-            }
-            var dismiss = el("button", "vitals-act", "Not a vital document");
-            dismiss.onclick = function () {
-              doVerb("/api/vital/dismiss", { id: it.id }, "Dismissed vital match")
-                .then(function (x) { if (x) render(); });   // re-render Documents (fresh vital_docs)
+        if (EXAMINER && t.near_miss_count) {
+          // The existing near-miss drawer, unchanged — it is the REVIEW surface,
+          // and reviewing is the other job. It stays behind its own button here.
+          var box = el("div", "vcand-drawer");
+          box.hidden = true;
+          var toggle = el("button", "vcand",
+            "Review " + num(t.near_miss_count) + " near-miss" + (t.near_miss_count === 1 ? "" : "es"));
+          toggle.setAttribute("aria-expanded", "false");
+          toggle.onclick = (function (tgt, btn, bx, vdoc) {
+            return function () {
+              if (!bx.hidden) {
+                bx.hidden = true; btn.setAttribute("aria-expanded", "false");
+                delete NEARMISS_OPEN[tgt]; return;
+              }
+              bx.hidden = false; btn.setAttribute("aria-expanded", "true");
+              NEARMISS_OPEN[tgt] = NEARMISS_OPEN[tgt] || 0;
+              if (!bx.dataset.loaded) nearMissLoad(tgt, bx, 0, vdoc);
             };
-            itemRow.appendChild(dismiss);
-            var reassign = el("button", "vitals-act", "Reassign…");
-            reassign.onclick = function () {
-              pickVitalTarget("Reassign this document", vd.all_targets, t.target, function (to) {
-                // If the doc matches >1 vital category, ask whether to move all of
-                // them (global) or just this one (single); a single-category doc
-                // needs no prompt — the two scopes are identical.
-                var cats = vitalPathTargets(vd, it.path);
-                function send(scope) {
-                  doVerb("/api/vital/reassign",
-                    { id: it.id, to_target: to, scope: scope }, "Reassigned vital document")
-                    .then(function (x) { if (x) render(); });
-                }
-                if (cats.length > 1) { pickScope(cats.length, send); } else { send("single"); }
-              });
-            };
-            itemRow.appendChild(reassign);
-          }
-          items.appendChild(itemRow);
-        });
-        row.appendChild(items);
-      } else {
-        row.appendChild(el("div", "vitals-none", "Not found in this collection."));
+          })(t.target, toggle, box, vd);
+          var foot = el("div", "vdetail-foot");
+          foot.appendChild(toggle);
+          // No per-row cap chip. It used to repeat "SHOWING THE TOP 25 — MORE MAY
+          // EXIST" on all 27 rows, in capitals, which turned the one thing it had
+          // to say — these lists are truncated — into furniture nobody reads. The
+          // state bar says it once, with the real total attached.
+          detail.appendChild(foot);
+          detail.appendChild(box);
+        }
       }
-      rows.appendChild(row);
+
+      function setOpen(on) {
+        detail.hidden = !on;
+        tr.classList.toggle("open", on);
+        caret.textContent = on ? "▾" : "▸";
+        tr.setAttribute("aria-expanded", String(on));
+        if (on) build();
+      }
+      tr.onclick = function () { setOpen(detail.hidden); };
+      keyable(tr, "button", t.label);
+
+      // Re-open a type the examiner was working in before this render, and put it
+      // back in front of them — the panel is rebuilt from the top on every verb.
+      if (NEARMISS_OPEN[t.target] != null) {
+        setOpen(true);
+        var bx = detail.querySelector(".vcand-drawer");
+        var bt = detail.querySelector(".vcand");
+        if (bx && bt) {
+          bx.hidden = false; bt.setAttribute("aria-expanded", "true");
+          nearMissLoad(t.target, bx, 0, vd, NEARMISS_OPEN[t.target]);
+        }
+        scrollBackTo(tr);
+      }
     });
-    panel.appendChild(rows);
+
+    panel.appendChild(tbl);
     main.appendChild(panel);
   }
 
   P.documents = function (main, data) {
     var index = data.index || [];
     var controls = head(main, "Documents", "Documents", num(data.total || 0) + " documents.");
+    // The lead used to be written once, from the seed payload, and never touched
+    // again — so filtering to medical (86) left the heading claiming 4,643. The
+    // pager knows the filtered total; let it say so.
+    var leadEl = main.querySelector(".pagehead .lead");
+    function setLead(total, cat, sub) {
+      if (!leadEl) return;
+      var what = pretty(sub || cat || "");
+      leadEl.textContent = num(total || 0) + (what ? " " + what : "") + " document"
+        + (total === 1 ? "" : "s") + (what ? "" : ".");
+    }
     vitalDocsPanel(main, data.vital_docs);  // G-2 checklist at the top of Documents
     // Category dropdown + (financial) sub-category dropdown in the sticky controls (#9).
     // Both are SERVER filters now (applied before the page slice) so a category's
@@ -3619,7 +3760,11 @@
     var holder = el("div"); main.appendChild(holder);
     var pg = pager("/api/documents", {
       getParams: function () { return { cat: selCat.value, subcat: selSub.value }; },
-      render: function (all) { holder.innerHTML = ""; fileTable(holder, all); },
+      render: function (all, total) {
+        holder.innerHTML = "";
+        fileTable(holder, all);
+        setLead(total, selCat.value, selSub.value);
+      },
     });
     main.appendChild(pg.footer);
     selCat.onchange = function () {

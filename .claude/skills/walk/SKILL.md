@@ -74,6 +74,19 @@ check every time:
   to an album asked a question; a large unrelated photograph on top of the answer is an
   obstacle. Load `/photos?scene=wedding` and confirm there is no hero.
 
+**Documents** opens with the vital-document state: four numbers (types with a candidate /
+signed off / undecided / near-misses unreviewed), then one row per document type sorted by what
+is still waiting on you. Check:
+- The state bar must show all four numbers, not just "14 of 27". A single number there reads as
+  a score and hides the 1,300-odd decisions the release gate is actually waiting on.
+- Expanding a type must show one candidate per row, and each row must say where the pipeline
+  filed that document ("The pipeline filed this under Legal · court filing"). That line is the
+  only evidence a reviewer gets; without it people sign off divorce judgments as marriage
+  certificates, which is exactly what happened in 813_mf.
+- Expanding a not-found type must still open the near-miss review drawer, with its checkboxes
+  and batch bar intact — that machinery is the review surface and was deliberately left alone.
+- Filter to a category and the heading must follow ("86 medical documents", not "4,643").
+
 ### The three that break quietly
 
 - **Filter changes.** On a drilled-into view, change a dropdown. Every filter control calls
