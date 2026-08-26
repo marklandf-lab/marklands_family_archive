@@ -237,6 +237,32 @@ a { color: var(--accent); }
 .backlink { display: inline-block; margin: 4px 0 12px; color: var(--accent); text-decoration: none; font-size: 13px; }
 .backlink:hover { text-decoration: underline; }
 
+/* ── breadcrumb trail (N-1) ──
+   The route the visitor actually walked, every level clickable. Sits above the
+   sticky .pagehead. Long labels (email subjects, album titles) are the norm, so
+   the list wraps rather than truncating: a crumb the visitor cannot read is a
+   crumb they will not click, and this is the only way back on most of these views. */
+.crumbs { margin: 2px 0 10px; font-size: 13px; }
+.crumblist { list-style: none; display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: 2px 0; margin: 0; padding: 0; }
+.crumb { display: inline-flex; align-items: baseline; min-width: 0; }
+/* The separator is generated, so it never lands before the first crumb and is not
+   selectable as text when the trail is copied. */
+.crumb + .crumb::before { content: "›"; color: var(--muted); padding: 0 7px; }
+.crumb a { color: var(--muted); text-decoration: none; border-radius: 4px;
+  padding: 1px 3px; max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; display: inline-block; vertical-align: bottom; }
+.crumb a:hover { color: var(--accent); text-decoration: underline; }
+.crumb a:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.crumb.current { color: var(--head); font-weight: 600; max-width: 48ch;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 700px) {
+  /* On a narrow screen the middle of a long trail is the least useful part —
+     keep the top level (where you started) and the tail (where you are). */
+  .crumb a { max-width: 18ch; }
+  .crumb.current { max-width: 100%; white-space: normal; }
+}
+
 /* filter bar (Photos) */
 .filterbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 14px 0; }
 .filterbar select { padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font: inherit; }

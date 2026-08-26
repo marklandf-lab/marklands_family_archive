@@ -54,14 +54,14 @@ for one is what makes this skill stall.
 6. **Check for an existing PR** (via `gh`)
    ```bash
    BR="$(git branch --show-current)"
-   gh pr list --repo WyeastCorp/mac_family_archive --head "$BR" --state open --json number,url --jq '.[0].url'
+   gh pr list --repo marklandf-lab/marklands_family_archive --head "$BR" --state open --json number,url --jq '.[0].url'
    ```
    - If that prints a URL: an open PR already exists — report it and stop. The new commits are already in it.
    - If it prints nothing: create one (step 7).
 
 7. **Create a PR** (only if none exists)
    ```bash
-   gh pr create --repo WyeastCorp/mac_family_archive --base main --head "$BR" \
+   gh pr create --repo marklandf-lab/marklands_family_archive --base main --head "$BR" \
      --title "<short title, under 70 chars>" \
      --body "$(cat <<'EOF'
    ## Summary
@@ -78,6 +78,10 @@ for one is what makes this skill stall.
 
 ## Context
 
-- Repo: `WyeastCorp/mac_family_archive; default branch `main`. GitHub auth: `gh auth status`.
+- Repo: `marklandf-lab/marklands_family_archive` (this fork — remote `origin`); default branch `main`.
+  GitHub auth: `gh auth status`.
+- The `wyeast` remote is Wyeast's own `WyeastCorp/mac_family_archive`, which this repo is forked
+  FROM. Never open a PR against it: this fork exists for UI experiments that are not upstream's to
+  review. Every `gh` call here names the fork explicitly for that reason.
 - Primary development branch pattern: `claude/...`. Never push to `main` directly.
 - Use `gh` for every GitHub call (PR list/create, issues, API). No MCP, no ToolSearch.

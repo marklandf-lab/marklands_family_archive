@@ -122,6 +122,28 @@ if [[ -f "$SRC/tests/unit/test_config.py" ]]; then
   rm -f tests/unit/test_config.py   # imports wyeast.core.registry; not carried
 fi
 
+# ── local UI work that the copy above just destroyed ─────────────────────────
+# report_assets/ is replaced wholesale (rm -rf + cp -r), so anything this fork
+# added to the family UI is gone at this point. This fork exists to experiment
+# with that UI, so that is not a rare case — it is the normal case, and a silent
+# revert would hand the user back the exact navigation bug they asked to have
+# fixed. Fail loudly instead: the sync is still done, but the operator is told
+# what to re-apply, by name, before shipping.
+echo
+MISSING=()
+grep -q "nextTrail" report_assets/family/family.js 2>/dev/null || MISSING+=("breadcrumb trail engine (family.js: urlFor/nextTrail/breadcrumb)")
+grep -q "crumblist" report_assets/family/family.css 2>/dev/null || MISSING+=("breadcrumb styles (family.css: .crumbs/.crumblist)")
+if (( ${#MISSING[@]} )); then
+  echo "!! ================================================================"
+  echo "!! THIS FORK'S UI WORK WAS JUST OVERWRITTEN by the upstream copy:"
+  for m in "${MISSING[@]}"; do echo "!!   - $m"; done
+  echo "!!"
+  echo "!! Re-apply it before shipping, or the navigation bug it fixed is back."
+  echo "!! Recover from git:  git checkout HEAD -- report_assets/family/"
+  echo "!! Then re-check:     /walk   (.claude/skills/walk/SKILL.md)"
+  echo "!! ================================================================"
+fi
+
 echo
 echo "==> upstream commit"
 (cd "$SRC" && git rev-parse HEAD 2>/dev/null || echo "(not a git checkout)")
