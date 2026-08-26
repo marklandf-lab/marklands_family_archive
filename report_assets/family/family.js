@@ -192,20 +192,152 @@
     return "doc";
   }
 
+  // ── breadcrumbs: the navigation trail (N-1) ──────────────────────────────
+  // Every drill-down carries a `from` param holding the crumbs BEHIND it, as a
+  // flat JSON list [{l: label, u: "/path?query"}, ...], oldest first.
+  //
+  // Flat, not nested. The obvious design embeds each parent URL inside its
+  // child's `from`, which re-percent-encodes the entire chain at every hop
+  // (`%` -> `%25` -> `%2525`); four levels deep ran past 2 KB of URL for a
+  // three-word trail. A flat list costs exactly one encode no matter how deep.
+  //
+  // A crumb's `u` deliberately OMITS its own `from`. Clicking crumb i rebuilds
+  // the trail as trail.slice(0, i), so going back up re-enters that view with
+  // precisely the history that led to it and never with a stale tail behind it.
+  //
+  // The trail is the *path you walked*, not a fixed tree: arriving at Emails
+  // from Correspondents and arriving from Search are different trails, and both
+  // are truthful. Landing cold on a URL with no `from` yields no crumbs at all,
+  // which is why backLink() still carries its old single-link fallback.
+  var TRAIL_MAX = 6;   // deepest trail kept; older crumbs fall off the front
+
+  // The label for the CURRENT view. Pages that render a *filtered* view (Emails
+  // narrowed to one correspondent, Photos narrowed to one album) overwrite this
+  // so the crumb they leave behind says "Alex Rendon" and not just "Emails".
+  // render() resets it, so a page that forgets falls back to its nav label.
+  var CRUMB = { label: null, node: null };
+  // Pages call this while rendering — often after an async fetch resolves, by which
+  // time the trail is already on screen — so it updates the live tail node too.
+  function setCrumb(label) {
+    if (!label) return;
+    CRUMB.label = String(label);
+    if (CRUMB.node) CRUMB.node.textContent = CRUMB.label;
+  }
+
+  function navLabel(page) {
+    var hit = (CTX.nav || []).filter(function (n) { return n.key === page; })[0];
+    return hit ? hit.label : pretty(String(page || "overview"));
+  }
+  // Three sources, most-specific first:
+  //   CRUMB.label  the page named itself while rendering (it knows the most)
+  //   Q.crumb      the link that sent us here named us — go(t, {label: ...}).
+  //                The referrer usually holds the only human name available:
+  //                /emails?participant=a.rendon@example.com can render a
+  //                truthful crumb from the address, but only the correspondent
+  //                card it was clicked from knows that address is "Alex Rendon".
+  //   navLabel     the section name from the rail ("Emails")
+  function crumbLabel() { return CRUMB.label || Q.crumb || navLabel(CTX.page); }
+
+  // This view's own URL, without its `from` — what a child stores as a crumb.
+  function bareURL() {
+    var saved = Q.from;
+    delete Q.from;
+    var u = encodeURL();
+    if (saved != null) Q.from = saved;
+    return u;
+  }
+
+  // Same-view test. urlFor() and encodeURL() emit their params in different
+  // orders (each has its own hand-maintained list), so a raw string compare
+  // reported two spellings of one view as different places — and the cycle guard
+  // that depends on it silently stopped guarding. Sort the params, drop `from`
+  // (the trail is the thing being compared, not part of the identity).
+  function canonURL(u) {
+    u = String(u || "");
+    var i = u.indexOf("?");
+    if (i < 0) return u;
+    var path = u.slice(0, i);
+    var parts = u.slice(i + 1).split("&").filter(function (kv) {
+      return kv && kv.split("=")[0] !== "from";
+    });
+    parts.sort();
+    return path + (parts.length ? "?" + parts.join("&") : "");
+  }
+
+  function parseTrail(raw) {
+    if (!raw) return [];
+    var t;
+    try { t = JSON.parse(raw); } catch (e) { return []; }   // tampered/truncated -> no crumbs
+    if (!Array.isArray(t)) return [];
+    return t.filter(function (c) {
+      // Only same-origin absolute paths. A crumb is rendered as an href, so a
+      // "//evil.example" or "javascript:" u would be an open redirect straight
+      // out of the estate viewer.
+      return c && typeof c.l === "string" && typeof c.u === "string" &&
+             c.u.charAt(0) === "/" && c.u.charAt(1) !== "/";
+    }).slice(-TRAIL_MAX);
+  }
+  function trailParam(trail) {
+    return trail && trail.length ? "from=" + encodeURIComponent(JSON.stringify(trail)) : "";
+  }
+
+  // The trail a child of the current view should carry. Appends this view as a
+  // crumb — unless this view is ALREADY in the trail, in which case the trail is
+  // truncated back to it. Without that, Correspondents -> Emails -> a
+  // correspondent -> Emails walks a cycle that grows the trail forever.
+  function nextTrail(replace) {
+    var trail = parseTrail(Q.from);
+    var here = { l: crumbLabel(), u: bareURL() };
+    var hereKey = canonURL(here.u);
+    for (var i = 0; i < trail.length; i++) {
+      if (canonURL(trail[i].u) === hereKey) return trail.slice(0, i + 1);
+    }
+    if (replace) return trail;          // sibling move: stand in for the current crumb
+    trail = trail.concat([here]);
+    return trail.slice(-TRAIL_MAX);
+  }
+
   // Navigate to a click-through target {page, person_id?, scene?, place?, thread_id?,
   // conversation?, open?, file?}.
-  function go(target) {
+  // `opts.replace` marks a SIBLING move (clearing a filter, switching tabs): the
+  // current view stands in for itself rather than becoming another crumb.
+  // `opts.trail: false` resets the trail — for a jump that is genuinely a fresh
+  // start rather than a step deeper.
+  function go(target, opts) {
     if (!target) return;
     if (target.open && target.file) { lightbox(target.file, mediaKind(target.file)); return; }  // inline, not a new tab (#16)
+    location.href = urlFor(target, opts);
+  }
+
+  // The URL a click-through target resolves to, trail included. Split out of go()
+  // so a real <a href> carries the same crumbs a scripted navigation does —
+  // otherwise middle-clicking "Open album" opened a tab with no way back, and the
+  // two paths to the same view disagreed about where the visitor had been.
+  function urlFor(target, opts) {
+    opts = opts || {};
     var url = "/" + (target.page || "overview"), q = [];
     ["person", "scene", "place", "event", "thread", "conversation", "venue", "tab",
      "media", "vperson", "vscene", "favorite_curation", "collection_curation", "people",
-     "rec"].forEach(function (k) {
+     "participant", "cat", "subcat", "album", "favorite", "date_from", "date_to",
+     "q", "otd", "group", "target", "list", "rec"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
+    // The destination's own crumb name, supplied by whoever linked to it.
+    if (opts.label) q.push("crumb=" + encodeURIComponent(String(opts.label)));
+    if (opts.trail !== false) {
+      // If the target is somewhere we have already been, this click is a step
+      // BACK up the trail, not a step deeper — drop everything past it.
+      var bare = canonURL(url + (q.length ? "?" + q.join("&") : ""));
+      var trail = nextTrail(opts.replace);
+      for (var i = 0; i < trail.length; i++) {
+        if (canonURL(trail[i].u) === bare) { trail = trail.slice(0, i); break; }
+      }
+      var tp = trailParam(trail);
+      if (tp) q.push(tp);
+    }
     if (q.length) url += "?" + q.join("&");
-    location.href = url;
+    return url;
   }
 
   // G-9: turn a /api/search record ({p:page, k:type, h:href}) into a go() target so
@@ -236,9 +368,15 @@
   // the URL via replaceState; the page fn reads it back from Q on the next render.
   function encodeURL() {
     var q = [];
+    // `from` (the breadcrumb trail) rides along here for a reason: setQ() rewrites
+    // the whole URL from this list on every filter change, so a param missing from
+    // it is DELETED the first time the user touches a dropdown. Leaving `from` out
+    // made the trail vanish the moment you sorted the list you had drilled into.
+    // It is last so the human-meaningful params stay readable in the address bar.
     ["person", "scene", "place", "event", "thread", "media", "cat", "subcat", "modality", "qcat",
      "album", "favorite", "hidden", "participant", "venue", "tab", "date_from", "date_to",
-     "vperson", "vscene", "favorite_curation", "collection_curation", "people"]
+     "vperson", "vscene", "favorite_curation", "collection_curation", "people", "q",
+     "group", "target", "list", "crumb", "from"]
       .forEach(function (k) { if (Q[k]) q.push(k + "=" + encodeURIComponent(Q[k])); });
     return location.pathname + (q.length ? "?" + q.join("&") : "");
   }
@@ -577,10 +715,49 @@
     return controls;
   }
 
+  // The way back. When the visitor walked here, render the whole trail so one
+  // click reaches ANY level above — that is the point of a breadcrumb over a
+  // back link, and it is what the single hardcoded "All emails" link could never
+  // do: it always jumped to the top of the section, discarding the correspondent
+  // (or album, or search) the visitor had drilled through to get here.
+  //
+  // With no trail (a bookmarked URL, a fresh tab, a reload of a deep link) there
+  // is no honest history to show, so the caller's original single link stands in.
+  // `label`/`target` are therefore still required at every call site.
   function backLink(main, label, target) {
+    // Walked here → render() already drew the full trail above the page head;
+    // a second "← All emails" underneath it would be redundant and, worse, would
+    // disagree with the crumbs about where "back" goes.
+    if (parseTrail(Q.from).length) return;
     var a = el("a", "backlink", "← " + esc(label));
-    a.href = "#"; a.onclick = function (e) { e.preventDefault(); go(target); };
+    a.href = "#"; a.onclick = function (e) { e.preventDefault(); go(target, { trail: false }); };
     main.appendChild(a);
+  }
+
+  // Render a crumb trail plus the current view as the (unlinked) tail. Crumb i
+  // links to its own URL carrying trail.slice(0, i) — the history that led to it.
+  // Real <a href>s, so middle-click/open-in-new-tab work and the destination
+  // shows in the status bar on hover.
+  function breadcrumb(main, trail) {
+    trail = trail || parseTrail(Q.from);
+    var nav = el("nav", "crumbs");
+    nav.setAttribute("aria-label", "Breadcrumb");
+    var ol = el("ol", "crumblist");
+    trail.forEach(function (c, i) {
+      var li = el("li", "crumb");
+      var a = el("a", null, esc(c.l));
+      var tp = trailParam(trail.slice(0, i));
+      a.href = c.u + (tp ? (c.u.indexOf("?") >= 0 ? "&" : "?") + tp : "");
+      li.appendChild(a);
+      ol.appendChild(li);
+    });
+    var here = el("li", "crumb current", esc(crumbLabel()));
+    here.setAttribute("aria-current", "page");
+    CRUMB.node = here;
+    ol.appendChild(here);
+    nav.appendChild(ol);
+    main.appendChild(nav);
+    return nav;
   }
 
   // ── targeted view updates ──
@@ -1574,7 +1751,8 @@
       chip.title = "Show videos with " + (p.name || p.person_id);
       chip.addEventListener("click", function (e) {
         e.stopPropagation();
-        go({ page: "photos", media: "videos", vperson: p.person_id });
+        go({ page: "photos", media: "videos", vperson: p.person_id },
+           { label: "Videos of " + (p.display_name || p.name || "this person") });
       });
       wrap.appendChild(chip);
     });
@@ -1583,7 +1761,7 @@
       chip.title = "Show " + pretty(s) + " videos";
       chip.addEventListener("click", function (e) {
         e.stopPropagation();
-        go({ page: "photos", media: "videos", vscene: s });
+        go({ page: "photos", media: "videos", vscene: s }, { label: "Videos · " + pretty(s) });
       });
       wrap.appendChild(chip);
     });
@@ -1775,77 +1953,295 @@
   // ── pages ──
   var P = {};
 
+  // ── overview ──────────────────────────────────────────────────────────────
+  // The front door is a TOOL, not a poster: search first, then everything the
+  // archive holds visible at once, with nothing that matters below the fold.
+  //
+  // What this replaced, and why: six count tiles rendered at 28px display serif
+  // — the loudest thing on the page — each linking to a section that is already
+  // in the left rail, permanently, four inches away. The screen spent its most
+  // valuable region restating the navigation, and the only section that exercises
+  // editorial judgment sat three screens down. Counts are inventory; inventory is
+  // what you check on visit forty, not visit one.
+  //
+  // Every number here comes off /api/overview, /api/places or /api/transparency.
+  // Nothing on this screen is derived by guesswork — if a figure is not in a
+  // payload it does not get printed.
+
+  // "imessage: Alex Rendon (+15035550178), Brian Okafor (+15035550179), owner"
+  //   → "Alex Rendon & Brian Okafor"
+  // The ranked-item label is the raw corpus handle: platform prefix, every
+  // participant, and their phone numbers. It is the least readable text in the
+  // archive and it was being shown, truncated mid-number, in the section that
+  // claims to say what matters most. Strip to the people; the platform and the
+  // digits tell a grieving family nothing they want.
+  function conversationLabel(raw) {
+    var s = String(raw || "");
+    var colon = s.indexOf(":");
+    if (colon > -1 && colon < 24) s = s.slice(colon + 1);          // drop "imessage:" / "whatsapp:"
+    var names = s.split(",").map(function (part) {
+      return part.replace(/\([^)]*\)/g, "").trim();                 // drop "(+15035551234)"
+    }).filter(function (n) { return n && n !== "owner"; });         // "owner" is the deceased
+    if (!names.length) return "Conversation";
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return names[0] + " & " + names[1];
+    // Name all three rather than "& 1 more" — eliding one person is longer than
+    // saying it and tells the reader strictly less.
+    if (names.length === 3) return names[0] + ", " + names[1] + " & " + names[2];
+    return names.slice(0, 2).join(", ") + " & " + (names.length - 2) + " more";
+  }
+
+  // Human words for the message-category slugs in case_config.json.
+  var CONV_CATEGORY = {
+    close_personal: "Family and close friends",
+    romantic: "Someone they loved",
+    logistics: "Day-to-day arrangements",
+    work: "Work",
+    transactional: "Services and appointments",
+    miscellaneous: "Messages"
+  };
+
+  // One row in Most significant. `signals` carries the only real counts the
+  // ranker exposes (photo_count for scenes and people, chunk_count for
+  // conversations) — so a row prints a count when there is one and stays silent
+  // when there is not, rather than inventing a plausible number.
+  function sigRow(r) {
+    var li = el("li", "sigrow");
+    var thumb = (r.thumbs && r.thumbs[0]) || r.thumb;
+    if (thumb) {
+      var im = el("img"); im.loading = "lazy"; im.src = thumbURL(thumb); im.alt = "";
+      li.appendChild(im);
+    } else {
+      li.appendChild(el("div", "sigph", typeIcon(r.type)));
+    }
+    var sg = r.signals || {}, label, sub;
+    if (r.type === "conversation") {
+      label = conversationLabel(r.label);
+      sub = CONV_CATEGORY[r.category] || "Messages";
+    } else if (r.type === "photo_cluster") {
+      label = r.label || r.person_id || "Person";
+      sub = sg.photo_count ? num(sg.photo_count) + " photographs" : "A face that recurs";
+      if (sg.cross_scene) sub += " · often at a " + pretty(sg.cross_scene);   // reads "· often at a wedding"
+    } else {
+      label = sentenceCase(r.label);
+      sub = sg.photo_count ? num(sg.photo_count) + " photographs" : "";
+    }
+    var body = el("div", "siglab", esc(label));
+    if (sub) body.appendChild(el("i", null, esc(sub)));
+    li.appendChild(body);
+
+    // Conversations carry no `target` from the ranker, so they cannot deep-link
+    // to their own transcript. Rather than render a card that looks clickable and
+    // does nothing, send them to Messages by name — an honest "it is in here".
+    var target = r.target || (r.type === "conversation" ? { page: "messages" } : null);
+    if (target) {
+      li.classList.add("clickable");
+      li.onclick = function (e) {
+        if (e.target.tagName !== "BUTTON") go(target, { label: label });
+      };
+      keyable(li, "button", label);
+    }
+    if (EXAMINER && r.key) {
+      // Was position:absolute over the label and printed straight through it on
+      // any card whose text reached the top-right corner. It is now a real
+      // flex child with its own column, revealed on hover or keyboard focus.
+      var dm = el("button", "sigdrop", "Remove");
+      dm.title = "Remove from Most Significant (keeps the item; ranking only)";
+      dm.onclick = function (e) {
+        e.stopPropagation();
+        doVerb("/api/demote", { key: r.key, label: r.label }, "Removed from Most Significant")
+          .then(function (x) { if (x) li.remove(); });
+      };
+      li.appendChild(dm);
+    }
+    return li;
+  }
+
+  function ovCard(parent, title, moreLabel, moreTarget) {
+    var card = el("section", "ovcard");
+    var h = el("div", "ovcard-h");
+    h.appendChild(el("h2", null, esc(title)));
+    if (moreLabel) {
+      var a = el("a", null, esc(moreLabel) + " →");
+      a.href = urlFor(moreTarget, { label: title });
+      h.appendChild(a);
+    }
+    card.appendChild(h);
+    parent.appendChild(card);
+    return card;
+  }
+
   P.overview = function (main, d) {
-    head(main, (d.case_id || "") + " · Family Archive", "The archive is sorted and waiting.",
-      "Everything we recovered, organized so you can find what matters.");
+    var c = d.counts || {};
     var g = d.export_gate || {};
     if (g.delivery_blocked) main.appendChild(el("div", "banner crit",
       "<strong>Delivery blocked.</strong> " + esc((g.reasons || []).join("; ")) + " — examiner review only."));
-    var c = d.counts || {}, tiles = el("div", "tiles");
-    [["photos", "Photos & Videos", "photos"], ["people", "People", "people"], ["places", "Places", "places"],
-     ["documents", "Documents", "documents"], ["emails", "Emails", "emails"],
-     ["audio", "Recordings", "recordings"]].forEach(function (p) {
-      var t = el("a", "tile"); t.href = "/" + p[2];
-      t.innerHTML = '<span class="n">' + num(c[p[0]]) + '</span><span class="l">' + p[1] + '</span>';
-      tiles.appendChild(t);
+
+    // ── search, first and largest ──
+    var find = el("form", "ovfind");
+    var fi = el("input", "ovfind-in");
+    fi.type = "search"; fi.name = "q"; fi.autocomplete = "off";
+    fi.placeholder = "Search every photo, email, document and recording…";
+    fi.setAttribute("aria-label", "Search the archive");
+    var fb = el("button", "ovfind-go", "Search"); fb.type = "submit";
+    find.appendChild(fi); find.appendChild(fb);
+    find.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var v = fi.value.trim();
+      if (v) go({ page: "search", q: v });
     });
-    main.appendChild(tiles);
-    onThisDayCard(main, d.on_this_day);   // G-8: photos taken on today's date, across years
-    transparencyCard(main);               // G-14: dedup/set-aside reassurance (numbers only)
-    var vd = d.vital_docs;
-    if (vd && vd.available) {  // G-2: compact vital-documents tally + type list
-      var vcard = el("section", "vitals-card");
-      var vhead = el("div", "vitals-card-head");
-      vhead.appendChild(el("h2", null, "Vital documents"));
-      vhead.appendChild(el("a", "vitals-more", "See all on Documents →")).href = "/documents";
-      vcard.appendChild(vhead);
-      vcard.appendChild(el("p", "vitals-tally",
-        esc(num(vd.found_count) + " of " + num(vd.total_count) + " key document types found")));
-      var vlist = el("ul", "vitals-list");
-      (vd.types || []).forEach(function (t) {
-        var li = el("li", "vitals-item " + (t.found ? "found" : "missing"));
-        li.innerHTML = '<span class="vmark">' + (t.found ? "✓" : "—") + '</span>' +
-          '<span class="vlabel">' + esc(t.label) + '</span>';
-        vlist.appendChild(li);
-      });
-      vcard.appendChild(vlist);
-      main.appendChild(vcard);
-    }
+    main.appendChild(find);
+    main.appendChild(el("p", "ovfind-hint",
+      "Search a name, a place, an account number, or a phrase you remember from a letter."));
+
+    var cols = el("div", "ovcols");
+    var left = el("div", "ovcol"), right = el("div", "ovcol");
+    cols.appendChild(left); cols.appendChild(right);
+    main.appendChild(cols);
+
+    // ── what is in the archive ──
+    var inv = ovCard(left, "What is in the archive");
+    var tbl = el("table", "ovtable");
+    var rows = [
+      ["Photos & videos", c.photos, c.videos ? num(c.videos) + " of them videos" : "", { page: "photos" }],
+      ["Emails", c.emails, "", { page: "emails" }],
+      ["Documents", c.documents,
+        (d.vital_docs && d.vital_docs.available)
+          ? num(d.vital_docs.found_count) + " of " + num(d.vital_docs.total_count) + " vital types found" : "",
+        { page: "documents" }],
+      ["Recordings", c.audio, "", { page: "recordings" }],
+      ["Messages", c.messages, "conversations", { page: "messages" }],
+      ["People", c.people, "recognised by face", { page: "people" }],
+      ["Places", c.places, "trips", { page: "places" }]
+    ];
+    rows.forEach(function (r) {
+      if (r[1] == null) return;
+      var tr = el("tr");
+      var td = el("td");
+      var a = el("a", "ovsec", esc(r[0]));
+      a.href = urlFor(r[3], { label: r[0] });
+      td.appendChild(a); tr.appendChild(td);
+      tr.appendChild(el("td", "ovwhat", esc(r[2] || "")));
+      tr.appendChild(el("td", "ovnum", num(r[1])));
+      tbl.appendChild(tr);
+    });
+    inv.appendChild(tbl);
+
+    // ── most significant ──
     if ((d.ranked_top || []).length) {
-      main.appendChild(el("h2", null, "Most significant"));
-      var box = el("div", "ranked");
-      d.ranked_top.slice(0, 18).forEach(function (r) {
-        var row = el("div", "rkcard" + (r.target ? " clickable" : ""));
-        var thumbs = r.thumbs && r.thumbs.length ? r.thumbs : (r.thumb ? [r.thumb] : []);
-        var media;
-        if (thumbs.length) {  // #5: 1 medium + up to 4 small previews
-          var small = thumbs.slice(1, 5).map(function (id) {
-            return '<img loading="lazy" src="' + thumbURL(id) + '">';
-          }).join("");
-          media = '<div class="rk-medium"><img loading="lazy" src="' + thumbURL(thumbs[0]) + '"></div>' +
-            (small ? '<div class="rk-small">' + small + "</div>" : "");
-        } else {
-          media = '<span class="ticon">' + typeIcon(r.type) + "</span>";  // doc/email/audio → icon
-        }
-        row.innerHTML = '<div class="rk-media">' + media + '</div><div class="rk-body">' +
-          '<div class="rk-label">' + esc(r.label || r.person_id || "item") + "</div>" +
-          '<span class="badge">' + esc(pretty(r.type)) + "</span></div>";
-        if (r.target) { row.onclick = function (e) { if (e.target.tagName !== "BUTTON") go(r.target); }; keyable(row, "button"); }
-        if (EXAMINER && r.key) {  // #12 demote (ranking only — not a discard)
-          var dm = el("button", "rk-demote", "Remove");
-          dm.title = "Remove from Most Significant (keeps the item; ranking only)";
-          dm.onclick = function (e) {
-            e.stopPropagation();
-            doVerb("/api/demote", { key: r.key, label: r.label }, "Removed from Most Significant")
-              .then(function (x) { if (x) row.remove(); });
-          };
-          row.appendChild(dm);
-        }
-        box.appendChild(row);
-      });
-      main.appendChild(box);
+      var sig = ovCard(left, "Most significant");
+      var ul = el("ul", "siglist");
+      d.ranked_top.slice(0, 8).forEach(function (r) { ul.appendChild(sigRow(r)); });
+      sig.appendChild(ul);
     }
+
+    // ── vital documents ──
+    var vd = d.vital_docs;
+    if (vd && vd.available) {
+      var vc = ovCard(right, "Vital documents", "Open Documents", { page: "documents" });
+      var pct = vd.total_count ? Math.round(vd.found_count / vd.total_count * 100) : 0;
+      var tal = el("p", "ovtally");
+      tal.innerHTML = "<b>" + num(vd.found_count) + " of " + num(vd.total_count) +
+        "</b> key document types found";
+      vc.appendChild(tal);
+      var meter = el("div", "ovmeter");
+      meter.setAttribute("role", "img");
+      meter.setAttribute("aria-label", pct + "% of key document types found");
+      var fill = el("i"); fill.style.width = pct + "%";     // CSSOM, not style="" (CSP)
+      meter.appendChild(fill); vc.appendChild(meter);
+      // "14 of 27 found", with a meter filled halfway, reads as "you are halfway
+      // done". It is not a measure of done — it says only that SOMETHING turned up
+      // for 14 types, not that anyone checked the something was right. Mostly
+      // nobody has. One line fixes the impression; the four-number breakdown stays
+      // on Documents, where working the queue actually happens. A summary should
+      // point at its detail, not restate it.
+      //
+      // The count comes off /api/guided (4 KB) rather than /api/documents (1.4 MB
+      // of document rows) — and it is the same figure the guided-review step and
+      // the release gate read, so this card cannot drift away from them.
+      if (EXAMINER) {
+        var unchecked = el("p", "ovunchecked");
+        vc.appendChild(unchecked);
+        getJSON("/api/guided").then(function (g) {
+          var step = ((g && g.steps) || []).filter(function (x) { return x.key === "vital_docs"; })[0];
+          var x = (step && step.extra) || {};
+          if (!x.unconfirmed) { unchecked.remove(); return; }   // nothing outstanding → say nothing
+          var a = el("a", null, esc("Nobody has checked " + num(x.unconfirmed) +
+                                    " of the documents behind them") + " →");
+          a.href = urlFor({ page: "review", group: "vital" }, { label: "Vital review" });
+          unchecked.appendChild(a);
+        }).catch(function () { unchecked.remove(); });
+      }
+      var missing = (vd.types || []).filter(function (t) { return !t.found; });
+      if (missing.length) {
+        vc.appendChild(el("p", "ovtally ovtally-sub", "Still missing"));
+        var chips = el("div", "ovchips");
+        missing.forEach(function (t) { chips.appendChild(el("span", null, esc(t.label))); });
+        vc.appendChild(chips);
+      }
+    }
+
+    // ── on this day ──
+    var od = d.on_this_day;
+    if (od && (od.years || []).length) {
+      var oc = ovCard(right, "On this day",
+        "All " + num(od.total_count || 0), { page: "photos", media: "" });
+      var oul = el("ul", "siglist");
+      var shown = 0;
+      (od.years || []).forEach(function (y) {
+        (y.photos || []).forEach(function (ph) {
+          if (shown >= 3) return;
+          shown++;
+          var li = el("li", "sigrow clickable");
+          var im = el("img"); im.loading = "lazy"; im.src = thumbURL(ph.id); im.alt = "";
+          li.appendChild(im);
+          // Name it by where it was taken, then by what it is. "IMG_0999" is a
+          // camera's filing reference, not a thing a person recognises — it was
+          // the fallback and it read as broken next to "Beverly Hills, California".
+          var place = prettyPlace(ph.place || "");
+          var scene = sentenceCase(ph.scene || "");
+          var body = el("div", "siglab", esc(place || scene || "Photograph"));
+          body.appendChild(el("i", null,
+            esc([fmtDay(ph.ts), (place && scene) ? scene : ""].filter(Boolean).join(" · "))));
+          li.appendChild(body);
+          li.onclick = function () { go({ open: true, file: ph.id }); };
+          keyable(li, "button", "Open photograph");
+          oul.appendChild(li);
+        });
+      });
+      oc.appendChild(oul);
+    }
+
+    // ── what was set aside ──
+    getJSON("/api/transparency").then(function (t) {
+      if (!t) return;
+      // Was: "11,022 group(s) of near-duplicate photos and 23,816 exact
+      // duplicate(s) were set aside". Parenthetical plurals are the tell that
+      // nobody read it aloud, and this is the one sentence on the page whose
+      // whole job is to be believed. Say why, not only what.
+      right.appendChild(el("p", "ovkept",
+        esc(num(t.exact_duplicates_removed || 0) + " exact copies and " +
+            num(t.near_duplicate_groups || 0) + " sets of near-identical photographs were set " +
+            "aside, so you would not scroll past the same picture nine times. Nothing was " +
+            "deleted — they are all still here.")));
+    }).catch(function () { });
   };
+
+  // "2025-08-26T21:09:53" → "26 August 2025". The archive is read by families,
+  // not by machines; ISO timestamps on a keepsake page read as a database dump.
+  var MONTHS = ["January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"];
+  // Scene and category labels arrive lowercase from the classifier
+  // ("birthday party"). Fine as a filter value, wrong as a heading.
+  function sentenceCase(v) {
+    v = pretty(String(v || ""));
+    return v ? v.charAt(0).toUpperCase() + v.slice(1) : "";
+  }
+  function fmtDay(ts) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ts || ""));
+    if (!m) return "";
+    return String(Number(m[3])) + " " + MONTHS[Number(m[2]) - 1] + " " + m[1];
+  }
 
   // Inline SVG type icons (no CDN — Zone-B safe) for ranked items without a thumb.
   function typeIcon(t) {
@@ -1853,13 +2249,106 @@
       document: '<path d="M6 2h8l4 4v16H6z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M14 2v4h4" fill="none" stroke="currentColor" stroke-width="1.6"/>',
       email: '<rect x="3" y="5" width="18" height="14" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4 6l8 6 8-6" fill="none" stroke="currentColor" stroke-width="1.6"/>',
       audio: '<path d="M9 18V7l9-2v11" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="7" cy="18" r="2.2" fill="currentColor"/><circle cx="16" cy="16" r="2.2" fill="currentColor"/>',
+      // A conversation with no thumbnail used to fall through to the default
+      // circle, which reads as a missing image rather than as "this is a chat".
+      conversation: '<path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>',
       scene: '<rect x="3" y="4" width="18" height="16" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8.5" cy="9.5" r="1.8" fill="currentColor"/><path d="M5 18l5-5 4 3 3-2 4 4" fill="none" stroke="currentColor" stroke-width="1.6"/>'
     };
     var body = p[t] || '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.6"/>';
     return '<svg viewBox="0 0 24 24" width="26" height="26">' + body + "</svg>";
   }
 
+  // ── the Photos & Videos opening ───────────────────────────────────────────
+  // The Overview is a tool; this page is a keepsake, and it opens like one — one
+  // photograph taken on today's date, full width, with the rest of that day's
+  // pictures across the years beneath it. The grid and its filters are unchanged
+  // and sit directly below.
+  //
+  // Only on the UNFILTERED page. Once a visitor has narrowed to an album, a
+  // person or a scene they have asked a question, and a large unrelated
+  // photograph on top of the answer is an obstacle. `heroSuppressed()` names
+  // every param that counts as a question.
+  //
+  // The hero degrades in one step: today's photographs if the archive has any,
+  // otherwise the single most recent photograph in it. Both come out of a real
+  // payload; if neither is available the page renders exactly as it did before.
+  function heroSuppressed() {
+    return !!(Q.event || Q.scene || Q.place || Q.album || Q.media || Q.cat ||
+              Q.vperson || Q.vscene || Q.favorite || Q.hidden || Q.date_from ||
+              Q.date_to || Q.favorite_curation || Q.collection_curation);
+  }
+
+  function photosHero(main, newestRow) {
+    if (heroSuppressed()) return;
+    var host = el("section", "phero");
+    main.appendChild(host);
+
+    function paint(photo, headline, stand, strip) {
+      var fig = el("div", "phero-fig");
+      var im = el("img"); im.src = mediaURL(photo.id); im.alt = ""; im.loading = "eager";
+      fig.appendChild(im);
+      fig.appendChild(el("div", "phero-veil"));
+      var say = el("div", "phero-say");
+      say.appendChild(el("div", "phero-when",
+        esc([fmtDay(photo.ts), prettyPlace(photo.place || "")].filter(Boolean).join(" · "))));
+      say.appendChild(el("h2", "phero-h", esc(headline)));
+      if (stand) say.appendChild(el("p", null, esc(stand)));
+      fig.appendChild(say);
+      fig.onclick = function () { go({ open: true, file: photo.id }); };
+      keyable(fig, "button", "Open this photograph");
+      host.appendChild(fig);
+
+      if (strip && strip.length) {
+        var row = el("div", "phero-strip");
+        strip.forEach(function (ph) {
+          var f = el("figure");
+          var i2 = el("img"); i2.loading = "lazy"; i2.src = thumbURL(ph.id); i2.alt = "";
+          f.appendChild(i2);
+          // Just the year here — the day and month are the same for every photo
+          // in this strip, which is the entire premise of "on this day".
+          f.appendChild(el("figcaption", null,
+            esc(fmtDay(ph.ts).replace(/^\d+\s\w+\s/, "") +
+                (ph.scene ? " · " + sentenceCase(ph.scene) : ""))));
+          f.onclick = function () { go({ open: true, file: ph.id }); };
+          keyable(f, "button", "Open photograph");
+          row.appendChild(f);
+        });
+        host.appendChild(row);
+      }
+    }
+
+    getJSON("/api/overview").then(function (d) {
+      var od = (d && d.on_this_day) || {}, years = od.years || [];
+      var all = [];
+      years.forEach(function (y) { (y.photos || []).forEach(function (ph) { all.push(ph); }); });
+      if (all.length) {
+        var span = years.length > 1
+          ? ("Across " + years.length + " years — " + years[years.length - 1].year + " to " + years[0].year + ".")
+          : "";
+        paint(all[0],
+          all.length === 1
+            ? "One photograph was taken on this day."
+            : num(all.length) + " photographs were taken on this day.",
+          span, all.slice(1, 9));
+        return;
+      }
+      if (newestRow) fallback();
+    }).catch(function () { if (newestRow) fallback(); });
+
+    function fallback() {
+      paint(newestRow, "The most recent photograph in the archive.", "", []);
+    }
+  }
+
   P.photos = function (main, data) {
+    // Before head(), deliberately. The filter controls render into the sticky
+    // .pagehead, so a hero appended afterwards sits BELOW them — which puts the
+    // working controls above the photograph and loses the whole point of the
+    // opening. Default sort is "newest", so row 0 of the seed payload is the
+    // archive's most recent photograph: the hero's fallback for a date with
+    // nothing on it. photosHero() appends its container synchronously and fills
+    // it when the fetch resolves, so document order holds.
+    photosHero(main, (data && data.rows && data.rows[0]) || null);
     var controls = head(main, "Photos & Videos", "Photos & Videos",
       "Filter, then select to export or discard.");
     // Curation: when a collection filter is active (?collection_curation=<slug>),
@@ -2201,7 +2690,8 @@
       // album_id rides the query via encodeURIComponent.
       var h = el("h2", "collcard-h");
       var titleLink = el("a", "collcard-hlink", esc(a.title || "Untitled album"));
-      titleLink.href = "/photos?event=" + encodeURIComponent(a.album_id);
+      titleLink.href = urlFor({ page: "photos", event: a.album_id },
+                              { label: a.title || "Untitled album" });
       h.appendChild(titleLink);
       card.appendChild(h);
       var meta = [a.place, a.date_range].filter(Boolean).join(" · ");
@@ -2213,7 +2703,9 @@
       if ((a.sample_ids || []).length) card.appendChild(thumbs);
       card.appendChild(el("p", "collcard-n", num(a.count) + " photo(s)"));
       var open = el("button", "btn", "Open album");
-      open.onclick = function () { go({ page: "photos", event: String(a.album_id) }); };
+      open.onclick = function () {
+        go({ page: "photos", event: String(a.album_id) }, { label: a.title || "Untitled album" });
+      };
       card.appendChild(open);
       grid.appendChild(card);
     });
@@ -2234,7 +2726,7 @@
     favCard.appendChild(el("p", "collcard-n", num(favN) + " starred item(s)"));
     var favTools = el("div", "collcard-tools");
     var favOpen = el("button", "btn", "Open");
-    favOpen.onclick = function () { go({ page: "photos", favorite_curation: "1" }); };
+    favOpen.onclick = function () { go({ page: "photos", favorite_curation: "1" }, { label: "Favorites" }); };
     var favExp = el("button", "btn", "Export Favorites");
     favExp.onclick = function () { exportCollection("favorites", "", "Favorites"); };
     favTools.appendChild(favOpen); favTools.appendChild(favExp);
@@ -2253,7 +2745,9 @@
       card.appendChild(el("p", "collcard-n", num(c.count) + " item(s)"));
       var tools = el("div", "collcard-tools");
       var open = el("button", "btn", "Open");
-      open.onclick = function () { go({ page: "photos", collection_curation: c.slug }); };
+      open.onclick = function () {
+        go({ page: "photos", collection_curation: c.slug }, { label: c.title || c.slug });
+      };
       tools.appendChild(open);
       var exp = el("button", "btn", "Export");
       exp.onclick = function () { exportCollection("curation_collection", c.slug, c.title); };
@@ -2400,7 +2894,11 @@
         num(r.photo_count) + " photos" + (r.video_count ? " · " + num(r.video_count) + " videos" : "") +
         "</span>" + (r.summary ? "<p>" + esc(r.summary) + "</p>" : "");
       p.appendChild(body);
-      p.onclick = function (e) { if (e.target.tagName !== "BUTTON") go({ page: "people", person: r.person_id, people: selPeople.value }); };
+      p.onclick = function (e) {
+        if (e.target.tagName !== "BUTTON")
+          go({ page: "people", person: r.person_id, people: selPeople.value },
+             { label: r.display_name || r.name || "Person" });
+      };
       keyable(p, "button", "View " + (r.name || "person"));
       if (EXAMINER) {
         var btn = el("button", "btn", r.named ? "Rename" : "Name this person");
@@ -2461,31 +2959,6 @@
     drawPeople();
   };
 
-  // G-8: "On this day" Overview module — today's month-day across years. Hidden
-  // when nothing matches (server sends total_count 0). Each year links to the
-  // gallery pre-filtered to that exact day (date_from == date_to).
-  function onThisDayCard(main, od) {
-    if (!od || !od.total_count) return;   // nothing on this day → don't render the card
-    var card = el("section", "otd-card");
-    var h = el("div", "otd-head");
-    h.appendChild(el("h2", null, "On this day"));
-    h.appendChild(el("span", "otd-sub",
-      esc(num(od.total_count) + " photo" + (od.total_count === 1 ? "" : "s") + " taken on this date")));
-    card.appendChild(h);
-    (od.years || []).forEach(function (yr) {
-      var row = el("div", "otd-year");
-      var link = el("a", "otd-yearlabel", esc(yr.year) + " · " + num(yr.count));
-      var day = yr.year + "-" + od.mmdd;   // YYYY-MM-DD for the day filter
-      link.href = "/photos?date_from=" + encodeURIComponent(day) + "&date_to=" + encodeURIComponent(day);
-      row.appendChild(link);
-      var strip = el("div", "otd-strip");
-      var ctx = { list: yr.photos };       // ←/→ pages within this year's set
-      (yr.photos || []).forEach(function (p) { strip.appendChild(photoCard(p, ctx)); });
-      row.appendChild(strip);
-      card.appendChild(row);
-    });
-    main.appendChild(card);
-  }
 
   // G-5: Timeline — chapter bands (collapsible) → event rows → capped photo strips.
   // Bands render collapsed; each band's events/photos DOM is built lazily on first
@@ -2603,6 +3076,7 @@
     if (Q.venue) {
       var v = venues.filter(function (x) { return x.venue_id === Q.venue; })[0];
       backLink(main, "All places", { page: "places", tab: "venues" });
+      setCrumb(v ? prettyPlace(v.name) : "Place");
       head(main, "Places", v ? prettyPlace(v.name) : "Place", "");
       if (!v) { main.appendChild(el("p", "notice", "That place is no longer available.")); return; }
       var vexp = el("button", "btn", "Export all from here");
@@ -2620,6 +3094,7 @@
     // Drill into one location's photos when ?place=NAME is present (#6).
     if (Q.place) {
       backLink(main, "All places", { page: "places" });
+      setCrumb(prettyPlace(Q.place));
       head(main, "Places", prettyPlace(Q.place), "");
       var exp = el("button", "btn", "Export all from here");
       exp.onclick = function () { exportCollection("place", Q.place, prettyPlace(Q.place)); };
@@ -2747,7 +3222,11 @@
         }
       }
       tr.appendChild(catTd);
-      tr.appendChild(el("td", null, esc(r.summary || "") + (r.preview ? '<div class="preview">' + esc(r.preview) + "</div>" : "")));
+      // The row used to print the summary AND ~200 characters of raw extracted
+      // text beneath it — "OMAHA NE 68103-2577 BD) Ameritrade °°?”…" — which
+      // roughly tripled row height and buried the one line written to be read.
+      // The full text is already in the lightbox; that is where it belongs.
+      tr.appendChild(el("td", null, esc(r.summary || "")));
       tbl.appendChild(tr);
     });
     // #27: on a narrow viewport this table (4 columns, one free-text) is wider
@@ -2888,13 +3367,20 @@
     } else if (r.thread_id) {
       var ta = el("a", "vcand-link", esc(r.thread_subject || "(no subject)"));
       ta.href = "#";
-      ta.onclick = function (e) { e.preventDefault(); go({ page: "emails", thread: r.thread_id }); };
+      ta.onclick = function (e) {
+        e.preventDefault();
+        go({ page: "emails", thread: r.thread_id }, { label: r.thread_subject || "(no subject)" });
+      };
       head.appendChild(ta);
       head.appendChild(el("span", "vitals-inemails", "in Emails"));
     } else if (r.conversation_id) {
       var ca = el("a", "vcand-link", esc(r.conversation_subject || "(conversation)"));
       ca.href = "#";
-      ca.onclick = function (e) { e.preventDefault(); go({ page: "messages", conversation: r.conversation_id }); };
+      ca.onclick = function (e) {
+        e.preventDefault();
+        go({ page: "messages", conversation: r.conversation_id },
+           { label: r.conversation_subject || "(conversation)" });
+      };
       head.appendChild(ca);
       head.appendChild(el("span", "vitals-inemails", "in Messages"));
     } else {
@@ -2959,29 +3445,149 @@
     return rowEl;
   }
 
-  // "cap reached" chip for a target whose retrieval hit vital_per_target_k: the
-  // near-miss list shown is a floor, and matching documents past the k-th were
-  // never retrieved. `title` carries the how-to-see-more (raise the knob, re-run
-  // embed) without cluttering the row. Examiner-only by the call sites' gating.
-  function vitalCapChip(k) {
-    // #19: "cap reached" is examiner-jargon for what is really just "there may
-    // be more" — plainer phrasing, same detail preserved in the hover title.
-    var chip = el("span", "vcap-chip",
-      k ? "showing the top " + num(k) + " — more may exist" : "more may exist");
-    chip.title = "The pipeline retrieved at most " + (k ? num(k) : "a fixed number") +
-      " candidates for this type; more may exist. Raise vital_per_target_k in " +
-      "case_config.json and re-run the embed stage to widen the search.";
-    return chip;
-  }
 
   // G-2: full vital-documents checklist — one row per searched-for document type,
   // ✓ found (deep-links to the doc[s]) or "not found in this collection". All
   // estate-derived text (labels, item names, tags) is escaped via esc().
+  // ── vital documents: where the estate stands (N-2) ────────────────────────
+  // Rebuilt from a wall of buttons into a statement of position.
+  //
+  // What it replaced: twenty-seven headings, each spilling its candidates inline
+  // as wrapping text, every one carrying Confirm / Not a vital document /
+  // Reassign… — about 538 buttons above a page named for 4,643 documents. Two
+  // documents routinely shared a line, so the gap inside a candidate's button
+  // group equalled the gap between groups and you could not see which control
+  // belonged to which file. The panel's only summary line, "14 of 27 key document
+  // types found", read as a finished score while 172 candidates sat undecided and
+  // 1,147 near-misses unreviewed — the exact work the release gate is waiting on.
+  //
+  // Two jobs live here and they are not the same job: reviewing candidates, and
+  // reading what review has already concluded. This screen is built for the
+  // second. It answers "where does this estate stand, and can I trust the
+  // answer?" — the per-item decision controls survive inside an expanded type,
+  // one row each, but they are no longer what the page is about.
+
+  // Where the PIPELINE filed a document, read out of its own delivered path:
+  // /output/documents/legal/court_filing/DISSOLUTION JUDGMENT.pdf → "legal · court filing"
+  //
+  // This is the evidence that was missing from every decision on the old screen.
+  // A reviewer looking at a filename alone signed off a divorce judgment as a
+  // marriage certificate, a will draft and a power of attorney as property deeds.
+  // The classifier had already disagreed with all three, in the path, on the
+  // client, for free. No claim is made about who is right — the two readings are
+  // simply shown side by side, which is all a human needs to catch it.
+  function filedUnder(path) {
+    var m = /\/output\/documents\/([^\/]+)(?:\/([^\/]+))?\/[^\/]+$/.exec(String(path || ""));
+    if (!m) return "";
+    return sentenceCase(m[1]) + (m[2] ? " · " + pretty(m[2]) : "");
+  }
+
+  function vitalStats(targets) {
+    var st = { types: targets.length, found: 0, signed: 0, undecided: 0, near: 0, capped: 0 };
+    targets.forEach(function (t) {
+      if (t.found) st.found++;
+      (t.items || []).forEach(function (it) { it.reviewed ? st.signed++ : st.undecided++; });
+      st.near += t.near_miss_count || 0;
+      if (t.near_miss_capped) st.capped++;
+    });
+    return st;
+  }
+
+  function vitalStat(bar, n, label, work, href) {
+    var d = el(href ? "a" : "div", "vstat" + (work ? " work" : "") + (href ? " go" : ""));
+    if (href) { d.href = href; d.title = "Open the review queue"; }
+    d.appendChild(el("b", null, esc(num(n))));
+    d.appendChild(el("span", null, esc(label)));
+    bar.appendChild(d);
+  }
+
+  // One candidate, one row. The old layout let these wrap inline like words.
+  function vitalItemRow(t, it, vd) {
+    var row = el("div", "vrow" + (it.reviewed ? " done" : ""));
+    var main_ = el("div", "vrow-main");
+    var label = it.name || it.thread_subject || it.conversation_subject || it.tag || "document";
+
+    var link;
+    if (it.file_id) {
+      link = el("a", "vrow-name", esc(label));
+      link.href = "#";
+      link.onclick = function (e) { e.preventDefault(); go({ open: true, file: it.file_id }); };
+    } else if (it.thread_id) {
+      link = el("a", "vrow-name", esc(it.thread_subject || "(no subject)"));
+      link.href = "#";
+      link.onclick = (function (tid, subj) {
+        return function (e) { e.preventDefault(); go({ page: "emails", thread: tid }, { label: subj }); };
+      })(it.thread_id, it.thread_subject || "(no subject)");
+    } else if (it.conversation_id) {
+      link = el("a", "vrow-name", esc(it.conversation_subject || "(conversation)"));
+      link.href = "#";
+      link.onclick = (function (cid, subj) {
+        return function (e) { e.preventDefault(); go({ page: "messages", conversation: cid }, { label: subj }); };
+      })(it.conversation_id, it.conversation_subject || "(conversation)");
+    } else {
+      link = el("span", "vrow-name", esc(label));
+    }
+    main_.appendChild(link);
+
+    // Provenance and decision state are EXAMINER vocabulary. "The pipeline filed
+    // this under Legal · court filing" is meaningless to a family, and "Not yet
+    // decided" on their own father's will reads as an alarm they cannot act on.
+    // audience.py's asymmetry applies here as everywhere: a leak on the family
+    // side fails open, so gate rather than reword.
+    var where = filedUnder(it.path || it.file_id);
+    var prov = it.thread_id ? "Found in an email"
+             : it.conversation_id ? "Found in a message thread"
+             : (EXAMINER && where) ? "The pipeline filed this under " + where
+             : "";
+    if (prov) main_.appendChild(el("div", "vrow-prov", esc(prov)));
+    row.appendChild(main_);
+
+    if (EXAMINER) {
+      var state = el("div", "vrow-state");
+      state.appendChild(el("span", "vpill " + (it.reviewed ? "yes" : "open"),
+        it.reviewed ? "Signed off" : "Not yet decided"));
+      row.appendChild(state);
+    }
+
+    if (EXAMINER) {
+      // Same three audited, reversible overlay verbs as before. What changed is
+      // their weight: Confirm was the only filled button in the group, first in
+      // reading order, repeated 172 times — the cheapest thing on screen to click,
+      // asking for a judgement the row gave no evidence for. Three equal buttons
+      // is the honest signal when the system genuinely does not know.
+      var acts = el("div", "vrow-acts");
+      if (!it.reviewed) {
+        var confirm = el("button", "vact", "Yes, this is it");
+        confirm.onclick = function () {
+          doVerb("/api/vital/confirm", { id: it.id }, "Signed off").then(function (x) { if (x) render(); });
+        };
+        acts.appendChild(confirm);
+      }
+      var dismiss = el("button", "vact", it.reviewed ? "Undo — not this" : "No");
+      dismiss.onclick = function () {
+        doVerb("/api/vital/dismiss", { id: it.id }, "Dismissed").then(function (x) { if (x) render(); });
+      };
+      acts.appendChild(dismiss);
+      var reassign = el("button", "vact", "Another type…");
+      reassign.onclick = function () {
+        pickVitalTarget("Reassign this document", vd.all_targets, t.target, function (to) {
+          var cats = vitalPathTargets(vd, it.path);
+          function send(scope) {
+            doVerb("/api/vital/reassign", { id: it.id, to_target: to, scope: scope }, "Reassigned")
+              .then(function (x) { if (x) render(); });
+          }
+          if (cats.length > 1) { pickScope(cats.length, send); } else { send("single"); }
+        });
+      };
+      acts.appendChild(reassign);
+      row.appendChild(acts);
+    }
+    return row;
+  }
+
   function vitalDocsPanel(main, vd) {
-    // #17: a promote/dismiss (single or batched) triggers a full render(), which
-    // rebuilds this panel from scratch — drop any selection state and floating
-    // bar left over from the PREVIOUS build so a stale #vselbar (bound to rows
-    // that no longer exist) never leaks into the new one.
+    // #17: a promote/dismiss triggers a full render(); drop selection state and
+    // any floating bar left over from the previous build.
     VITAL_SEL = {};
     var staleVBar = document.getElementById("vselbar"); if (staleVBar) staleVBar.remove();
     if (!vd) return;
@@ -2990,156 +3596,189 @@
       return;
     }
     if (!vd.available) return;
-    var panel = el("section", "vitals-panel");
-    panel.appendChild(el("h2", null, "Vital documents"));
-    panel.appendChild(el("p", "vitals-tally",
-      esc(num(vd.found_count) + " of " + num(vd.total_count) +
-          " key document types found in this collection.")));
-    var rows = el("div", "vitals-rows");
-    (vd.targets || []).forEach(function (t) {
-      var row = el("div", "vitals-row " + (t.found ? "found" : "missing"));
-      var rhead = el("div", "vitals-row-head");
-      rhead.innerHTML = '<span class="vmark">' + (t.found ? "✓" : "—") + '</span>' +
-        '<span class="vlabel">' + esc(t.label) + '</span>';
-      if (EXAMINER && t.near_miss_count) {  // near-miss hits, examiner-only
-        // Was a dead span: it stated a number and gave no way to look at it, so
-        // reviewing a near-miss meant opening vital_doc_candidates.json on the
-        // workstation by hand. Now it opens the list inline.
-        var drawer = el("div", "vcand-drawer");
-        drawer.hidden = true;
-        var toggle = el("button", "vcand",
-          num(t.near_miss_count) + " near-miss" + (t.near_miss_count === 1 ? "" : "es"));
-        toggle.setAttribute("aria-expanded", "false");
-        toggle.onclick = (function (tgt, btn, box, vdoc) {
-          return function () {
-            if (!box.hidden) {                       // collapse
-              box.hidden = true;
-              btn.setAttribute("aria-expanded", "false");
-              delete NEARMISS_OPEN[tgt];             // stay closed across renders
-              return;
-            }
-            box.hidden = false;
-            btn.setAttribute("aria-expanded", "true");
-            NEARMISS_OPEN[tgt] = NEARMISS_OPEN[tgt] || 0;
-            // vd carries all_targets, which the row's Reassign picker needs.
-            if (!box.dataset.loaded) nearMissLoad(tgt, box, 0, vdoc);
-          };
-        })(t.target, toggle, drawer, vd);
-        rhead.appendChild(toggle);
-        if (t.near_miss_capped) rhead.appendChild(vitalCapChip(vd.per_target_k));
-        row.appendChild(rhead);
-        row.appendChild(drawer);
-        // Re-open a drawer the examiner had open before this render, as deep as
-        // they had paged it. One request for `want` rows, not one per page — the
-        // server clamps to MAX_PAGE_LIMIT, past which the "Show more" button is
-        // still there to carry on.
-        if (NEARMISS_OPEN[t.target] != null) {
-          drawer.hidden = false;
-          toggle.setAttribute("aria-expanded", "true");
-          nearMissLoad(t.target, drawer, 0, vd, NEARMISS_OPEN[t.target]);
-          // The panel is rebuilt from the top, so the row they were working in
-          // may be off-screen now. Put it back in front of them.
-          scrollBackTo(row);
+
+    var targets = (vd.targets || []).slice();
+    var st = vitalStats(targets);
+    var panel = el("section", "vitals2");
+
+    var h = el("div", "vitals2-head");
+    h.appendChild(el("h2", null, "Vital documents"));
+    h.appendChild(el("p", "vitals2-lead",
+      esc(num(st.types) + " document types an estate needs, and where each one stands.")));
+    panel.appendChild(h);
+
+    // The state bar. The old panel had ONE number and it flattered: "14 of 27
+    // found" says nothing about whether anyone has looked. Four numbers, because
+    // four things are true at once and only one of them is a score.
+    var bar = el("div", "vstats");
+    vitalStat(bar, st.found, "types have a candidate");
+    if (EXAMINER) {
+      var queue = urlFor({ page: "review", group: "vital" }, { label: "Vital review" });
+      vitalStat(bar, st.signed, "signed off");
+      vitalStat(bar, st.undecided, "candidates undecided", st.undecided > 0,
+                st.undecided ? queue : null);
+      vitalStat(bar, st.near, "near-misses unreviewed", st.near > 0,
+                st.near ? queue : null);
+      var hint = el("p", "vstats-hint");
+      hint.textContent = (st.undecided || st.near)
+        ? "Nothing is released to the family until every one of those has a decision."
+          + (st.capped ? " Each list stops at " + num(vd.per_target_k || 25)
+              + " candidates, so " + num(st.near) + " is a floor, not a total." : "")
+        : "Every candidate and near-miss has a decision.";
+      bar.appendChild(hint);
+    }
+    panel.appendChild(bar);
+
+    // Sorted by what is waiting on you, not alphabetically: the types with
+    // undecided candidates first (most first), then the types already worked,
+    // then the ones nothing was found for. The old panel used the config's
+    // declaration order, which buried the 45-candidate types among the empties.
+    function rank(t) {
+      var open = (t.items || []).filter(function (i) { return !i.reviewed; }).length;
+      if (t.found && open) return [0, -open];
+      if (t.found) return [1, 0];
+      return [2, -(t.near_miss_count || 0)];
+    }
+    if (EXAMINER) {
+      targets.sort(function (a, b) {
+        var ra = rank(a), rb = rank(b);
+        return ra[0] - rb[0] || ra[1] - rb[1];
+      });
+    }
+
+    // The examiner grid carries four numeric columns, the family view one.
+    var tbl = el("div", "vtable" + (EXAMINER ? " ex" : ""));
+    var hd = el("div", "vtr vthead");
+    hd.appendChild(el("div", "vc-name", "Document type"));
+    hd.appendChild(el("div", "vc-n", "Candidates"));
+    if (EXAMINER) {
+      hd.appendChild(el("div", "vc-n", "Signed off"));
+      hd.appendChild(el("div", "vc-n", "Undecided"));
+      hd.appendChild(el("div", "vc-n", "Near-misses"));
+    }
+    tbl.appendChild(hd);
+
+    targets.forEach(function (t) {
+      var items = t.items || [];
+      var signed = items.filter(function (i) { return i.reviewed; }).length;
+      var open = items.length - signed;
+
+      var tr = el("div", "vtr" + (open ? " todo" : "") + (t.found ? "" : " none"));
+      var nameCell = el("div", "vc-name");
+      var caret = el("span", "vcaret", "▸");
+      nameCell.appendChild(caret);
+      nameCell.appendChild(el("span", "vdot " + (t.found ? "ok" : "no")));
+      nameCell.appendChild(el("span", "vlabel2", esc(t.label)));
+      tr.appendChild(nameCell);
+      tr.appendChild(el("div", "vc-n", items.length ? esc(num(items.length)) : "—"));
+      if (EXAMINER) {
+        tr.appendChild(el("div", "vc-n" + (signed ? "" : " nil"), signed ? esc(num(signed)) : "—"));
+        tr.appendChild(el("div", "vc-n" + (open ? " todo" : " nil"), open ? esc(num(open)) : "—"));
+        tr.appendChild(el("div", "vc-n" + (t.near_miss_count ? " todo" : " nil"),
+          t.near_miss_count ? esc(num(t.near_miss_count)) : "—"));
+      }
+
+      var detail = el("div", "vdetail");
+      detail.hidden = true;
+      tbl.appendChild(tr);
+      tbl.appendChild(detail);
+
+      var built = false;
+      function build() {
+        if (built) return;
+        built = true;
+        // The two jobs, side by side and clearly separated: work this type's
+        // candidates one at a time (the queue), or scan its weaker matches in
+        // place (the drawer, further down). Reading what has already been decided
+        // is this panel's own job and needs neither.
+        if (EXAMINER && (open || t.near_miss_count)) {
+          var goq = el("a", "vgo",
+            open ? "Review " + num(open) + " undecided" : "Work this type in the queue");
+          goq.href = urlFor({ page: "review", group: "vital", target: t.target },
+                            { label: t.label });
+          goq.onclick = function (e) { e.stopPropagation(); };
+          detail.appendChild(goq);
         }
-      } else {
-        // Retrieval can hit the cap even with no near-misses left to review (every
-        // hit already confirmed/dismissed) — the truncation still means more
-        // candidates may exist unretrieved, so flag it whether or not a drawer opened.
-        if (EXAMINER && t.near_miss_capped) rhead.appendChild(vitalCapChip(vd.per_target_k));
-        row.appendChild(rhead);
-      }
-      if (t.found) {
-        var items = el("div", "vitals-items");
-        (t.items || []).forEach(function (it) {
-          var label = it.name || it.tag || "document";
-          var itemRow = el("div", "vitals-item");
-          if (it.file_id) {
-            var a = el("a", "vitals-link", esc(label));
-            a.href = "#";
-            a.onclick = function (e) { e.preventDefault(); go({ open: true, file: it.file_id }); };
-            itemRow.appendChild(a);
-          } else if (it.thread_id) {
-            // Email-sourced vital doc: it lives in the Emails section, not the
-            // documents view, so deep-link into its conversation rather than
-            // printing a dead `message_43267.eml`. Prefer the conversation
-            // SUBJECT as the label — the .eml basename is meaningless to a family.
-            // "(no subject)" matches how the Emails list labels this same thread,
-            // so the row and its destination read alike.
-            var ta = el("a", "vitals-link", esc(it.thread_subject || "(no subject)"));
-            ta.href = "#";
-            ta.onclick = (function (tid) {
-              return function (e) { e.preventDefault(); go({ page: "emails", thread: tid }); };
-            })(it.thread_id);
-            itemRow.appendChild(ta);
-            itemRow.appendChild(el("span", "vitals-inemails", "in Emails"));
-          } else if (it.conversation_id) {
-            // Messages-equivalent of the email deep link above (#26): a vital doc
-            // sourced from a chat/SMS database chunk deep-links into Messages
-            // instead of printing a dead `chat.db#chunk=...` stub.
-            var ca = el("a", "vitals-link", esc(it.conversation_subject || "(conversation)"));
-            ca.href = "#";
-            ca.onclick = (function (cid) {
-              return function (e) { e.preventDefault(); go({ page: "messages", conversation: cid }); };
-            })(it.conversation_id);
-            itemRow.appendChild(ca);
-            itemRow.appendChild(el("span", "vitals-inemails", "in Messages"));
-          } else {
-            itemRow.appendChild(el("span", "vitals-noitem", esc(label)));
-          }
-          if (EXAMINER) {
-            // Examiner-only DECISIONS-OVERLAY actions (audited + reversible; the
-            // pipeline index vital_doc_confirmed.json is never touched). The vital-doc
-            // id contains a path — always pass it in the JSON BODY, never inline it.
-            // Confirm — the affirmative "yes, this is the document" the release gate
-            // requires (every vital item must be confirmed, dismissed, or reassigned).
-            if (it.reviewed) {
-              itemRow.appendChild(el("span", "vitals-reviewed", "✓ Confirmed"));
-            } else {
-              var confirm = el("button", "vitals-act primary", "Confirm");
-              confirm.onclick = function () {
-                doVerb("/api/vital/confirm", { id: it.id }, "Confirmed vital document")
-                  .then(function (x) { if (x) render(); });
-              };
-              itemRow.appendChild(confirm);
-            }
-            var dismiss = el("button", "vitals-act", "Not a vital document");
-            dismiss.onclick = function () {
-              doVerb("/api/vital/dismiss", { id: it.id }, "Dismissed vital match")
-                .then(function (x) { if (x) render(); });   // re-render Documents (fresh vital_docs)
+        if (items.length) {
+          items.forEach(function (it) { detail.appendChild(vitalItemRow(t, it, vd)); });
+        } else {
+          detail.appendChild(el("p", "vnone",
+            EXAMINER && t.near_miss_count
+              ? "Nothing matched well enough to be a candidate. "
+                + num(t.near_miss_count) + " weaker matches are listed below."
+              : "Nothing in this collection matched."));
+        }
+        if (EXAMINER && t.near_miss_count) {
+          // The existing near-miss drawer, unchanged — it is the REVIEW surface,
+          // and reviewing is the other job. It stays behind its own button here.
+          var box = el("div", "vcand-drawer");
+          box.hidden = true;
+          var toggle = el("button", "vcand",
+            "Review " + num(t.near_miss_count) + " near-miss" + (t.near_miss_count === 1 ? "" : "es"));
+          toggle.setAttribute("aria-expanded", "false");
+          toggle.onclick = (function (tgt, btn, bx, vdoc) {
+            return function () {
+              if (!bx.hidden) {
+                bx.hidden = true; btn.setAttribute("aria-expanded", "false");
+                delete NEARMISS_OPEN[tgt]; return;
+              }
+              bx.hidden = false; btn.setAttribute("aria-expanded", "true");
+              NEARMISS_OPEN[tgt] = NEARMISS_OPEN[tgt] || 0;
+              if (!bx.dataset.loaded) nearMissLoad(tgt, bx, 0, vdoc);
             };
-            itemRow.appendChild(dismiss);
-            var reassign = el("button", "vitals-act", "Reassign…");
-            reassign.onclick = function () {
-              pickVitalTarget("Reassign this document", vd.all_targets, t.target, function (to) {
-                // If the doc matches >1 vital category, ask whether to move all of
-                // them (global) or just this one (single); a single-category doc
-                // needs no prompt — the two scopes are identical.
-                var cats = vitalPathTargets(vd, it.path);
-                function send(scope) {
-                  doVerb("/api/vital/reassign",
-                    { id: it.id, to_target: to, scope: scope }, "Reassigned vital document")
-                    .then(function (x) { if (x) render(); });
-                }
-                if (cats.length > 1) { pickScope(cats.length, send); } else { send("single"); }
-              });
-            };
-            itemRow.appendChild(reassign);
-          }
-          items.appendChild(itemRow);
-        });
-        row.appendChild(items);
-      } else {
-        row.appendChild(el("div", "vitals-none", "Not found in this collection."));
+          })(t.target, toggle, box, vd);
+          var foot = el("div", "vdetail-foot");
+          foot.appendChild(toggle);
+          // No per-row cap chip. It used to repeat "SHOWING THE TOP 25 — MORE MAY
+          // EXIST" on all 27 rows, in capitals, which turned the one thing it had
+          // to say — these lists are truncated — into furniture nobody reads. The
+          // state bar says it once, with the real total attached.
+          detail.appendChild(foot);
+          detail.appendChild(box);
+        }
       }
-      rows.appendChild(row);
+
+      function setOpen(on) {
+        detail.hidden = !on;
+        tr.classList.toggle("open", on);
+        caret.textContent = on ? "▾" : "▸";
+        tr.setAttribute("aria-expanded", String(on));
+        if (on) build();
+      }
+      tr.onclick = function () { setOpen(detail.hidden); };
+      keyable(tr, "button", t.label);
+
+      // Re-open a type the examiner was working in before this render, and put it
+      // back in front of them — the panel is rebuilt from the top on every verb.
+      if (NEARMISS_OPEN[t.target] != null) {
+        setOpen(true);
+        var bx = detail.querySelector(".vcand-drawer");
+        var bt = detail.querySelector(".vcand");
+        if (bx && bt) {
+          bx.hidden = false; bt.setAttribute("aria-expanded", "true");
+          nearMissLoad(t.target, bx, 0, vd, NEARMISS_OPEN[t.target]);
+        }
+        scrollBackTo(tr);
+      }
     });
-    panel.appendChild(rows);
+
+    panel.appendChild(tbl);
     main.appendChild(panel);
   }
 
   P.documents = function (main, data) {
     var index = data.index || [];
     var controls = head(main, "Documents", "Documents", num(data.total || 0) + " documents.");
+    // The lead used to be written once, from the seed payload, and never touched
+    // again — so filtering to medical (86) left the heading claiming 4,643. The
+    // pager knows the filtered total; let it say so.
+    var leadEl = main.querySelector(".pagehead .lead");
+    function setLead(total, cat, sub) {
+      if (!leadEl) return;
+      var what = pretty(sub || cat || "");
+      leadEl.textContent = num(total || 0) + (what ? " " + what : "") + " document"
+        + (total === 1 ? "" : "s") + (what ? "" : ".");
+    }
     vitalDocsPanel(main, data.vital_docs);  // G-2 checklist at the top of Documents
     // Category dropdown + (financial) sub-category dropdown in the sticky controls (#9).
     // Both are SERVER filters now (applied before the page slice) so a category's
@@ -3161,7 +3800,11 @@
     var holder = el("div"); main.appendChild(holder);
     var pg = pager("/api/documents", {
       getParams: function () { return { cat: selCat.value, subcat: selSub.value }; },
-      render: function (all) { holder.innerHTML = ""; fileTable(holder, all); },
+      render: function (all, total) {
+        holder.innerHTML = "";
+        fileTable(holder, all);
+        setLead(total, selCat.value, selSub.value);
+      },
     });
     main.appendChild(pg.footer);
     selCat.onchange = function () {
@@ -3280,7 +3923,9 @@
           "</td><td class='preview clamp2'>" + recipients(r.participants) + "</td><td class='preview'>" +
           esc((r.date_last || "").slice(0, 10)) + "</td><td>" + num(r.message_count) + "</td>" +
           (EXAMINER ? "<td class='actcell'></td>" : "");
-        tr.onclick = function () { go({ page: "emails", thread: r.thread_id }); };
+        tr.onclick = function () {
+          go({ page: "emails", thread: r.thread_id }, { label: r.subject || "(no subject)" });
+        };
         keyable(tr, null);   // F-12
         if (EXAMINER) tr.lastChild.appendChild(emailDemoteBtn(r));
         tbl.appendChild(tr);
@@ -3376,6 +4021,7 @@
       backLink(main, "All emails", { page: "emails" });
       var holder = el("div", "reading emthread"); main.appendChild(holder);
       getJSON("/api/email/thread?id=" + encodeURIComponent(Q.thread)).then(function (t) {
+        setCrumb(t.subject || "(no subject)");
         var ctrls = head(holder, "Emails", t.subject || "(no subject)", (t.messages || []).length + " message(s).");
         if (EXAMINER) ctrls.appendChild(emailDemoteBtn({ thread_id: Q.thread, subject: t.subject, demoted: t.demoted }));
         drawThreadMessages(holder, t);
@@ -3386,13 +4032,14 @@
     // by clicking a correspondent card). The narrowing is SERVER-side (before the
     // page slice), so total reflects the filtered count and the tail is reachable.
     var participant = Q.participant || "";
+    if (participant) setCrumb(Q.crumb || ("Emails with " + participant));
     var lead = participant
       ? "Emails with " + participant + " — " + num((data && data.total) || 0) + " conversations."
       : num((data && data.total) || 0) + " conversations, grouped by significance.";
     var controls = head(main, "Emails", "Emails", lead);
     if (participant) {
       var clr = el("button", "btn chip", "✕ Clear filter");
-      clr.onclick = function () { location.href = "/emails"; };
+      clr.onclick = function () { go({ page: "emails" }, { replace: true }); };
       controls.appendChild(clr);
     }
     // #11: in-list search (subject/participant) + date range + sort — tens of
@@ -3482,7 +4129,9 @@
     bar.appendChild(sSeg); bar.appendChild(rSeg);
     card.appendChild(bar);
     card.appendChild(el("div", "cc-bal", "Sent " + num(sent) + " · Received " + num(received)));
-    card.onclick = function () { location.href = "/emails?participant=" + encodeURIComponent(addr); };
+    // The card is the only place that knows this address is "Alex Rendon",
+    // so it names the destination crumb; Emails itself only ever sees the address.
+    card.onclick = function () { go({ page: "emails", participant: addr }, { label: name }); };
     keyable(card, "button", "Correspondence with " + name);   // F-12
     return card;
   }
@@ -3689,7 +4338,10 @@
         "<td class='preview'>" + esc(when) + "</td>" +
         "<td>" + num(r.message_count) + "</td>" +
         "<td>" + (r.call_event_count ? num(r.call_event_count) : "") + "</td>";
-      tr.onclick = function () { location.href = "/messages?conversation=" + encodeURIComponent(r.conversation_id); };
+      tr.onclick = function () {
+        go({ page: "messages", conversation: r.conversation_id },
+           { label: conversationTitle(r) || "Conversation" });
+      };
       keyable(tr, null);   // F-12
       tbl.appendChild(tr);
     });
@@ -3704,6 +4356,7 @@
       var holder = el("div", "reading msgthread"); main.appendChild(holder);
       getJSON("/api/message/conversation?id=" + encodeURIComponent(Q.conversation)).then(function (c) {
         if (!c) { holder.appendChild(el("p", "notice", "This conversation could not be found.")); return; }
+        setCrumb(conversationTitle(c));
         head(holder, "Messages · " + pretty(c.platform || ""), conversationTitle(c),
           (c.messages || []).length + " message(s)" +
           ((c.call_events || []).length ? " · " + c.call_events.length + " call(s)" : "") + ".");
@@ -3740,6 +4393,7 @@
       var lead = [];
       if (d.duration != null) lead.push(clockTime(d.duration));
       if (d.language) lead.push(esc(pretty(String(d.language))));
+      setCrumb(cleanRecordingName(basename(file)));
       head(holder, "Recording", cleanRecordingName(basename(file)), lead.join(" · "));
 
       // Player — preload="metadata" on the OPENED detail (the LIST stays preload="none").
@@ -3820,7 +4474,8 @@
       // Open the seek-synced detail (transcript + click-to-seek).
       var open = el("button", "btn small", "Open transcript");
       open.onclick = function () {
-        location.href = "/recordings?rec=" + encodeURIComponent(r.file);
+        go({ page: "recordings", rec: r.file },
+           { label: cleanRecordingName(basename(r.file)) });
       };
       actrow.appendChild(open);
       var exp = el("button", "btn small", "Export");
@@ -3947,17 +4602,32 @@
   var PAGER_KEYHANDLER = null;   // module-side so a re-entry unbinds the old one
 
   function reviewPager(main, group) {
-    var title = group === "vital" ? "Vital documents — bulk review"
+    // ?target=<vital target key> scopes the queue to ONE document type. The
+    // endpoint takes only a group, so the filter is applied here — the payload is
+    // fetched whole either way (1,316 items on this case), so scoping client-side
+    // costs nothing and needs no change to a file that is mirrored from upstream.
+    var scope = (group === "vital" && Q.target) ? String(Q.target) : "";
+    var title = group === "vital" ? "Vital documents — review"
                                   : "Quarantine — bulk review";
-    head(main, "Examiner · Bulk review", title,
-      "One item at a time — pick an action; the queue advances.");
-    // Escape hatch back to the classic tabbed lists for this surface.
-    var esc0 = el("a", "act small", "List view");
-    esc0.href = group === "vital" ? "/documents" : "/review?group=quarantine&list=1";
+    // Prefer the human label the linking page passed us ("Will / testament") over
+    // sentence-casing the raw key ("Will testament"). Falls back when someone
+    // types the URL by hand.
+    if (scope) title = (Q.crumb || sentenceCase(scope)) + " — review";
+    head(main, "Examiner · Review", title,
+      "One at a time. Read it, decide, and the queue moves on.");
+    var esc0 = el("a", "act small", scope ? "← All vital documents" : "List view");
+    esc0.href = group === "vital"
+      ? (scope ? "/review?group=vital" : "/documents")
+      : "/review?group=quarantine&list=1";
     main.appendChild(esc0);
     var body = el("div", "pager"); main.appendChild(body);
     body.appendChild(el("p", "notice", "Loading…"));
     getJSON("/api/review-pager?group=" + encodeURIComponent(group)).then(function (d) {
+      if (scope) {
+        d = { group: d.group, all_targets: d.all_targets,
+              items: (d.items || []).filter(function (it) { return it.target === scope; }) };
+        d.total = d.items.length;
+      }
       buildPager(body, group, d);
     }).catch(function (e) {
       body.innerHTML = "";
@@ -4062,9 +4732,15 @@
     function renderVital(card, it) {
       var titleRow = el("div", "pvitalhead");
       titleRow.appendChild(el("span", "chip", esc(it.vqueue === "near_miss" ? "Near-miss" : "To confirm")));
-      if (it.target) titleRow.appendChild(el("span", "chip target", esc(pretty(it.target))));
+      if (it.target) titleRow.appendChild(el("span", "chip target", esc(sentenceCase(it.target))));
       card.appendChild(titleRow);
       card.appendChild(el("h2", "pname", esc(it.name || it.thread_subject || it.conversation_subject || "(unnamed)")));
+      // Where the CLASSIFIER put this document, from its own delivered path. The
+      // reviewer is being asked "is this a marriage certificate?" — knowing the
+      // pipeline filed it under legal/court_filing is the cheapest possible check
+      // against the wrong answer, and it is already on the client.
+      var pw = filedUnder(it.file_id);
+      if (pw) card.appendChild(el("div", "pfiled", esc("The pipeline filed this under " + pw)));
       if (it.vqueue === "near_miss") {
         if (it.disposition) card.appendChild(el("div", "pdisp",
           esc("Why it wasn't confirmed: " + pretty(it.disposition) +
@@ -5124,23 +5800,6 @@
     card.appendChild(box);
   }
 
-  // ── G-14 transparency panel (read-only) ──
-  // Overview card (both roles: numbers-only reassurance) + a Review subsection
-  // (examiner: suspense + significant-attachment noise). Fetched from /api/transparency,
-  // which gates the examiner-only detail server-side.
-  function transparencyCard(main) {
-    getJSON("/api/transparency").then(function (t) {
-      if (!t) return;
-      var card = el("section", "trust-card");
-      card.appendChild(el("h2", null, "What we set aside"));
-      var p = el("p", "trust-lead");
-      p.textContent = num(t.near_duplicate_groups || 0) +
-        " group(s) of near-duplicate photos and " + num(t.exact_duplicates_removed || 0) +
-        " exact duplicate(s) were set aside — nothing was deleted.";
-      card.appendChild(p);
-      main.appendChild(card);
-    }).catch(function () { });
-  }
   function transparencyReview(main) {
     if (!EXAMINER) return;
     getJSON("/api/transparency").then(function (t) {
@@ -5282,6 +5941,7 @@
   function kindLabel(k) { return KIND_LABEL[k] || (pretty(k) || "Other"); }
 
   P.search = function (main) {
+    if (Q.q) setCrumb("Search: " + Q.q);
     var q = Q.q || "";
     head(main, "Search", q ? "Results for “" + q + "”" : "Search the archive", "");
     // On-page search box (mirrors the rail; prefilled with the current query).
@@ -5327,7 +5987,12 @@
           snip.innerHTML = markSnippet(h.snippet || "");
           card.appendChild(snip);
           card.setAttribute("role", "button"); card.tabIndex = 0;
-          var open = function () { go(searchTarget({ p: h.page, k: h.kind, h: h.ref })); };
+          // The hit's own title names the destination crumb, so a search result
+          // opened from here reads "Search › Re: kombucha order" and one click
+          // returns to the result list with the query intact.
+          var open = function () {
+            go(searchTarget({ p: h.page, k: h.kind, h: h.ref }), { label: h.title || "(untitled)" });
+          };
           card.addEventListener("click", open);
           card.addEventListener("keydown", function (e) {
             if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
@@ -5419,7 +6084,14 @@
     document.body.classList.remove("selecting");  // exit any drag-select mode on nav/re-render
     destroyGrids();                               // drop stale virtual-grid scroll listeners
     VIEW.removeItems = null;                      // pages re-register their in-place hooks
+    CRUMB.label = null;                           // filtered views re-declare their crumb label
+    CRUMB.node = null;
     var main = shell();
+    // One central call, not one per page. Per-page breadcrumb calls are exactly how
+    // this app ended up with a back link on People and nothing at all on Events,
+    // Collections and the video views — every new page had to remember. Drawn from
+    // the URL's own trail, so a page that carries no trail shows nothing.
+    if (parseTrail(Q.from).length) breadcrumb(main);
     var page = CTX.page;
     var api = "/api/" + page;
     function loadSection() {

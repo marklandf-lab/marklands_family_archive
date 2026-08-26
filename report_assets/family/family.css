@@ -57,7 +57,7 @@ body[data-theme="atlas"] .rail .brand .mark, body[data-theme="atlas"] .rail .nav
 
 .main { flex: 1; min-width: 0; padding: 0 40px 90px; max-width: 1180px; }
 /* Section header stays visible while the content below scrolls (#6). */
-.pagehead { position: sticky; top: 0; z-index: 50; background: var(--bg); padding: 26px 0 12px; margin-bottom: 14px; border-bottom: 1px solid var(--line);
+.pagehead { position: sticky; top: 0; z-index: 50; background: var(--bg); padding: 24px 0 12px; margin-bottom: 16px; border-bottom: 1px solid var(--line);
   display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
 .pagehead-title { min-width: 0; }
 .pagehead .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -70,7 +70,7 @@ h2 { font-family: var(--serif); font-size: 20px; color: var(--head); margin: 30p
 .notice { background: var(--chip); border-left: 3px solid var(--accent); padding: 12px 16px; border-radius: 5px; }
 
 /* tiles */
-.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap: 13px; margin: 20px 0; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap: 12px; margin: 20px 0; }
 .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; text-decoration: none; color: var(--ink); }
 .tile:hover { border-color: var(--accent); }
 .tile .n { font-family: var(--serif); font-size: 28px; color: var(--head); display: block; }
@@ -217,7 +217,7 @@ a { color: var(--accent); }
 .tile.clickable:hover { border-color: var(--accent); }
 .tile.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 /* overview: ranked cards with multi-thumb/icon + demote (#5/#12) */
-.ranked { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+.ranked { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 .rkcard { position: relative; display: flex; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
 .rkcard.clickable { cursor: pointer; }
 .rkcard.clickable:hover { border-color: var(--accent); }
@@ -236,6 +236,32 @@ a { color: var(--accent); }
 .rk-demote:hover { background: var(--chip); color: var(--ink); }
 .backlink { display: inline-block; margin: 4px 0 12px; color: var(--accent); text-decoration: none; font-size: 13px; }
 .backlink:hover { text-decoration: underline; }
+
+/* ── breadcrumb trail (N-1) ──
+   The route the visitor actually walked, every level clickable. Sits above the
+   sticky .pagehead. Long labels (email subjects, album titles) are the norm, so
+   the list wraps rather than truncating: a crumb the visitor cannot read is a
+   crumb they will not click, and this is the only way back on most of these views. */
+.crumbs { margin: 2px 0 10px; font-size: 13px; }
+.crumblist { list-style: none; display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: 2px 0; margin: 0; padding: 0; }
+.crumb { display: inline-flex; align-items: baseline; min-width: 0; }
+/* The separator is generated, so it never lands before the first crumb and is not
+   selectable as text when the trail is copied. */
+.crumb + .crumb::before { content: "›"; color: var(--muted); padding: 0 7px; }
+.crumb a { color: var(--muted); text-decoration: none; border-radius: 4px;
+  padding: 1px 3px; max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; display: inline-block; vertical-align: bottom; }
+.crumb a:hover { color: var(--accent); text-decoration: underline; }
+.crumb a:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.crumb.current { color: var(--head); font-weight: 600; max-width: 48ch;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 700px) {
+  /* On a narrow screen the middle of a long trail is the least useful part —
+     keep the top level (where you started) and the tail (where you are). */
+  .crumb a { max-width: 18ch; }
+  .crumb.current { max-width: 100%; white-space: normal; }
+}
 
 /* filter bar (Photos) */
 .filterbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 14px 0; }
@@ -552,14 +578,12 @@ body.lb-open { overflow: hidden; }
   background: var(--chip); color: var(--muted); }
 .vlabel { font-weight: 600; }
 .vitals-row.missing .vlabel { font-weight: 500; color: var(--muted); }
-.vcand { margin-left: auto; font-family: var(--mono); font-size: 10px; letter-spacing: .06em;
-  text-transform: uppercase; color: var(--muted); }
-/* The near-miss count is a BUTTON that opens the review drawer (it used to be an
-   inert span stating a number the examiner had no way to act on). Reset the
-   button chrome so it still reads as the quiet marginal label it was. */
-button.vcand { background: none; border: 0; padding: 0; cursor: pointer;
-  text-decoration: underline dotted; text-underline-offset: 3px; }
-button.vcand:hover { color: var(--accent); }
+/* The near-miss toggle's old styling (mono, uppercase, borderless, a dotted
+   underline, and a hover that set brown text) lived here. It is now a pill,
+   styled near .vrow at the foot of this file. The hover rule in particular had
+   to go rather than be overridden: `button.vcand:hover` outranks `.vcand:hover`
+   on specificity, so it kept painting brown text on the pill's brown hover fill
+   and the label vanished when you moused over it. */
 .vcand-drawer { margin: 8px 0 0 28px; display: flex; flex-direction: column; gap: 8px; }
 .vcand-row { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
   background: var(--panel); }
@@ -780,3 +804,200 @@ body.selecting .jgrid .jcard, body.selecting .jgrid .jcard img { cursor: crossha
   .pcard .chip.danger, .pribbon-error { background: #3a2320; color: #e88; }
   .pnobytes { color: var(--muted); }
 }
+
+/* ── overview: the working index (B) ──
+   Replaces the six count tiles that used to open this page. Elevation does the
+   grouping now instead of hairline borders — with every surface at one
+   elevation the page could only signal importance with size, which is how a row
+   of counts ended up as the largest thing on screen. Two levels, no more. */
+:root { --lift: 0 1px 2px rgba(44,37,32,.04), 0 6px 18px -10px rgba(44,37,32,.14); }
+
+.ovfind { display: flex; gap: 12px; margin: 8px 0 8px; }
+.ovfind-in { flex: 1; min-width: 0; padding: 14px 16px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--panel); font: 16px var(--sans); color: inherit;
+  box-shadow: var(--lift); }
+.ovfind-in:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+.ovfind-go { padding: 14px 24px; border: 0; border-radius: 10px; background: var(--accent);
+  color: var(--accent-ink); font: 500 15px var(--sans); cursor: pointer; }
+.ovfind-hint { color: var(--muted); font-size: 14px; margin: 0 0 28px; }
+
+.ovcols { display: grid; grid-template-columns: 1.35fr 1fr; gap: 24px; align-items: start; }
+.ovcol { min-width: 0; }
+.ovcard { background: var(--panel); border-radius: 12px; box-shadow: var(--lift); padding: 20px 20px 16px; }
+.ovcard + .ovcard { margin-top: 16px; }
+.ovcard-h { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+.ovcard-h h2 { font-family: var(--serif); font-size: 17px; font-weight: 500; color: var(--head); margin: 0; }
+.ovcard-h a { font-size: 13px; color: var(--accent); text-decoration: none; white-space: nowrap; }
+.ovcard-h a:hover { text-decoration: underline; }
+
+.ovtable { width: 100%; border-collapse: collapse; font-size: 15px; }
+.ovtable td { padding: 8px 0; vertical-align: baseline; }
+.ovtable tr + tr td { border-top: 1px solid var(--line); }
+.ovsec { color: var(--ink); text-decoration: none; font-weight: 500; }
+.ovsec:hover { color: var(--accent); text-decoration: underline; }
+.ovwhat { color: var(--muted); font-size: 13px; text-align: right; }
+.ovnum { font-family: var(--mono); font-size: 14px; color: var(--head); text-align: right;
+  width: 76px; white-space: nowrap; }
+
+.ovtally { font-size: 14px; color: var(--muted); margin: 0 0 6px; }
+.ovtally b { color: var(--head); font-weight: 500; }
+.ovtally-sub { margin-top: 16px; }
+.ovmeter { height: 7px; border-radius: 4px; background: var(--chip); overflow: hidden; margin-bottom: 4px; }
+.ovmeter i { display: block; height: 100%; background: var(--accent); }
+.ovchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ovchips span { font-size: 12.5px; background: var(--chip); color: var(--ink);
+  padding: 3px 10px; border-radius: 20px; }
+.ovkept { font-size: 14px; color: var(--muted); margin: 16px 4px 0; }
+
+/* Most significant / On this day rows */
+.siglist { list-style: none; margin: 0; padding: 0; }
+.sigrow { display: flex; gap: 12px; align-items: center; padding: 8px 0; }
+.sigrow + .sigrow { border-top: 1px solid var(--line); }
+.sigrow.clickable { cursor: pointer; }
+.sigrow.clickable:hover .siglab { color: var(--accent); }
+.sigrow img, .sigph { width: 46px; height: 46px; border-radius: 8px; flex: none;
+  object-fit: cover; background: var(--chip); }
+.sigph { display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.siglab { font-size: 15px; color: var(--ink); flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.siglab i { display: block; font-style: normal; font-size: 13px; color: var(--muted); margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Was position:absolute over the card and printed through the label. A real
+   flex child now, so it can never overlap; hidden until hover/focus so a
+   destructive-sounding verb is not sitting on every row of a keepsake. */
+.sigdrop { flex: none; border: none; background: transparent; color: var(--muted);
+  font: 12px var(--sans); cursor: pointer; padding: 4px 8px; border-radius: 6px; visibility: hidden; }
+.sigrow:hover .sigdrop, .sigdrop:focus-visible { visibility: visible; }
+.sigdrop:hover { background: var(--chip); color: var(--ink); }
+
+/* ── photos & videos: the keepsake opening (A) ── */
+.phero { margin: 4px 0 28px; }
+.phero-fig { position: relative; height: 380px; border-radius: 12px; overflow: hidden;
+  cursor: pointer; box-shadow: var(--lift); background: var(--chip); }
+.phero-fig img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.phero-veil { position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(20,15,12,.05) 0%, rgba(20,15,12,.30) 45%, rgba(20,15,12,.78) 100%); }
+.phero-say { position: absolute; left: 32px; right: 32px; bottom: 26px; color: #fff; }
+/* Never grey-on-colour: these are tinted white, not var(--muted). */
+.phero-when { font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
+  text-transform: uppercase; color: rgba(255,255,255,.74); }
+.phero-h { font-family: var(--serif); font-size: 30px; font-weight: 400; line-height: 1.2;
+  letter-spacing: -.015em; color: #fff; margin: 8px 0 0; max-width: 24ch; }
+.phero-say p { margin: 6px 0 0; font-size: 15px; color: rgba(255,255,255,.82); max-width: 52ch; }
+.phero-fig:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.phero-strip { display: flex; gap: 12px; margin-top: 12px; overflow-x: auto; padding-bottom: 4px; }
+.phero-strip figure { flex: 0 0 148px; margin: 0; border-radius: 10px; overflow: hidden;
+  background: var(--panel); box-shadow: var(--lift); cursor: pointer; }
+.phero-strip img { width: 100%; height: 96px; object-fit: cover; display: block; }
+.phero-strip figcaption { font-size: 12px; color: var(--muted); padding: 6px 10px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.phero-strip figure:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (max-width: 900px) {
+  .ovcols { grid-template-columns: 1fr; }
+  .phero-fig { height: 260px; }
+  .phero-h { font-size: 23px; }
+}
+
+/* ── vital documents: where the estate stands (N-2) ──
+   Replaces .vitals-panel / .vitals-rows / .vitals-item, whose candidates flowed
+   inline and wrapped like text — two documents to a line, each with three
+   buttons, and the gap inside a group equal to the gap between groups. Every
+   candidate is a row now, and the actions have their own column. */
+.vitals2 { background: var(--panel); border-radius: 12px; box-shadow: var(--lift);
+  padding: 22px 24px; margin: 16px 0 24px; }
+.vitals2-head h2 { font-family: var(--serif); font-size: 19px; font-weight: 500;
+  color: var(--head); margin: 0; }
+.vitals2-lead { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
+
+.vstats { display: flex; gap: 32px; align-items: flex-start; flex-wrap: wrap; margin: 18px 0 20px; }
+.vstat b { display: block; font-family: var(--serif); font-size: 26px; font-weight: 500;
+  color: var(--head); line-height: 1.1; }
+.vstat span { font-size: 13px; color: var(--muted); }
+.vstat.work b { color: #a8681f; }
+.vstats-hint { font-size: 13px; color: var(--muted); max-width: 42ch; line-height: 1.5;
+  margin: 0 0 0 auto; }
+
+.vtable { border-top: 1px solid var(--line); }
+.vtr { display: grid; grid-template-columns: 1fr 96px; gap: 12px; align-items: center;
+  padding: 10px 4px; border-bottom: 1px solid var(--line); cursor: pointer; }
+/* Four numeric columns for the examiner, one for the family. Without this the
+   extra cells wrapped onto implicit grid rows and the table read as a stack. */
+.vtable.ex .vtr { grid-template-columns: 1fr 92px 88px 88px 104px; }
+.vtr.vthead { cursor: default; font-family: var(--mono); font-size: 10px; letter-spacing: .11em;
+  text-transform: uppercase; color: var(--muted); background: var(--chip); padding: 9px 8px;
+  border-radius: 6px 6px 0 0; border-bottom: 0; }
+.vtr:not(.vthead):hover { background: #fdfaf4; }
+.vtr.open { background: #fdf7f0; }
+.vc-name { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.vc-n { text-align: right; font-family: var(--mono); font-size: 13px; color: var(--head); }
+.vc-n.nil { color: #c3b9a6; }
+.vc-n.todo { color: #a8681f; font-weight: 500; }
+.vcaret { color: var(--muted); font-size: 11px; width: 10px; flex: none; }
+.vdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.vdot.ok { background: #5d7d4e; }
+.vdot.no { background: var(--panel); border: 1px solid #d8ccb6; }
+.vlabel2 { font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vdetail { padding: 4px 4px 14px 27px; border-bottom: 1px solid var(--line); }
+.vnone { font-size: 13.5px; color: var(--muted); padding: 8px 0; }
+.vdetail-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+/* one candidate, one row */
+.vrow { display: grid; grid-template-columns: 1fr auto auto; gap: 16px; align-items: center;
+  padding: 9px 0; }
+/* The family view carries neither the state pill nor the action column. */
+.vrow:not(:has(.vrow-state)):not(:has(.vrow-acts)) { grid-template-columns: 1fr; }
+.vrow + .vrow { border-top: 1px solid var(--line); }
+.vrow-main { min-width: 0; }
+.vrow-name { font-size: 14.5px; color: var(--ink); text-decoration: none;
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+a.vrow-name:hover { color: var(--accent); text-decoration: underline; }
+/* The evidence the old row never carried: where the classifier put it. */
+.vrow-prov { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.vrow-state { flex: none; }
+.vpill { font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; padding: 3px 9px;
+  border-radius: 12px; white-space: nowrap; }
+.vpill.yes { background: #eef2ea; color: #4f7042; }
+.vpill.open { background: var(--chip); color: #8a6a3a; }
+.vrow-acts { display: flex; gap: 6px; flex: none; }
+.vact { font: 13px var(--sans); border: 1px solid var(--line); background: var(--panel);
+  color: var(--ink); padding: 6px 12px; border-radius: 7px; cursor: pointer; white-space: nowrap; }
+.vact:hover { border-color: var(--accent); color: var(--accent); }
+/* Overrides the older .vcand (mono, uppercase, no chrome) further up this file.
+   text-transform and letter-spacing must be reset explicitly — `font:` does not
+   carry them, which is why this button still read "REVIEW 73 NEAR-MISSES". */
+.vcand, button.vcand { font: 500 13px var(--sans); text-transform: none; letter-spacing: 0;
+  border: 1px solid var(--accent); color: var(--accent); background: transparent;
+  padding: 6px 13px; border-radius: 16px; cursor: pointer; margin-left: 0; }
+.vcand:hover { background: var(--accent); color: var(--accent-ink); }
+
+@media (max-width: 860px) {
+  .vtr, .vtable.ex .vtr { grid-template-columns: 1fr 64px 64px; }
+  .vtable.ex .vtr > .vc-n:nth-child(n+4) { display: none; }
+  .vrow { grid-template-columns: 1fr; gap: 8px; }
+  .vrow-acts { flex-wrap: wrap; }
+}
+
+/* The two stats that represent WORK are links into the review queue. The panel
+   used to state 172 undecided and point nowhere — the tool for it lived on
+   /review?group=vital, which nothing in the app linked to. */
+a.vstat.go { text-decoration: none; color: inherit; border-radius: 8px;
+  padding: 4px 8px; margin: -4px -8px; display: block; }
+a.vstat.go:hover { background: var(--chip); }
+a.vstat.go:hover b { text-decoration: underline; }
+a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.vgo { display: inline-block; margin: 6px 0 12px; font: 500 13px var(--sans);
+  background: var(--accent); color: var(--accent-ink); text-decoration: none;
+  padding: 8px 16px; border-radius: 8px; }
+.vgo:hover { filter: brightness(1.08); }
+
+/* Provenance on the review card, matching the Documents rows. */
+.pfiled { font-size: 13px; color: var(--muted); margin: -2px 0 12px; }
+
+/* The one line that stops "14 of 27 found" reading as finished. Sits under the
+   meter, deliberately quieter than the tally above it — it is a correction to an
+   impression, not a second headline. */
+.ovunchecked { margin: 8px 0 0; font-size: 13.5px; }
+.ovunchecked a { color: var(--accent); text-decoration: none; }
+.ovunchecked a:hover { text-decoration: underline; }

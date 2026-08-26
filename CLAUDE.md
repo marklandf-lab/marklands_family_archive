@@ -139,6 +139,59 @@ as complete.
 - Tests build a real case tree on disk via `tests/unit/_case_fixture.py::make_case` (lifted from an
   upstream module outside this closure). Extend the fixture rather than mocking the filesystem.
 
+## What must never enter a commit
+
+**Never post user data or PII. Warn the user if any personally identifying data will be
+included in the repo.** Warn — do not quietly scrub and carry on. It is the user's data,
+the user's repo and the user's call; the job is to make sure they are the one making it,
+with the specific strings in front of them.
+
+The case tree is not the risk. It lives outside the checkout (`~/WyeastCases`), `.gitignore`
+blocks `/cases/`, and nothing case-shaped is tracked — so "will my data be committed?" has a
+reassuring answer, and it is the wrong question.
+
+The leak path that actually bites is **quotation**: real names, phone numbers, email addresses
+and document titles copied out of a live case into a code comment, a commit message, a PR body,
+or a doc, to illustrate the bug being fixed. That material is not in `.gitignore`'s reach, it is
+not "data" in the sense anyone means when they ask, and on a public repo it is permanent — a
+later commit that deletes the line leaves it readable in history forever.
+
+It has already happened here. `report_assets/family/family.js` carried two real contacts of the
+deceased and their live mobile numbers in an explanatory comment; those lines reached both
+`marklandf-lab/marklands_family_archive` and `WyeastCorp/mac_family_archive`, and predate this
+fork's UI work.
+
+So, when writing a comment, a commit message, a PR body or a doc in this repo:
+
+- **Never paste from the live case.** Use invented stand-ins — Alex Rendon, Alex Rendon,
+  `+15035550178`, `a.rendon@example.com`. An example teaches exactly as well with a fake name, and
+  `555-01xx` numbers are reserved for fiction precisely for this.
+- That covers **names, phone numbers, email addresses, street addresses, account numbers, and
+  document titles** that identify a real person or a real instrument. "A divorce judgment filed
+  under court_filing" is fine; the filename and the parties are not.
+- A case id (`813_mf`) is fine on its own — it names a case, not a person.
+- **Check before pushing, not after.** Grep the outgoing range, not just the working tree:
+  `git log origin/main..HEAD -p | grep -nEi "<the case's real surnames>|\+1[0-9]{10}|@[a-z0-9-]+\.(com|net|org)"`.
+  If something turns up, rebuild the branch so the string never enters a commit — adding a
+  scrub commit on top does not remove it from history.
+
+## This fork's purpose
+
+`origin` is `marklandf-lab/marklands_family_archive`, a fork of `WyeastCorp/mac_family_archive`
+(remote `wyeast`). It exists so a **non-coder can experiment with the family-facing UI** and make
+it more usable. That inverts the mirror rule below for one directory: `report_assets/family/` is
+where this fork is *supposed* to diverge from upstream. Everything else still belongs upstream.
+
+Two consequences worth holding onto:
+
+- **Verify in a browser, always.** UI-navigation defects are structurally invisible to
+  `./run_tests.sh` — every function returns what it promises; the failure only exists in the
+  sequence of clicks. Run `/walk` (`.claude/skills/walk/SKILL.md`) after any change here.
+- **A sync will destroy this work.** `sync_from_wyeast.sh` replaces `report_assets/` wholesale.
+  It now warns loudly instead of reverting in silence — read its output, do not skim it.
+
+Never open a PR against the `wyeast` remote. `/ship` targets the fork.
+
 ## Known drift
 
 `UPSTREAM.md` states that nothing in `wyeast/core/` is modified. That is **no longer true**:
