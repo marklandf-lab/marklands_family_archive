@@ -141,6 +141,11 @@ as complete.
 
 ## What must never enter a commit
 
+**Never post user data or PII. Warn the user if any personally identifying data will be
+included in the repo.** Warn — do not quietly scrub and carry on. It is the user's data,
+the user's repo and the user's call; the job is to make sure they are the one making it,
+with the specific strings in front of them.
+
 The case tree is not the risk. It lives outside the checkout (`~/WyeastCases`), `.gitignore`
 blocks `/cases/`, and nothing case-shaped is tracked — so "will my data be committed?" has a
 reassuring answer, and it is the wrong question.
