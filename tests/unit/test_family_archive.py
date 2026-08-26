@@ -1989,7 +1989,11 @@ def test_api_section_correspondents_search_and_sort(tmp_path):
     by_name = case.api_section("correspondents", {"q": "DAWN"})
     assert by_name["total"] == 2
     assert {r["address"] for r in by_name["rows"]} == {"dawn@example.net", "dawn2@x.com"}
-    by_addr = case.api_section("correspondents", {"q": "yahoo"})
+    # Matches on ADDRESS only — "example.net" appears in no display_name — which
+    # is the half of ?q= this assertion exists to prove. (The query was "yahoo"
+    # until the address it targeted was scrubbed to dawn@example.net upstream and
+    # the query was not updated with it, so it matched nothing and the test failed.)
+    by_addr = case.api_section("correspondents", {"q": "example.net"})
     assert by_addr["total"] == 1 and by_addr["rows"][0]["address"] == "dawn@example.net"
     # ?sort=name / ?sort=recent re-order; total stays the count either way.
     by_name_sort = case.api_section("correspondents", {"sort": "name"})
