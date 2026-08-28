@@ -2526,3 +2526,72 @@ def test_conversation_detail_takes_its_title_from_the_index_record():
     out = ad.conversation_detail(per_file, index_record=index_record)
     assert out["display_name"] == "Ada Lovelace, Bo Kim + 1"
     assert out["messages"][0]["sender_display"] == "Ada Lovelace"
+
+
+# ── vital-doc rows carry the summary the decision needs ──────────────────────
+# The examiner confirms "yes, this is the deed" from a row that showed only a
+# filename and where the pipeline filed it. On 813_mf that produced ten sign-offs
+# under "Property deed / title" whose own summaries call them a draft will, a
+# durable power of attorney and four emails about deed research. The sentence
+# that answers the question is already in document_classifications; it just was
+# never carried onto the row. These tests pin it there, and pin the audience gate
+# that decides who may read it.
+
+def _vital_case_with_summaries(tmp_path):
+    """_vital_case, plus the plain-language summary each classification carries
+    in a real case, and an email-sourced deed that resolves to a thread."""
+    paths, summary = _vital_case(tmp_path)
+    texts = {
+        "/d/will.pdf": "A draft of a will outlining the distribution of the deceased's assets.",
+        "/m/deed.eml": "A title company emails a seller about the sale of their property.",
+        "/d/creds.pdf": "A list of online account logins and passwords.",
+    }
+    for d in summary["document_classifications"]:
+        d["summary"] = texts[d["file"]]
+    return paths, summary
+
+
+def test_vital_item_carries_the_document_summary(tmp_path):
+    paths, summary = _vital_case_with_summaries(tmp_path)
+    exam = {t["target"]: t for t in
+            ad.vital_docs_data(paths, summary, "examiner")["targets"]}
+    it = exam["will_testament"]["items"][0]
+    assert it["summary"] == \
+        "A draft of a will outlining the distribution of the owner's assets.", \
+        "the row that asks 'is this the will?' must carry the summary that answers it"
+
+
+def test_vital_item_summary_is_neutralized(tmp_path):
+    """Same identity-neutralisation document_rows applies — 'the deceased' never
+    reaches a family screen unrewritten."""
+    paths, summary = _vital_case_with_summaries(tmp_path)
+    fam = {t["target"]: t for t in
+           ad.vital_docs_data(paths, summary, "family")["targets"]}
+    assert "deceased" not in fam["will_testament"]["items"][0]["summary"]
+    assert "the owner's assets" in fam["will_testament"]["items"][0]["summary"]
+
+
+def test_vital_item_summary_respects_the_credentials_gate(tmp_path):
+    """A family session may not open the raw credentials document, so it may not
+    read its summary either — audience.py's asymmetry: a family-side leak fails
+    open, so gate rather than reword."""
+    paths, summary = _vital_case_with_summaries(tmp_path)
+    fam = {t["target"]: t for t in
+           ad.vital_docs_data(paths, summary, "family")["targets"]}
+    exam = {t["target"]: t for t in
+            ad.vital_docs_data(paths, summary, "examiner")["targets"]}
+    assert fam["credentials"]["items"][0]["summary"] is None
+    assert exam["credentials"]["items"][0]["summary"] == \
+        "A list of online account logins and passwords."
+
+
+def test_vital_item_summary_withheld_when_the_email_is_unreachable(tmp_path):
+    """An email-sourced item is summarised only when this role's own conversation
+    index actually resolved the thread. No thread for this role means the mail was
+    never theirs to read, and its summary is a paraphrase of the same content."""
+    paths, summary = _vital_case_with_summaries(tmp_path)
+    fam = {t["target"]: t for t in
+           ad.vital_docs_data(paths, summary, "family")["targets"]}
+    item = fam["deed_title"]["items"][0]
+    assert item["thread_id"] is None          # nothing resolved it
+    assert item["summary"] is None

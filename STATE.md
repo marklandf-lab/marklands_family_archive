@@ -58,6 +58,81 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-08-28 (later) — Emails opens on an index, not 21,988 rows
+
+### ▶ Next action
+
+Open **http://127.0.0.1:7766/emails** and drill: a group, then a break-down chip,
+then a thread, then back up the breadcrumb. The user asked for this shape and has
+not yet said what is wrong with it — get that before building further.
+
+### What shipped — same branch `claude/vital-row-summary`, still NOT pushed
+
+- **An index instead of a list.** Four ways in — significance, subject
+  (the pipeline's own per-thread categories, which were never rendered before),
+  year, person — each with the server's count for the whole set.
+- **One group at a time**, with the dimensions not yet used offered as a
+  break-down. Chips link rather than re-sort, so a count can only say what the
+  server counted. Filters layer and are addressable in the URL.
+- **The band headings used to lie** — each printed its size within the loaded
+  page (2,000 of ~22,000) as though it were a total. Gone.
+- Fixed `sort` missing from `encodeURL`, which dropped it from the URL on any
+  other control change. Correspondent grouping and `?participant=` now both
+  honour `correspondent_merges`.
+
+### Open questions on this screen
+
+- **Nobody knows whose mailbox this is.** `owner_email_addresses` is empty in
+  `case_config.json` and `email_triage_summary.json` says `owner_source: "none"`,
+  so the account's own addresses are INFERRED from thread share and named on the
+  page. Filling that in properly is a pipeline re-run, upstream — check the two
+  files before assuming it is still true.
+- The same person appears once per address in the person break-down until an
+  examiner merges them on Correspondents. The merge machinery exists and is now
+  honoured here; nothing has been merged on this case.
+- Year chips can sum to less than the group total — a thread with no date is in
+  the group but in no year. Confirm that reads acceptably before "fixing" it.
+
+---
+
+## 🎯 2026-08-28 — the vital-doc row now carries the evidence its decision needs
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+Then open **http://127.0.0.1:7766/documents**, expand `Property deed / title`, and read
+the rows. Every sign-off there is visibly wrong now that each row says what the document
+is — **the sign-offs themselves have not been corrected.** Deciding what to do about them
+(undo them in the UI, or leave them for whoever owns the case) is the open question, and
+it is the user's call, not a code change.
+
+### What shipped — branch `claude/vital-row-summary`, NOT yet pushed or PR'd
+
+- **The summary is on the decision row.** Confirmed candidates and near-misses both. The
+  text already existed — written at classification time, rendered further down the same
+  page in the documents table, never where the click happens.
+- **Who may read it reuses the gate that was already computed** — the role's browsable-doc
+  map and its own conversation index — rather than adding a second gate to drift out of
+  step. An item resolving to neither gets nothing, so the family side fails closed.
+- Four tests, `tests/unit/test_archive_data.py`, all failing against `main` with
+  `KeyError: 'summary'` before the change. Verify that claim by checking the branch out
+  against `main` — do not take this file's word for it.
+
+### What this exposed, still open
+
+- **The recorded sign-offs are wrong and are still recorded.** Read them yourself rather
+  than trusting this line: expand `Property deed / title` on the running app. The release
+  gate trusts these, so they matter. Undo is per-row in the UI ("Undo — not this").
+- The **category filter** still renders the whole 27-type checklist above the filtered
+  list, and the panel's four numbers still describe the whole collection while the page
+  below shows one category. Measure it before deciding it is urgent — it was ~1,400px on
+  2026-08-28, and last session's rebuild already shrank it a great deal.
+- Everything under the 2026-08-26 "Known issues" below is still open unless noted.
+
+---
+
 ## 🎯 2026-08-26 — navigation, three screens rebuilt, and the review queue connected
 
 ### ▶ Next action — one command, then open the page

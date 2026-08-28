@@ -45,7 +45,7 @@ import re
 import sys
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -485,6 +485,145 @@ def _filter_correspondents(rows, params):
     return rows
 
 
+# The significance bands the Emails section groups by, highest first. The labels
+# are the SERVER's because the counts are: shipping the pair together is what
+# stops a heading from disagreeing with the number beside it.
+EMAIL_BANDS = [(5, "Major life events"), (4, "Emotionally resonant"), (3, "Personal"),
+               (2, "Everyday"), (1, "Routine"), (0, "Unranked")]
+
+_ADDR_RE = re.compile(r"<([^>]+)>")
+
+
+def _email_address(participant):
+    """The bare address inside a thread participant string. They arrive in mixed
+    forms — 'Display Name <addr>' or a bare address — so pull the angle-bracket
+    form when present and fall back to the whole string."""
+    m = _ADDR_RE.search(participant or "")
+    return (m.group(1) if m else (participant or "")).strip().lower()
+
+
+def _email_display_name(participant):
+    """The display name in front of the address, or the address when there isn't
+    one. Only used as a LABEL — grouping always keys on the address."""
+    p = (participant or "").strip()
+    m = _ADDR_RE.search(p)
+    if not m:
+        return p
+    name = p[:m.start()].strip().strip('"').strip()
+    return name or m.group(1).strip()
+
+
+def _email_owner_addresses(rows, floor=0.25, min_rows=25):
+    """Best guess at the mailbox owner's own addresses: the ones appearing in at
+    least `floor` of all threads, and only once there are `min_rows` to judge from.
+
+    This is a GUESS, and the UI says so rather than quietly acting on it. It
+    exists because nothing upstream recorded the answer — case_config's
+    `owner_email_addresses` is empty and email_triage_summary.json reports
+    `owner_source: "none"` — so there is no authoritative owner to read. Without
+    some answer, grouping threads "by correspondent" tops the list of people you
+    wrote to with yourself, in every band.
+
+    Two guards, because the failure modes differ at each end. `min_rows` refuses
+    to guess from a handful of threads, where any share is an accident of a small
+    sample. `floor` is set where a real mailbox separates: on 813_mf the owner's
+    two addresses sit at 67% and 27% of threads and the next person down is at
+    11%, so a quarter cleanly splits "this is the account" from "this is a close
+    correspondent". The residual risk is folding in a genuine co-owner of a
+    shared account — which is arguably the right call anyway, and is visible
+    because the addresses are reported alongside the counts they shaped.
+    """
+    if len(rows) < min_rows:
+        return set()
+    seen = Counter()
+    for r in rows:
+        for a in {_email_address(p) for p in (r.get("participants") or [])}:
+            if a:
+                seen[a] += 1
+    need = max(1, int(len(rows) * floor))
+    return {a for a, n in seen.items() if n >= need}
+
+
+def _email_facets(rows, owner=(), merges=None):
+    """Whole-set counts for the Emails index, computed from the rows the caller
+    has ALREADY filtered — so the landing page gets true totals over everything,
+    and a drilled-into band gets the years and people inside THAT band.
+
+    This is the point of the rewrite. The old page grouped by significance and
+    printed each band's size from the rows it had loaded — 2,000 of 21,988 — so
+    every heading below the first was a page-local number wearing the clothes of
+    a total. Counts here are over the whole filtered set, never the page slice.
+    """
+    bands = Counter()
+    cats = Counter()
+    years = Counter()
+    people = Counter()
+    names = {}
+    owner = {a.lower() for a in (owner or ())}
+    # An examiner-confirmed correspondent merge folds a duplicate address into the
+    # one that survives, exactly as the Correspondents page does. Without this the
+    # two screens disagree the moment anybody merges: one shows a person who used
+    # several addresses once, the other still shows each address as its own person.
+    merges = merges or {}
+    for r in rows:
+        bands[int(r.get("significance") or 0)] += 1
+        for c in (r.get("categories") or []):
+            cats[c] += 1
+        y = (r.get("date_last") or "")[:4]
+        if y.isdigit():
+            years[y] += 1
+        # One thread counts ONCE per person in it, and the owner is dropped: a
+        # list of who you corresponded with should not be topped by yourself.
+        # A thread counts once per person, so resolve to the surviving address
+        # FIRST — two merged addresses in one thread are one correspondent.
+        seen_here = set()
+        for p in (r.get("participants") or []):
+            a = _email_address(p)
+            if not a or a in owner:
+                continue
+            a = resolve_merge(a, merges)
+            if a in owner or a in seen_here:
+                continue
+            seen_here.add(a)
+            people[a] += 1
+            names.setdefault(a, _email_display_name(p))
+    return {
+        "bands": [{"n": n, "label": lab, "count": bands.get(n, 0)}
+                  for n, lab in EMAIL_BANDS if bands.get(n, 0)],
+        "categories": [{"name": k, "count": v} for k, v in cats.most_common()],
+        "years": [{"year": y, "count": years[y]} for y in sorted(years, reverse=True)],
+        # Capped: the tail of a 3,600-address corpus is single-thread senders, and
+        # the Correspondents page is the place to see all of them.
+        "correspondents": [{"address": a, "name": names.get(a, a), "count": n}
+                           for a, n in people.most_common(60)],
+        # Surfaced, not hidden, because it is inferred rather than known — the UI
+        # names the addresses it treated as the owner's so a wrong guess is
+        # visible rather than silently reshaping the list.
+        "owner_addresses": sorted(owner),
+    }
+
+
+def _filter_emails_group(rows, params):
+    """Server-side ?band= / ?cat= / ?year= narrowing for the Emails index
+    drill-down, applied BEFORE the page slice so each group's tail is reachable
+    and `total` is the group's real size. Layers with ?participant= and ?q=."""
+    band = _one(params, "band")
+    if band != "":
+        try:
+            want = int(band)
+        except (TypeError, ValueError):
+            want = None
+        if want is not None:
+            rows = [r for r in rows if int(r.get("significance") or 0) == want]
+    cat = _one(params, "cat")
+    if cat:
+        rows = [r for r in rows if cat in (r.get("categories") or [])]
+    year = _one(params, "year")
+    if year:
+        rows = [r for r in rows if (r.get("date_last") or "")[:4] == year]
+    return rows
+
+
 def _filter_emails_search(rows, params):
     """Server-side ?q= / date range / ?sort= for the Emails list search box
     (#11: tens of thousands of threads with no in-list search/sort/date filter
@@ -507,12 +646,16 @@ def _filter_emails_search(rows, params):
     sort = _one(params, "sort")
     if sort == "recent":
         rows = sorted(rows, key=lambda r: (r.get("date_last") or ""), reverse=True)
+    elif sort == "oldest":
+        # Undated threads sort last either way rather than heading the list: an
+        # empty date string would otherwise win an ascending sort outright.
+        rows = sorted(rows, key=lambda r: (not r.get("date_last"), r.get("date_last") or ""))
     elif sort == "subject":
         rows = sorted(rows, key=lambda r: (r.get("subject") or "").lower())
     return rows
 
 
-def _filter_emails_by_participant(rows, params):
+def _filter_emails_by_participant(rows, params, merges=None):
     """Server-side ?participant=<address> filter for the Emails list (G-6
     click-through from a correspondent card). Applied BEFORE the page slice so the
     filtered tail is reachable and the paginated `total` reflects the filtered
@@ -523,8 +666,14 @@ def _filter_emails_by_participant(rows, params):
     addr = _one(params, "participant").strip().lower()
     if not addr:
         return rows
+    # Follow merges in the same direction the facets do: clicking a folded
+    # correspondent must return the threads its count was built from, including
+    # the ones that only ever carried a merged-away address.
+    merges = merges or {}
+    wanted = {addr} | {loser for loser in merges if resolve_merge(loser, merges) == addr}
     return [r for r in rows
-            if any(addr in (p or "").lower() for p in (r.get("participants") or []))]
+            if any(any(w in (p or "").lower() for w in wanted)
+                   for p in (r.get("participants") or []))]
 
 
 def _filter_videos(rows, params):
@@ -1031,6 +1180,17 @@ class ArchiveCase:
         return {"hits": hits, "total": total, "building": True}
 
     # ── data sections (thumbs/media are served live, so builders get no thumbs) ──
+    def _email_owner(self, full_rows):
+        """The owner-address guess, computed once per process against the full
+        thread set. Cached because every Emails request needs it and the scan is
+        over every participant of every thread; the underlying set only changes
+        when the case is reloaded, which rebuilds this object."""
+        cached = getattr(self, "_email_owner_cache", None)
+        if cached is None:
+            cached = _email_owner_addresses(full_rows)
+            self._email_owner_cache = cached
+        return cached
+
     def section(self, page):
         if page == "overview":
             decisions = self.decisions
@@ -1252,10 +1412,21 @@ class ArchiveCase:
             # G-6: ?participant=<address> narrows the thread list before the slice
             # so a correspondent card's filtered tail is reachable and total is true.
             # #11: ?q=/date_from/date_to/sort layer the in-list search box on top.
-            rows = apply_curation(self.section("emails"), curation, "thread_id")
-            rows = _filter_emails_by_participant(rows, params)
+            # ?band=/?cat=/?year= are the index drill-down, layered the same way.
+            full = apply_curation(self.section("emails"), curation, "thread_id")
+            merges = (self.decisions or {}).get("correspondent_merges") or {}
+            rows = _filter_emails_by_participant(full, params, merges)
+            rows = _filter_emails_group(rows, params)
             rows = _filter_emails_search(rows, params)
-            return _paginate(rows, offset, limit)
+            page = _paginate(rows, offset, limit)
+            # Facets come from the FILTERED set, not the page slice: on the index
+            # that makes them true totals over everything, and inside a band it
+            # makes them that band's own years and people. The owner guess is made
+            # once against the FULL set — a band of 89 threads is far too small a
+            # sample to tell an owner from a frequent correspondent.
+            page["facets"] = _email_facets(rows, owner=self._email_owner(full),
+                                           merges=merges)
+            return page
         if name == "messages":
             return _paginate(apply_curation(self.section("messages"), curation,
                                             "conversation_id"), offset, limit)

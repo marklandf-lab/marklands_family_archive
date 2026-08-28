@@ -4876,3 +4876,124 @@ def test_family_search_excludes_withheld_conversations(tmp_path):
     hits = json.dumps(case.section("search"))
     assert "Bank Alerts" not in hits, "a rescued conversation is searchable by the family"
     assert "Mom" in hits, "the family lost their own conversation from search"
+
+
+# ── Emails index: true counts, drill-down filters, owner guess ───────────────
+# The old Emails page grouped by significance and printed each band's size from
+# the rows it had loaded — 2,000 of 21,988 on the live case — so every heading
+# below the first was a page-local number presented as a total. These pin the
+# counts to the whole filtered set and the drill-down filters that go with them.
+
+def _email_threads():
+    """Two people writing to one owner across two years, three bands and two
+    categories. `owner@x.test` is in every thread, as a mailbox owner is."""
+    def t(tid, sig, cats, parts, last):
+        return {"thread_id": tid, "subject": tid, "significance": sig,
+                "categories": cats, "participants": parts, "date_last": last,
+                "message_count": 1}
+    own = "Owner <owner@x.test>"
+    ann = "Ann Lee <ann@x.test>"
+    bob = "bob@x.test"
+    return [
+        t("a", 5, ["personal_correspondence"], [own, ann], "2024-03-01T00:00:00+00:00"),
+        t("b", 5, ["personal_correspondence"], [own, bob], "2023-07-04T00:00:00+00:00"),
+        t("c", 3, ["work_correspondence"], [own, ann], "2024-11-30T00:00:00+00:00"),
+        t("d", 3, ["work_correspondence", "financial"], [own, ann, bob],
+          "2023-01-09T00:00:00+00:00"),
+        t("e", 0, [], [own], "2024-05-05T00:00:00+00:00"),
+    ]
+
+
+def test_email_owner_guess_finds_the_ubiquitous_address():
+    """A real mailbox separates: the account is in most threads, the closest
+    correspondent in a minority. Shaped like 813_mf, where the owner's two
+    addresses are at 67% and 27% and the next person down is at 11%."""
+    rows = []
+    for i in range(100):
+        parts = ["Owner <owner@x.test>"]                     # 100 threads — 100%
+        if i % 3 == 0:
+            parts.append("Owner Work <owner@work.test>")     #  34 threads —  34%
+        parts.append("p%d <p%d@x.test>" % (i % 9, i % 9))    #  ~11 each  —  ~11%
+        rows.append({"participants": parts})
+    assert fa._email_owner_addresses(rows) == {"owner@x.test", "owner@work.test"}, \
+        "both of the account's own addresses, and none of the nine correspondents"
+
+
+def test_email_owner_guess_refuses_a_sample_too_small_to_judge():
+    """Five threads cannot tell an owner from anyone else in them, so the honest
+    answer is no guess — which leaves every participant in the correspondent
+    list rather than silently dropping one."""
+    assert fa._email_owner_addresses(_email_threads()) == set()
+    assert fa._email_owner_addresses([]) == set()
+
+
+def test_email_facets_count_the_whole_set_not_a_page():
+    rows = _email_threads()
+    f = fa._email_facets(rows, owner={"owner@x.test"})
+    assert [(b["n"], b["label"], b["count"]) for b in f["bands"]] == [
+        (5, "Major life events", 2), (3, "Personal", 2), (0, "Unranked", 1)]
+    assert dict((c["name"], c["count"]) for c in f["categories"]) == {
+        "personal_correspondence": 2, "work_correspondence": 2, "financial": 1}
+    assert [(y["year"], y["count"]) for y in f["years"]] == [("2024", 3), ("2023", 2)]
+
+
+def test_email_facets_leave_the_owner_out_of_their_own_correspondents():
+    f = fa._email_facets(_email_threads(), owner={"owner@x.test"})
+    people = {c["address"]: c["count"] for c in f["correspondents"]}
+    assert "owner@x.test" not in people, \
+        "a list of who you wrote to must not be topped by yourself"
+    assert people == {"ann@x.test": 3, "bob@x.test": 2}
+    # the display name is carried for the label, and the guess is disclosed
+    assert [c["name"] for c in f["correspondents"] if c["address"] == "ann@x.test"] \
+        == ["Ann Lee"]
+    assert f["owner_addresses"] == ["owner@x.test"]
+
+
+def test_email_group_filters_band_category_and_year():
+    rows = _email_threads()
+    ids = lambda rs: sorted(r["thread_id"] for r in rs)
+    assert ids(fa._filter_emails_group(rows, {"band": "5"})) == ["a", "b"]
+    assert ids(fa._filter_emails_group(rows, {"band": "0"})) == ["e"]
+    assert ids(fa._filter_emails_group(rows, {"cat": "financial"})) == ["d"]
+    assert ids(fa._filter_emails_group(rows, {"year": "2023"})) == ["b", "d"]
+    # they layer, which is what the drill-down does when you pick a year inside a band
+    assert ids(fa._filter_emails_group(rows, {"band": "5", "year": "2023"})) == ["b"]
+    # no filter, and a nonsense band, both leave the set alone rather than emptying it
+    assert ids(fa._filter_emails_group(rows, {})) == ["a", "b", "c", "d", "e"]
+    assert ids(fa._filter_emails_group(rows, {"band": "not-a-number"})) == \
+        ["a", "b", "c", "d", "e"]
+
+
+def test_email_facets_reflect_the_filter_they_were_given():
+    """Inside a band, the years and people must be that band's own — this is what
+    lets the drill-down offer 'sort by year' without inventing a number."""
+    rows = fa._filter_emails_group(_email_threads(), {"band": "5"})
+    f = fa._email_facets(rows, owner={"owner@x.test"})
+    assert [(y["year"], y["count"]) for y in f["years"]] == [("2024", 1), ("2023", 1)]
+    assert {c["address"] for c in f["correspondents"]} == {"ann@x.test", "bob@x.test"}
+
+
+def test_email_facets_fold_merged_correspondents():
+    """An examiner-confirmed merge folds a duplicate address into the surviving
+    one on the Correspondents page; the Emails break-down must agree, or the two
+    screens report a different number of people for the same mail."""
+    rows = _email_threads()
+    merges = {"bob@x.test": "ann@x.test"}
+    f = fa._email_facets(rows, owner={"owner@x.test"}, merges=merges)
+    people = {c["address"]: c["count"] for c in f["correspondents"]}
+    assert "bob@x.test" not in people
+    # a+b+c+d = 4 threads reach Ann once merged; thread "d" holds BOTH addresses
+    # and must still count once — it is one correspondent in one conversation.
+    assert people == {"ann@x.test": 4}
+
+
+def test_email_participant_filter_follows_a_merge():
+    """Clicking a folded correspondent must return the threads its count was built
+    from, including any that only ever carried the merged-away address."""
+    rows = _email_threads()
+    merges = {"bob@x.test": "ann@x.test"}
+    got = fa._filter_emails_by_participant(rows, {"participant": "ann@x.test"}, merges)
+    assert sorted(r["thread_id"] for r in got) == ["a", "b", "c", "d"]
+    # without the overlay the merged-away thread "b" is missed
+    got = fa._filter_emails_by_participant(rows, {"participant": "ann@x.test"})
+    assert sorted(r["thread_id"] for r in got) == ["a", "c", "d"]

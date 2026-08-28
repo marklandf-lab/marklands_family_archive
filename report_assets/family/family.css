@@ -952,6 +952,16 @@ body.selecting .jgrid .jcard, body.selecting .jgrid .jcard img { cursor: crossha
 .vrow-name { font-size: 14.5px; color: var(--ink); text-decoration: none;
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 a.vrow-name:hover { color: var(--accent); text-decoration: underline; }
+/* What the document IS. Set BELOW the filename but ABOVE the provenance line and
+   darker than it, because it is the sentence the decision turns on: the filename
+   only identifies the row, and where the pipeline filed it is the weaker of the
+   two pieces of evidence. Wraps — unlike .vrow-name it must never be truncated,
+   since the clause that gives it away ("...dissolution of marriage") tends to sit
+   at the end. Capped at two lines so a long summary cannot push the action
+   buttons of the row below it off a screenful. */
+.vrow-sum { font-size: 13px; color: var(--ink); margin-top: 3px; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; }
 /* The evidence the old row never carried: where the classifier put it. */
 .vrow-prov { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 .vrow-state { flex: none; }
@@ -1001,3 +1011,47 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
 .ovunchecked { margin: 8px 0 0; font-size: 13.5px; }
 .ovunchecked a { color: var(--accent); text-decoration: none; }
 .ovunchecked a:hover { text-decoration: underline; }
+
+/* ── Emails index + break-down ──────────────────────────────────────────────
+   The Emails section opens as an index of groups rather than a 21,988-row list.
+   Two columns of panels, each row a label + the server's count for the whole
+   set + a bar for relative size, so the shape of the mail is legible before any
+   thread is. Bar widths are set through CSSOM (.style.width) — the page CSP is
+   style-src 'self' and would drop an inline style attribute. */
+.eix-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 18px; margin: 18px 0; align-items: start; }
+.eix-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px 18px 14px; }
+.eix-panel h2 { font-size: 15px; margin: 0 0 2px; }
+.eix-note { font-size: 12px; color: var(--muted); margin: 0 0 10px; line-height: 1.45; }
+.eix-row { display: grid; grid-template-columns: 1fr auto; column-gap: 12px; row-gap: 4px;
+  align-items: baseline; padding: 7px 0; text-decoration: none; color: var(--ink);
+  border-top: 1px solid var(--line); }
+.eix-panel .eix-row:first-of-type { border-top: 0; }
+.eix-row:hover .eix-label { color: var(--accent); text-decoration: underline; }
+.eix-label { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.eix-count { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+/* The bar spans both columns on its own row, so a long label never squeezes it. */
+.eix-bar { grid-column: 1 / -1; height: 3px; background: var(--line); border-radius: 2px; }
+.eix-fill { display: block; height: 100%; background: var(--accent); border-radius: 2px;
+  opacity: .55; }
+.eix-more { display: inline-block; margin-top: 10px; font-size: 13px; color: var(--accent); }
+
+/* Inside a group: the dimensions not yet used, as tabs over a chip grid. Each
+   chip carries the server's count for THIS group, and links rather than sorts —
+   narrowing is what keeps the number on the chip true. */
+.ebd { margin: 16px 0 6px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 12px 14px; }
+.ebd-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ebd-lead { font-size: 12px; color: var(--muted); margin-right: 4px; }
+.ebd-tab { font: inherit; font-size: 12.5px; padding: 4px 11px; border-radius: 13px;
+  border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; }
+.ebd-tab:hover { border-color: var(--accent); }
+.ebd-tab.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.ebd-body { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.ebd-chip { display: inline-flex; align-items: baseline; gap: 7px; padding: 4px 10px;
+  border: 1px solid var(--line); border-radius: 13px; text-decoration: none;
+  color: var(--ink); font-size: 12.5px; background: var(--bg); }
+.ebd-chip:hover { border-color: var(--accent); color: var(--accent); }
+.ebd-chip-n { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.ebd-chip:hover .ebd-chip-n { color: var(--accent); }

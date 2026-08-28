@@ -319,7 +319,10 @@
     ["person", "scene", "place", "event", "thread", "conversation", "venue", "tab",
      "media", "vperson", "vscene", "favorite_curation", "collection_curation", "people",
      "participant", "cat", "subcat", "album", "favorite", "date_from", "date_to",
-     "q", "otd", "group", "target", "list", "rec"].forEach(function (k) {
+     "q", "otd", "group", "target", "list", "rec",
+     // Emails index drill-down: significance band, year, and the break-down tab
+     // the reader last had open, so a link into a group is fully addressable.
+     "band", "year", "by", "sort"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -376,6 +379,11 @@
     ["person", "scene", "place", "event", "thread", "media", "cat", "subcat", "modality", "qcat",
      "album", "favorite", "hidden", "participant", "venue", "tab", "date_from", "date_to",
      "vperson", "vscene", "favorite_curation", "collection_curation", "people", "q",
+     // The Emails index drill-down. `sort` was missing here before `band`/`year`
+     // existed, with the consequence this comment describes: choosing a sort and
+     // then touching any other control dropped it from the URL, so a reload or a
+     // shared link lost it. `by` is the open break-down tab.
+     "band", "year", "by", "sort",
      "group", "target", "list", "crumb", "from"]
       .forEach(function (k) { if (Q[k]) q.push(k + "=" + encodeURIComponent(Q[k])); });
     return location.pathname + (q.length ? "?" + q.join("&") : "");
@@ -3394,6 +3402,11 @@
       blind ? "never read" : (r.disposition === "unknown" ? "no reason recorded" : "not confirmed")));
     rowEl.appendChild(head);
 
+    // Same evidence as a confirmed candidate: promote/dismiss here are the same
+    // judgement, so the row that asks for it carries the same sentence. It goes
+    // ABOVE the rejection reason — what the document is, then why the pipeline
+    // passed on it, which is the order the examiner needs them in.
+    if (r.summary) rowEl.appendChild(el("div", "vrow-sum", esc(r.summary)));
     if (r.reason) rowEl.appendChild(el("div", "vcand-reason", esc(r.reason)));
     if (r.snippet) rowEl.appendChild(el("div", "preview", esc(r.snippet)));
 
@@ -3528,6 +3541,16 @@
       link = el("span", "vrow-name", esc(label));
     }
     main_.appendChild(link);
+
+    // WHAT THIS DOCUMENT IS — the sentence the decision actually turns on, and
+    // the reason this row exists at all. "Yes, this is it" asks the examiner to
+    // certify that a file IS the deed; a filename cannot answer that, and until
+    // now a filename (plus where the pipeline filed it) was the whole row. The
+    // summary was written at classification time and was already on screen fifty
+    // rows further down, in the documents table — never where the click happens.
+    // Absent when the server withheld it because this role may not read the
+    // underlying item; the row still works, it just has less to go on.
+    if (it.summary) main_.appendChild(el("div", "vrow-sum", esc(it.summary)));
 
     // Provenance and decision state are EXAMINER vocabulary. "The pipeline filed
     // this under Legal · court filing" is meaningless to a family, and "Not yet
@@ -4015,6 +4038,301 @@
     return stream.length;
   }
 
+  // ── Emails: an index first, then one group at a time ──
+  // 21,988 conversations used to open as a single significance-sorted list whose
+  // band headings counted the rows the pager happened to have loaded (2,000), so
+  // every heading below the first stated a page-local number as a total. And the
+  // per-thread `categories` the pipeline writes were never shown at all, so the
+  // shape of the mail — 8,586 work, 8,389 personal, 3,514 newsletters — was
+  // invisible. The page now opens on that shape and drills into ONE group, with
+  // every count coming from the server's facets over the whole filtered set.
+
+  var EMAIL_CATS = {
+    personal_correspondence: "Personal", work_correspondence: "Work",
+    financial: "Financial", medical: "Medical", legal: "Legal",
+    newsletters_lists: "Newsletters & lists", miscellaneous: "Miscellaneous",
+  };
+  function emailCatLabel(name) { return EMAIL_CATS[name] || pretty(name); }
+
+  // One clickable row in an index panel: label, count, and a bar sized by share
+  // of the largest row. The bar is set through CSSOM, never an inline style
+  // attribute — the page CSP is style-src 'self'.
+  function emailIndexRow(label, count, max, dest, crumb) {
+    var a = el("a", "eix-row");
+    a.href = urlFor(dest, { label: crumb || label });
+    a.appendChild(el("span", "eix-label", esc(label)));
+    a.appendChild(el("span", "eix-count", num(count)));
+    var track = el("span", "eix-bar");
+    var fill = el("span", "eix-fill");
+    fill.style.width = Math.max(2, Math.round((count / (max || 1)) * 100)) + "%";
+    track.appendChild(fill);
+    a.appendChild(track);
+    return a;
+  }
+
+  function emailIndexPanel(title, note, rows) {
+    var sec = el("section", "eix-panel");
+    sec.appendChild(el("h2", null, title));
+    if (note) sec.appendChild(el("p", "eix-note", note));
+    var max = rows.reduce(function (m, r) { return Math.max(m, r.count); }, 0);
+    rows.forEach(function (r) {
+      sec.appendChild(emailIndexRow(r.label, r.count, max, r.dest, r.crumb));
+    });
+    return sec;
+  }
+
+  // The landing view: what is in here, and the two ways of cutting it. Both cuts
+  // are the pipeline's own — significance is its ranking, categories are the ones
+  // named in case_config — so neither is invented here.
+  function emailIndex(main, data) {
+    var f = (data && data.facets) || {};
+    var total = (data && data.total) || 0;
+    head(main, "Emails", "Emails",
+      num(total) + " conversations. Pick a way in — every count below is the whole "
+      + "archive, not a page of it.");
+
+    var wrap = el("div", "eix-cols"); main.appendChild(wrap);
+    wrap.appendChild(emailIndexPanel(
+      "By significance", "How the pipeline ranked each conversation.",
+      (f.bands || []).map(function (b) {
+        return { label: b.label, count: b.count,
+                 dest: { page: "emails", band: String(b.n) }, crumb: b.label };
+      })));
+    wrap.appendChild(emailIndexPanel(
+      "By subject", "What the conversation is about. A thread can be in more than one.",
+      (f.categories || []).map(function (c) {
+        return { label: emailCatLabel(c.name), count: c.count,
+                 dest: { page: "emails", cat: c.name }, crumb: emailCatLabel(c.name) };
+      })));
+
+    // People and years are the other two cuts, but they are long tails rather
+    // than short lists — offered as a way in, not enumerated here.
+    var more = el("div", "eix-cols"); main.appendChild(more);
+    more.appendChild(emailIndexPanel(
+      "By year", null,
+      (f.years || []).map(function (y) {
+        return { label: y.year, count: y.count,
+                 dest: { page: "emails", year: y.year }, crumb: y.year };
+      })));
+    var people = (f.correspondents || []).slice(0, 12);
+    var pplPanel = emailIndexPanel(
+      "By person", "Who the conversation was with.",
+      people.map(function (c) {
+        return { label: c.name || c.address, count: c.count,
+                 dest: { page: "emails", participant: c.address },
+                 crumb: c.name || c.address };
+      }));
+    var all = el("a", "eix-more", "All correspondents →");
+    all.href = urlFor({ page: "correspondents" }, { label: "Correspondents" });
+    pplPanel.appendChild(all);
+    // The owner guess is disclosed rather than applied in silence: nothing
+    // upstream records whose mailbox this is (case_config's
+    // owner_email_addresses is empty), so these were inferred from how much of
+    // the mail they appear in, and a wrong guess would quietly reshape the list.
+    if ((f.owner_addresses || []).length) {
+      pplPanel.appendChild(el("p", "eix-note",
+        "Treated as the account's own addresses and left out of this list: "
+        + f.owner_addresses.join(", ")
+        + ". The archive does not record who the mailbox belongs to, so this was "
+        + "worked out from how much of the mail they appear in."));
+    }
+    more.appendChild(pplPanel);
+  }
+
+  // A flat thread table. Inside a group the significance bands are either the
+  // thing you already picked or beside the point, so the old band headings would
+  // only reintroduce the counting problem they caused.
+  function emailThreadTable(container, rows) {
+    container.innerHTML = "";
+    if (!rows.length) {
+      container.appendChild(el("p", "notice", "No conversations match."));
+      return;
+    }
+    var tbl = el("table");
+    tbl.innerHTML = "<tr><th>Subject</th><th>With</th><th>When</th><th>Msgs</th>"
+      + (EXAMINER ? "<th></th>" : "") + "</tr>";
+    rows.forEach(function (r) {
+      var tr = el("tr", "clickable");
+      tr.innerHTML = "<td>" + esc(r.subject) + " " + sig(r.significance) +
+        "</td><td class='preview clamp2'>" + recipients(r.participants) +
+        "</td><td class='preview'>" + esc((r.date_last || "").slice(0, 10)) +
+        "</td><td>" + num(r.message_count) + "</td>" +
+        (EXAMINER ? "<td class='actcell'></td>" : "");
+      tr.onclick = function () {
+        go({ page: "emails", thread: r.thread_id }, { label: r.subject || "(no subject)" });
+      };
+      keyable(tr, null);
+      if (EXAMINER) tr.lastChild.appendChild(emailDemoteBtn(r));
+      tbl.appendChild(tr);
+    });
+    container.appendChild(tbl);
+  }
+
+  // The break-down strip inside a group: the dimensions you have NOT used yet,
+  // each listing its subgroups with the server's count for this group. Clicking
+  // one adds a filter rather than re-sorting the page, which is what keeps every
+  // number on screen true — a heading can only claim what the server counted.
+  function emailBreakdown(main, facets, active, reload) {
+    var dims = [];
+    if (!active.year) {
+      dims.push({ key: "year", label: "Year", items: (facets.years || []).map(function (y) {
+        return { label: y.year, count: y.count, q: { year: y.year }, crumb: y.year };
+      }) });
+    }
+    if (!active.participant) {
+      dims.push({ key: "who", label: "Person", items: (facets.correspondents || [])
+        .slice(0, 24).map(function (c) {
+          return { label: c.name || c.address, count: c.count,
+                   q: { participant: c.address }, crumb: c.name || c.address };
+        }) });
+    }
+    if (!active.band) {
+      dims.push({ key: "band", label: "Significance", items: (facets.bands || []).map(function (b) {
+        return { label: b.label, count: b.count, q: { band: String(b.n) }, crumb: b.label };
+      }) });
+    }
+    if (!active.cat) {
+      dims.push({ key: "cat", label: "Subject", items: (facets.categories || []).map(function (c) {
+        return { label: emailCatLabel(c.name), count: c.count,
+                 q: { cat: c.name }, crumb: emailCatLabel(c.name) };
+      }) });
+    }
+    dims = dims.filter(function (d) { return d.items.length > 1; });
+    if (!dims.length) return;
+
+    var box = el("section", "ebd"); main.appendChild(box);
+    var tabs = el("div", "ebd-tabs"); box.appendChild(tabs);
+    tabs.appendChild(el("span", "ebd-lead", "Break this down by"));
+    var body = el("div", "ebd-body"); box.appendChild(body);
+    var open = Q.by || dims[0].key;
+    if (!dims.some(function (d) { return d.key === open; })) open = dims[0].key;
+
+    function draw() {
+      body.innerHTML = "";
+      var dim = dims.filter(function (d) { return d.key === open; })[0];
+      Array.prototype.forEach.call(tabs.querySelectorAll("button"), function (b) {
+        b.classList.toggle("on", b.dataset.key === open);
+        b.setAttribute("aria-pressed", String(b.dataset.key === open));
+      });
+      dim.items.forEach(function (it) {
+        var a = el("a", "ebd-chip");
+        a.href = urlFor(mergeQ(it.q), { label: it.crumb });
+        a.appendChild(el("span", "ebd-chip-l", esc(it.label)));
+        a.appendChild(el("span", "ebd-chip-n", num(it.count)));
+        body.appendChild(a);
+      });
+    }
+    dims.forEach(function (d) {
+      var b = el("button", "ebd-tab", d.label);
+      b.dataset.key = d.key;
+      b.onclick = function () { open = d.key; setQ({ by: d.key }); draw(); };
+      tabs.appendChild(b);
+    });
+    draw();
+  }
+
+  // Current Emails query + an override, so a break-down link NARROWS rather than
+  // replacing (picking a year inside "Major life events" must keep the band).
+  function mergeQ(extra) {
+    var out = { page: "emails" };
+    ["band", "cat", "year", "participant", "q", "date_from", "date_to", "sort"]
+      .forEach(function (k) { if (Q[k]) out[k] = Q[k]; });
+    Object.keys(extra || {}).forEach(function (k) { out[k] = extra[k]; });
+    return out;
+  }
+
+  // One group: the threads that match every active filter, the controls to sort
+  // them, and the break-down strip to go a level deeper.
+  function emailGroup(main, data, active) {
+    // The heading names each active filter in the words the reader clicked. The
+    // person is the awkward one: the filter keys on an ADDRESS, but the chip they
+    // clicked carried a display name, and a heading that answers with a raw
+    // mailbox address reads as a different thing entirely. The server's facets
+    // carry the name, so prefer it and keep the address as the fallback for a
+    // correspondent who never had one.
+    function titleFrom(facets) {
+      var parts = [];
+      if (active.band) {
+        var bl = ((facets || {}).bands || []).filter(function (b) {
+          return String(b.n) === active.band; })[0];
+        parts.push(bl ? bl.label : "Significance " + active.band);
+      }
+      if (active.cat) parts.push(emailCatLabel(active.cat));
+      if (active.year) parts.push(active.year);
+      if (active.participant) {
+        var who = ((facets || {}).correspondents || []).filter(function (c) {
+          return c.address === active.participant; })[0];
+        parts.push("with " + ((who && who.name) || active.participant));
+      }
+      return parts.length ? parts.join(" · ") : "All emails";
+    }
+    var title = titleFrom(data.facets);
+    setCrumb(Q.crumb || title);
+
+    var controls = head(main, "Emails", title, num(data.total || 0) + " conversations.");
+    var back = el("button", "btn chip", "← All emails");
+    back.onclick = function () { go({ page: "emails" }); };
+    controls.appendChild(back);
+
+    var listctrls = el("div", "filterbar"); main.appendChild(listctrls);
+    var search = el("input", "listsearch"); search.type = "search";
+    search.placeholder = "Find by subject or person…"; search.autocomplete = "off";
+    search.setAttribute("aria-label", "Find emails");
+    if (Q.q) search.value = Q.q;
+    var dFrom = el("input"); dFrom.type = "date"; dFrom.title = "From date";
+    var dTo = el("input"); dTo.type = "date"; dTo.title = "To date";
+    if (Q.date_from) dFrom.value = Q.date_from;
+    if (Q.date_to) dTo.value = Q.date_to;
+    var sortSel = el("select"); sortSel.setAttribute("aria-label", "Sort emails");
+    [["", "Most significant"], ["recent", "Newest first"], ["oldest", "Oldest first"],
+     ["subject", "Subject (A–Z)"]]
+      .forEach(function (o) { sortSel.appendChild(new Option(o[1], o[0])); });
+    if (Q.sort) sortSel.value = Q.sort;
+    listctrls.appendChild(search);
+    listctrls.appendChild(el("span", "flabel", "From")); listctrls.appendChild(dFrom);
+    listctrls.appendChild(el("span", "flabel", "To")); listctrls.appendChild(dTo);
+    listctrls.appendChild(sortSel);
+
+    var bdHolder = el("div"); main.appendChild(bdHolder);
+    var body = el("div"); main.appendChild(body);
+    var pg = pager("/api/emails", {
+      getParams: function () {
+        var p = {};
+        ["band", "cat", "year", "participant"].forEach(function (k) {
+          if (active[k]) p[k] = active[k];
+        });
+        if (search.value) p.q = search.value;
+        if (dFrom.value) p.date_from = dFrom.value;
+        if (dTo.value) p.date_to = dTo.value;
+        if (sortSel.value) p.sort = sortSel.value;
+        return p;
+      },
+      render: function (all) { emailThreadTable(body, all); },
+      // The lead and the break-down are both written from the SERVER's numbers for
+      // the filter actually in force — never from the rows that happen to be
+      // loaded, which is the mistake the old page made in every band heading.
+      onData: function (raw) {
+        var leadEl = main.querySelector(".pagehead-title .lead");
+        if (leadEl) leadEl.textContent = num((raw && raw.total) || 0) + " conversations.";
+        // The seed payload is unfiltered, so the person's display name is only
+        // knowable once the filtered facets arrive. Rewrite the heading then.
+        var h1 = main.querySelector(".pagehead-title h1");
+        if (h1) h1.textContent = titleFrom((raw && raw.facets) || {});
+        bdHolder.innerHTML = "";
+        emailBreakdown(bdHolder, (raw && raw.facets) || {}, active, function () {
+          pg.load(true);
+        });
+      },
+    });
+    main.appendChild(pg.footer);
+    var reload = debounce(function () { setQ({ q: search.value }); pg.load(true); }, 250);
+    search.oninput = reload;
+    function onDate() { setQ({ date_from: dFrom.value, date_to: dTo.value }); pg.load(true); }
+    dFrom.onchange = onDate; dTo.onchange = onDate;
+    sortSel.onchange = function () { setQ({ sort: sortSel.value }); pg.load(true); };
+    pg.load(true);
+  }
+
   P.emails = function (main, data) {
     // Thread detail when ?thread=ID is present.
     if (Q.thread) {
@@ -4028,81 +4346,14 @@
       }).catch(function (e) { holder.appendChild(el("p", "notice", "Couldn't load thread: " + esc(e.message))); });
       return;
     }
-    // G-6: ?participant=<address> narrows the list to threads with that person (set
-    // by clicking a correspondent card). The narrowing is SERVER-side (before the
-    // page slice), so total reflects the filtered count and the tail is reachable.
-    var participant = Q.participant || "";
-    if (participant) setCrumb(Q.crumb || ("Emails with " + participant));
-    var lead = participant
-      ? "Emails with " + participant + " — " + num((data && data.total) || 0) + " conversations."
-      : num((data && data.total) || 0) + " conversations, grouped by significance.";
-    var controls = head(main, "Emails", "Emails", lead);
-    if (participant) {
-      var clr = el("button", "btn chip", "✕ Clear filter");
-      clr.onclick = function () { go({ page: "emails" }, { replace: true }); };
-      controls.appendChild(clr);
-    }
-    // #11: in-list search (subject/participant) + date range + sort — tens of
-    // thousands of threads with no way to narrow beyond "Load more" batches was
-    // close to unusable for "find X" without falling back to full-text search.
-    var listctrls = el("div", "filterbar"); main.appendChild(listctrls);
-    var search = el("input", "listsearch"); search.type = "search";
-    search.placeholder = "Find by subject or person…"; search.autocomplete = "off";
-    search.setAttribute("aria-label", "Find emails");
-    if (Q.q) search.value = Q.q;
-    var dFrom = el("input"); dFrom.type = "date"; dFrom.title = "From date";
-    var dTo = el("input"); dTo.type = "date"; dTo.title = "To date";
-    if (Q.date_from) dFrom.value = Q.date_from;
-    if (Q.date_to) dTo.value = Q.date_to;
-    var sortSel = el("select"); sortSel.setAttribute("aria-label", "Sort emails");
-    [["", "Most significant"], ["recent", "Most recent"], ["subject", "Subject (A–Z)"]]
-      .forEach(function (o) { sortSel.appendChild(new Option(o[1], o[0])); });
-    if (Q.sort) sortSel.value = Q.sort;
-    listctrls.appendChild(search);
-    listctrls.appendChild(el("span", "flabel", "From")); listctrls.appendChild(dFrom);
-    listctrls.appendChild(el("span", "flabel", "To")); listctrls.appendChild(dTo);
-    listctrls.appendChild(sortSel);
-    var hasListFilter = !!(Q.q || Q.date_from || Q.date_to || Q.sort);
-    var body = el("div"); main.appendChild(body);
-    // Load-more paginates the thread list (no more silent 5,000-of-17k cap). A
-    // demoted thread is forced to significance 0 → the Unranked band → reachable on
-    // a later page and flagged demoted:true for its Restore button (no thread
-    // vanishes). Demote/Restore re-render (refetch page 1); the toggled thread
-    // resurfaces in its new band via Load-more.
-    var pg = pager("/api/emails", {
-      getParams: function () {
-        var p = {};
-        if (participant) p.participant = participant;
-        if (search.value) p.q = search.value;
-        if (dFrom.value) p.date_from = dFrom.value;
-        if (dTo.value) p.date_to = dTo.value;
-        if (sortSel.value) p.sort = sortSel.value;
-        return p;
-      },
-      render: function (all) { drawEmailBands(body, all); },
-      // The router's seed `data` above is the UNfiltered total (fetched before we
-      // know a participant/search/date filter is even active) — `lead` was built
-      // from it and is wrong until this fires with the real, server-filtered
-      // total. Without this, "Emails with X" (or a plain search) sits next to the
-      // global count — the exact thing that makes a filter look broken even
-      // though it isn't.
-      onData: function (raw) {
-        if (!participant) return;
-        var leadEl = main.querySelector(".pagehead-title .lead");
-        if (!leadEl) return;
-        leadEl.innerHTML = esc("Emails with " + participant + " — " +
-          num((raw && raw.total) || 0) + " conversations.");
-      },
-    });
-    main.appendChild(pg.footer);
-    var reload = debounce(function () { setQ({ q: search.value }); pg.load(true); }, 250);
-    search.oninput = reload;
-    function onDate() { setQ({ date_from: dFrom.value, date_to: dTo.value }); pg.load(true); }
-    dFrom.onchange = onDate; dTo.onchange = onDate;
-    sortSel.onchange = function () { setQ({ sort: sortSel.value }); pg.load(true); };
-    // The router's seed payload is UNfiltered (/api/emails with no params); when a
-    // participant/search/date/sort filter is active, refetch page 1 through it.
-    if (participant || hasListFilter) pg.load(true); else pg.seed(data);
+    var active = {
+      band: (Q.band != null && Q.band !== "") ? String(Q.band) : "",
+      cat: Q.cat || "", year: Q.year || "", participant: Q.participant || "",
+    };
+    var narrowed = !!(active.band || active.cat || active.year || active.participant
+                      || Q.q || Q.date_from || Q.date_to || Q.sort);
+    if (narrowed) return emailGroup(main, data, active);
+    return emailIndex(main, data);
   };
 
   // ── correspondents / relationships (G-6) ──

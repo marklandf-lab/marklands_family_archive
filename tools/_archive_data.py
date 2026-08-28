@@ -1992,6 +1992,45 @@ def _near_miss_hits(candidates, confirmed, decisions, target, rejections=None):
                                        -(r["score"] or 0), r["path"] or ""))
 
 
+def _vital_doc_summaries(summary):
+    """file → the plain-language summary the pipeline already wrote for it.
+
+    Not audience-gated here on purpose: the gate is applied where the item is
+    built, by reusing the deep-link decision that was made anyway (see
+    `_vital_summary_for`). Keeping the map whole means one build serves both
+    roles and the gate stays in ONE place instead of two that can drift.
+    Neutralised and capped exactly as document_rows does, so the same document
+    reads identically on the checklist and in the documents table.
+    """
+    out = {}
+    for d in summary.get("document_classifications", []) or []:
+        f = d.get("file")
+        if f and f not in out:
+            out[f] = neutralize_summary((d.get("summary") or "")[:400]) or None
+    return out
+
+
+def _vital_summary_for(summaries, path, browsable, *links):
+    """The summary to show on one vital-doc row, or None if this role may not
+    read it.
+
+    The rule is the one the row already enforces for its LINK: a summary is a
+    paraphrase of the document's contents, so anyone allowed the summary must
+    already be allowed the thing. `browsable` has had the role's document
+    exclusions applied (email-sourced everywhere; account_credentials for
+    family), and each link was resolved through the role's OWN conversation
+    index — so "can this role open it?" is already computed, and re-deriving it
+    from `role` here would be a second gate to keep in step. audience.py's
+    asymmetry decides the default: a family-side leak fails open, so an item
+    that resolved to nothing gets no summary rather than a best guess.
+    """
+    if not path:
+        return None
+    if path not in browsable and not any(links):
+        return None
+    return summaries.get(path)
+
+
 def near_miss_rows(paths, summary, role, target, decisions=None, threads_index=None):
     """The reviewable near-miss subset for ONE vital-doc target (examiner-only).
 
@@ -2039,6 +2078,7 @@ def near_miss_rows(paths, summary, role, target, decisions=None, threads_index=N
     unlinked = {r["path"] for r in rows if r["path"] and r["path"] not in browsable}
     thread_links = _vital_thread_links(md, role, unlinked, threads_index=threads_index)
     message_links = _vital_message_links(md, role, unlinked - set(thread_links))
+    summaries = _vital_doc_summaries(summary)
 
     out = []
     for r in rows:
@@ -2058,6 +2098,9 @@ def near_miss_rows(paths, summary, role, target, decisions=None, threads_index=N
             # database chunk deep-links into its conversation the same way.
             "conversation_id": mlink.get("conversation_id"),
             "conversation_subject": mlink.get("subject") or None,
+            # The near-miss drawer is a decision surface too — promote/dismiss
+            # are the same verbs — so it gets the same evidence as the checklist.
+            "summary": _vital_summary_for(summaries, p, browsable, link, mlink),
         })
     return out
 
@@ -2198,6 +2241,7 @@ def vital_docs_data(paths, summary, role, decisions=None, threads_index=None,
                 if i.get("path") and i.get("path") not in browsable}
     thread_links = _vital_thread_links(md, role, unlinked, threads_index=threads_index)
     message_links = _vital_message_links(md, role, unlinked - set(thread_links))
+    summaries = _vital_doc_summaries(summary)
 
     targets = []
     found_count = 0
@@ -2245,6 +2289,18 @@ def vital_docs_data(paths, summary, role, decisions=None, threads_index=None,
                 "reviewed": iid in reviewed or bool(i.get("_promoted")),
                 # This item came from the near-miss list, not from the pipeline.
                 "promoted": bool(i.get("_promoted")),
+                # WHAT THIS DOCUMENT IS, in the pipeline's own words. The row asks
+                # the examiner to certify that a file IS the deed / the will / the
+                # marriage certificate, and until now offered a filename and a
+                # filing location to decide on — neither of which answers the
+                # question. On 813_mf that yielded ten "Property deed / title"
+                # sign-offs that are, by their own summaries, a draft will, a
+                # durable power of attorney, a zoning letter and four emails about
+                # deed research. None of this text is new or newly computed; it was
+                # written at classification time and rendered further down the same
+                # page. None when this role may not read the underlying item.
+                "summary": _vital_summary_for(
+                    summaries, path, browsable, link, mlink),
             })
         found = bool(items)  # a target is "found" iff ≥1 item SURVIVES the overlay
         if found:
