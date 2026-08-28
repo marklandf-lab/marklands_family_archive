@@ -3394,6 +3394,11 @@
       blind ? "never read" : (r.disposition === "unknown" ? "no reason recorded" : "not confirmed")));
     rowEl.appendChild(head);
 
+    // Same evidence as a confirmed candidate: promote/dismiss here are the same
+    // judgement, so the row that asks for it carries the same sentence. It goes
+    // ABOVE the rejection reason — what the document is, then why the pipeline
+    // passed on it, which is the order the examiner needs them in.
+    if (r.summary) rowEl.appendChild(el("div", "vrow-sum", esc(r.summary)));
     if (r.reason) rowEl.appendChild(el("div", "vcand-reason", esc(r.reason)));
     if (r.snippet) rowEl.appendChild(el("div", "preview", esc(r.snippet)));
 
@@ -3528,6 +3533,16 @@
       link = el("span", "vrow-name", esc(label));
     }
     main_.appendChild(link);
+
+    // WHAT THIS DOCUMENT IS — the sentence the decision actually turns on, and
+    // the reason this row exists at all. "Yes, this is it" asks the examiner to
+    // certify that a file IS the deed; a filename cannot answer that, and until
+    // now a filename (plus where the pipeline filed it) was the whole row. The
+    // summary was written at classification time and was already on screen fifty
+    // rows further down, in the documents table — never where the click happens.
+    // Absent when the server withheld it because this role may not read the
+    // underlying item; the row still works, it just has less to go on.
+    if (it.summary) main_.appendChild(el("div", "vrow-sum", esc(it.summary)));
 
     // Provenance and decision state are EXAMINER vocabulary. "The pipeline filed
     // this under Legal · court filing" is meaningless to a family, and "Not yet
