@@ -58,6 +58,44 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-08-28 — the vital-doc row now carries the evidence its decision needs
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+Then open **http://127.0.0.1:7766/documents**, expand `Property deed / title`, and read
+the rows. Every sign-off there is visibly wrong now that each row says what the document
+is — **the sign-offs themselves have not been corrected.** Deciding what to do about them
+(undo them in the UI, or leave them for whoever owns the case) is the open question, and
+it is the user's call, not a code change.
+
+### What shipped — branch `claude/vital-row-summary`, NOT yet pushed or PR'd
+
+- **The summary is on the decision row.** Confirmed candidates and near-misses both. The
+  text already existed — written at classification time, rendered further down the same
+  page in the documents table, never where the click happens.
+- **Who may read it reuses the gate that was already computed** — the role's browsable-doc
+  map and its own conversation index — rather than adding a second gate to drift out of
+  step. An item resolving to neither gets nothing, so the family side fails closed.
+- Four tests, `tests/unit/test_archive_data.py`, all failing against `main` with
+  `KeyError: 'summary'` before the change. Verify that claim by checking the branch out
+  against `main` — do not take this file's word for it.
+
+### What this exposed, still open
+
+- **The recorded sign-offs are wrong and are still recorded.** Read them yourself rather
+  than trusting this line: expand `Property deed / title` on the running app. The release
+  gate trusts these, so they matter. Undo is per-row in the UI ("Undo — not this").
+- The **category filter** still renders the whole 27-type checklist above the filtered
+  list, and the panel's four numbers still describe the whole collection while the page
+  below shows one category. Measure it before deciding it is urgent — it was ~1,400px on
+  2026-08-28, and last session's rebuild already shrank it a great deal.
+- Everything under the 2026-08-26 "Known issues" below is still open unless noted.
+
+---
+
 ## 🎯 2026-08-26 — navigation, three screens rebuilt, and the review queue connected
 
 ### ▶ Next action — one command, then open the page
