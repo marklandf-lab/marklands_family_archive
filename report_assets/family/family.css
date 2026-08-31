@@ -1055,3 +1055,14 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
 .ebd-chip:hover { border-color: var(--accent); color: var(--accent); }
 .ebd-chip-n { font-family: var(--mono); font-size: 11px; color: var(--muted); }
 .ebd-chip:hover .ebd-chip-n { color: var(--accent); }
+
+/* Recordings, grouped by kind. The heading has to separate two rows that are
+   otherwise identical in weight, so it gets air above it and a rule. */
+.rec-kind { font-size: 15px; margin: 26px 0 10px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--line); }
+.reading > .rec-kind:first-child { margin-top: 4px; }
+/* What the classifier said, under the row it produced. Quiet and monospaced: it
+   is a provenance note for the examiner, not part of the recording's own text,
+   and it sits next to a summary it sometimes contradicts. */
+.rec-cat { font-family: var(--mono); font-size: 10.5px; letter-spacing: .03em;
+  color: var(--muted); margin-top: 6px; }

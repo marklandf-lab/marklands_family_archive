@@ -2595,3 +2595,56 @@ def test_vital_item_summary_withheld_when_the_email_is_unreachable(tmp_path):
     item = fam["deed_title"]["items"][0]
     assert item["thread_id"] is None          # nothing resolved it
     assert item["summary"] is None
+
+
+# ── audio kinds: the Recordings page's six groups ────────────────────────────
+
+def test_audio_kind_maps_every_classifier_category():
+    """Every category the classifier emits must land somewhere deliberate."""
+    assert ad.audio_kind("voicemail") == "voicemail"
+    assert ad.audio_kind("voice_memo") == "voice_note"
+    assert ad.audio_kind("personal_recording") == "conversation"
+    assert ad.audio_kind("interview_or_meeting") == "conversation"
+    assert ad.audio_kind("music_or_performance") == "music"
+    assert ad.audio_kind("non_speech") == "untranscribed"
+    assert ad.audio_kind("miscellaneous") == "other"
+
+
+def test_audio_kind_keeps_voicemail_apart_from_voice_notes():
+    """Both are one person talking, so merging them is tempting. A voicemail is
+    somebody ELSE's voice — often the voice of the person who died — and there are
+    a couple of dozen against several hundred notes. Merged, they disappear."""
+    assert ad.audio_kind("voicemail") != ad.audio_kind("voice_memo")
+
+
+def test_audio_kind_does_not_file_untranscribed_audio_as_other():
+    """`non_speech` is a processing outcome, not a kind: on 813_mf it is exactly
+    the set with no transcript, and the files are numbered album tracks. Filing it
+    under "other" would bury a few hundred songs."""
+    assert ad.audio_kind("non_speech") == "untranscribed"
+    assert ad.audio_kind_label("untranscribed") == "Nothing was transcribed"
+
+
+def test_audio_kind_never_drops_an_unknown_category():
+    """A classifier label we have never seen must still reach the page."""
+    for unknown in ("a_brand_new_label", "", None, "   ", "VOICEMAIL_TYPO"):
+        assert ad.audio_kind(unknown) == "other"
+    # and the known ones are case/whitespace tolerant
+    assert ad.audio_kind("  Voicemail  ") == "voicemail"
+
+
+def test_audio_rows_carry_kind_and_label(tmp_path):
+    summary = {"audio_classifications": [
+        {"file": "/a/vm.m4a", "filename": "vm.m4a", "category": "voicemail"},
+        {"file": "/a/song.aif", "filename": "song.aif", "category": "non_speech"},
+        {"file": "/a/new.wav", "filename": "new.wav", "category": "some_new_label"},
+    ]}
+    rows = ad.audio_rows(summary, [], "family", {})
+    by = {r["file"]: r for r in rows}
+    assert (by["/a/vm.m4a"]["kind"], by["/a/vm.m4a"]["kind_label"]) \
+        == ("voicemail", "Voicemail")
+    assert by["/a/song.aif"]["kind_label"] == "Nothing was transcribed"
+    assert by["/a/new.wav"]["kind"] == "other"
+    # the raw classifier answer is kept beside it — the classifier is not reliable
+    # enough to throw away what it actually said
+    assert by["/a/song.aif"]["category"] == "non_speech"

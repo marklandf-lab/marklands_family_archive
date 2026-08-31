@@ -1302,6 +1302,53 @@ def _clean_recording_name(name):
     return stripped or name
 
 
+# ── audio kinds ───────────────────────────────────────────────────────────────
+# The classifier emits seven categories; the Recordings page groups them into six
+# KINDS, because "what sort of listening is this" is the question someone browsing
+# an estate's audio is actually asking.
+#
+# Two of the six are deliberately not a straight rename:
+#
+#   * `voicemail` stays apart from `voice_memo` even though both are one person
+#     talking. A voicemail is somebody ELSE's voice — very often the voice of the
+#     person who died — and there are a couple of dozen of them against several
+#     hundred self-recorded notes. Merged, they vanish.
+#
+#   * `non_speech` is not a kind of recording at all; it is a processing outcome.
+#     On 813_mf its members are EXACTLY the set with no transcript, and their
+#     summary is the literal string "No usable speech transcript." Their filenames
+#     are numbered album tracks. Calling that bucket "other" would file a few
+#     hundred songs under nothing-in-particular, so it is labelled for what it
+#     actually reports: transcription returned nothing.
+#
+# An unrecognised category falls to "other" rather than being dropped — a new
+# classifier label must never make recordings disappear from the page.
+AUDIO_KINDS = [
+    ("voicemail",     "Voicemail",                ("voicemail",)),
+    ("voice_note",    "Voice notes",              ("voice_memo",)),
+    ("conversation",  "Conversations & meetings", ("personal_recording",
+                                                   "interview_or_meeting")),
+    ("music",         "Music & performance",      ("music_or_performance",)),
+    ("untranscribed", "Nothing was transcribed",  ("non_speech",)),
+    ("other",         "Other",                    ("miscellaneous",)),
+]
+AUDIO_KIND_ORDER = [k for k, _, _ in AUDIO_KINDS]
+AUDIO_KIND_LABELS = {k: lab for k, lab, _ in AUDIO_KINDS}
+_AUDIO_CATEGORY_TO_KIND = {c: k for k, _, cats in AUDIO_KINDS for c in cats}
+
+
+def audio_kind(category):
+    """The Recordings-page kind slug for one classifier category. Anything the
+    mapping does not know — a new label, a blank, None — lands in "other", so the
+    page keeps showing the recording instead of silently losing it."""
+    return _AUDIO_CATEGORY_TO_KIND.get((category or "").strip().lower(), "other")
+
+
+def audio_kind_label(kind):
+    """Display name for a kind slug."""
+    return AUDIO_KIND_LABELS.get(kind, "Other")
+
+
 def audio_rows(summary, transcription_index, role, cfg):
     deliver = cfg.get("transcribe", {}).get("deliver", True)
     if role == "family" and deliver is False:
@@ -1321,6 +1368,13 @@ def audio_rows(summary, transcription_index, role, cfg):
             "file": f,
             "name": _clean_recording_name(a.get("filename") or os.path.basename(a.get("file", ""))),
             "category": a.get("category") or "uncategorized",
+            # The grouping the Recordings page reads. Kept beside the raw category
+            # rather than replacing it: the classifier is demonstrably unsure of
+            # itself — on 813_mf, 17 of the 47 recordings that exist in two file
+            # formats got a DIFFERENT category for each copy — so the examiner
+            # needs to see what it actually said, not only where we filed it.
+            "kind": audio_kind(a.get("category")),
+            "kind_label": audio_kind_label(audio_kind(a.get("category"))),
             "significance": a.get("significance"),
             "summary": neutralize_summary(a.get("summary")),
             "duration": a.get("duration") if a.get("duration") is not None else tr.get("duration"),

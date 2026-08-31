@@ -322,7 +322,9 @@
      "q", "otd", "group", "target", "list", "rec",
      // Emails index drill-down: significance band, year, and the break-down tab
      // the reader last had open, so a link into a group is fully addressable.
-     "band", "year", "by", "sort"].forEach(function (k) {
+     "band", "year", "by", "sort",
+     // Recordings: which audio kind is being shown.
+     "kind"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -383,7 +385,7 @@
      // existed, with the consequence this comment describes: choosing a sort and
      // then touching any other control dropped it from the URL, so a reload or a
      // shared link lost it. `by` is the open break-down tab.
-     "band", "year", "by", "sort",
+     "band", "year", "by", "sort", "kind",
      "group", "target", "list", "crumb", "from"]
       .forEach(function (k) { if (Q[k]) q.push(k + "=" + encodeURIComponent(Q[k])); });
     return location.pathname + (q.length ? "?" + q.join("&") : "");
@@ -4706,44 +4708,125 @@
     });
   }
 
+  // ── Recordings: grouped by what kind of listening it is ──
+  // 1,051 recordings used to render as one flat significance-sorted list, every
+  // row carrying its own <audio> element, with no way to ask for the voicemails.
+  // The classifier's category was on every row and on /api/overview as
+  // `audio_counts`, and the page used neither.
+  //
+  // The grouping (and its reasoning) lives server-side in _archive_data.AUDIO_KINDS
+  // where pytest can hold it; the page reads `kind` / `kind_label` off each row.
+  // Counting here is honest because /api/recordings is not paginated — the client
+  // has every row, so a count over them IS the total.
+  var AUDIO_KIND_ORDER = ["voicemail", "voice_note", "conversation", "music",
+                          "untranscribed", "other"];
+
+  function recordingCard(r) {
+    var it = el("div", "item card-row");
+    addPick(it, r.file);
+    var affordance = r.has_transcript
+      ? ' <span class="tchip" title="Transcript available">📝 transcript</span>' : "";
+    var body = el("div", "ibody",
+      "<h3>" + esc(r.name) + " " + sig(r.significance) + affordance + "</h3>" +
+      (r.summary ? '<div class="why">' + esc(r.summary) + "</div>" : "") +
+      '<audio controls preload="none" src="' + mediaURL(r.file) + '"></audio>' +
+      (r.preview ? '<div class="body">' + esc(r.preview) + "</div>" : ""));
+    // What the classifier ACTUALLY said, for the examiner, beside where we filed
+    // it. The two disagree often enough to matter: recordings that exist in two
+    // file formats get two different answers about a third of the time, so a
+    // reader who can only see the group cannot tell a real grouping from a coin
+    // toss. Family sees the group only — this is a confidence signal, not content.
+    if (EXAMINER && r.category) {
+      body.appendChild(el("div", "rec-cat",
+        "Classified as " + esc(pretty(r.category))));
+    }
+    var actrow = el("div", "actrow");
+    var open = el("button", "btn small", "Open transcript");
+    open.onclick = function () {
+      go({ page: "recordings", rec: r.file },
+         { label: cleanRecordingName(basename(r.file)) });
+    };
+    actrow.appendChild(open);
+    var exp = el("button", "btn small", "Export");
+    exp.onclick = function () { doVerb("/api/export", { items: [r.file] }, "Exported " + r.name); };
+    actrow.appendChild(exp);
+    if (EXAMINER) {
+      var disc = el("button", "btn small danger", "Discard");
+      disc.onclick = function () {
+        doVerb("/api/banish", { src: r.file }, "Discarded").then(function (x) { if (x) it.remove(); });
+      };
+      actrow.appendChild(disc);
+    }
+    body.appendChild(actrow);
+    it.appendChild(body);
+    return it;
+  }
+
   P.recordings = function (main, rows) {
     // Recording detail (seek-synced player + transcript) when ?rec=<file> is present.
     if (Q.rec) { recordingDetail(main, Q.rec); return; }
-    head(main, "Recordings", "Recordings", rows.length + " recordings. Press play.");
-    var wrap = el("div", "reading");
+    rows = rows || [];
+
+    // Count every kind present, in the server's order. A kind with nothing in it
+    // is not offered — an empty group is a dead click.
+    var byKind = {};
     rows.forEach(function (r) {
-      var it = el("div", "item card-row");
-      addPick(it, r.file);
-      var affordance = r.has_transcript
-        ? ' <span class="tchip" title="Transcript available">📝 transcript</span>' : "";
-      var body = el("div", "ibody",
-        "<h3>" + esc(r.name) + " " + sig(r.significance) + affordance + "</h3>" +
-        (r.summary ? '<div class="why">' + esc(r.summary) + "</div>" : "") +
-        '<audio controls preload="none" src="' + mediaURL(r.file) + '"></audio>' +
-        (r.preview ? '<div class="body">' + esc(r.preview) + "</div>" : ""));
-      var actrow = el("div", "actrow");  // explicit per-item Export / Discard (#12)
-      // Open the seek-synced detail (transcript + click-to-seek).
-      var open = el("button", "btn small", "Open transcript");
-      open.onclick = function () {
-        go({ page: "recordings", rec: r.file },
-           { label: cleanRecordingName(basename(r.file)) });
-      };
-      actrow.appendChild(open);
-      var exp = el("button", "btn small", "Export");
-      exp.onclick = function () { doVerb("/api/export", { items: [r.file] }, "Exported " + r.name); };
-      actrow.appendChild(exp);
-      if (EXAMINER) {
-        var disc = el("button", "btn small danger", "Discard");
-        disc.onclick = function () {
-          doVerb("/api/banish", { src: r.file }, "Discarded").then(function (x) { if (x) it.remove(); });
-        };
-        actrow.appendChild(disc);
-      }
-      body.appendChild(actrow);
-      it.appendChild(body);
-      wrap.appendChild(it);
+      var k = r.kind || "other";
+      (byKind[k] = byKind[k] || []).push(r);
     });
-    main.appendChild(wrap);
+    var kinds = AUDIO_KIND_ORDER.filter(function (k) { return (byKind[k] || []).length; });
+    // Any kind the server invented that this list has not heard of still shows,
+    // after the known ones, rather than silently vanishing from the page.
+    Object.keys(byKind).forEach(function (k) {
+      if (kinds.indexOf(k) === -1) kinds.push(k);
+    });
+    function labelFor(k) {
+      var first = (byKind[k] || [])[0];
+      return (first && first.kind_label) || pretty(k);
+    }
+
+    var active = Q.kind && byKind[Q.kind] ? Q.kind : "";
+    if (active) setCrumb(Q.crumb || labelFor(active));
+    head(main, "Recordings", active ? labelFor(active) : "Recordings",
+      active ? num(byKind[active].length) + " recordings."
+             : num(rows.length) + " recordings, in " + num(kinds.length) + " kinds.");
+
+    // The filter strip. Same shape as the Emails break-down: each chip links and
+    // carries its own count, so a chip can only claim what was actually counted.
+    var strip = el("div", "ebd"); main.appendChild(strip);
+    var chips = el("div", "ebd-body"); strip.appendChild(chips);
+    function chip(k, label, n) {
+      var a = el("a", "ebd-chip" + (active === k ? " on" : ""));
+      a.href = urlFor(k ? { page: "recordings", kind: k } : { page: "recordings" },
+                      { label: label });
+      a.appendChild(el("span", "ebd-chip-l", esc(label)));
+      a.appendChild(el("span", "ebd-chip-n", num(n)));
+      chips.appendChild(a);
+    }
+    chip("", "All recordings", rows.length);
+    kinds.forEach(function (k) { chip(k, labelFor(k), byKind[k].length); });
+    // The grouping is only as good as the classifier, and this one contradicts
+    // itself often enough that saying so is part of reporting it honestly.
+    if (EXAMINER) {
+      strip.appendChild(el("p", "eix-note",
+        "Grouped by the pipeline's own classification of each recording, which is "
+        + "not always right — the same recording saved in two formats is "
+        + "sometimes filed two different ways. Each row says what it was "
+        + "classified as."));
+    }
+
+    var wrap = el("div", "reading"); main.appendChild(wrap);
+    if (active) {
+      byKind[active].forEach(function (r) { wrap.appendChild(recordingCard(r)); });
+      return;
+    }
+    // Unfiltered: every kind under its own heading, in order, so the shape of the
+    // collection is readable without picking one first.
+    kinds.forEach(function (k) {
+      var h = el("h2", "rec-kind", labelFor(k) + " (" + num(byKind[k].length) + ")");
+      wrap.appendChild(h);
+      byKind[k].forEach(function (r) { wrap.appendChild(recordingCard(r)); });
+    });
   };
 
   P.accounts = function (main, d) {
