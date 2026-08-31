@@ -1122,3 +1122,20 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
   .rep-table td, .rep-table th { border-bottom: 1px solid #ccc; }
   .rep-cap::after { content: " — retrieval reached its limit for this type"; }
 }
+
+/* Reports index + family report. */
+.rep-card { display: block; text-decoration: none; color: var(--ink); }
+.rep-card:hover { border-color: var(--accent); }
+.rep-card h2 { margin-bottom: 4px; }
+.rep-card:hover h2 { color: var(--accent); }
+/* The opening sentence of the family report — the one thing a reader should
+   take away if they read nothing else, so it is set larger than body copy. */
+.rep-span { font-size: 17px; line-height: 1.5; margin: 0 0 20px; color: var(--ink); }
+.rep-bars { background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 14px 18px; }
+.rep-row { cursor: default; }
+.rep-row:hover .eix-label { color: var(--ink); text-decoration: none; }
+@media print {
+  .rep-bars { border: 1px solid #ccc; }
+  .rep-span { font-size: 15px; }
+}

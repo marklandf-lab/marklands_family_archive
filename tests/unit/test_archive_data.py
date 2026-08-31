@@ -2720,3 +2720,81 @@ def test_estate_report_drops_the_absent_caveat_when_something_is_absent():
 def test_estate_report_unavailable_when_the_scan_never_ran():
     assert ad.estate_report_data({"available": False})["available"] is False
     assert ad.estate_report_data(None)["available"] is False
+
+
+# ── the family report: an orientation document ──────────────────────────────
+
+def _family_kwargs(**over):
+    base = dict(
+        counts={"photos": 100, "videos": 5, "audio": 10, "documents": 40,
+                "emails": 200, "messages": 3, "places": 7},
+        scene_counts={"beach": 30, "wedding": 4},
+        audio_rows_=[{"kind": "voicemail"}, {"kind": "voicemail"}, {"kind": "music"}],
+        document_index=[{"category": "financial", "count": 25},
+                        {"category": "work_correspondence", "count": 15}],
+        email_categories=[{"name": "personal_correspondence", "count": 120}],
+        timeline={"chapters": [{"date_from": "2011-04-02", "date_to": "2012-01-09"},
+                               {"date_from": "2009-06-01", "date_to": "2010-02-02"}],
+                  "undated": {"count": 25}},
+        people=[{"name": "A", "named": True, "photo_count": 9},
+                {"name": "Person_02", "named": False, "photo_count": 3}],
+    )
+    base.update(over)
+    return base
+
+
+def test_family_report_span_is_the_outer_edge_of_every_chapter():
+    rep = ad.family_report_data(**_family_kwargs())
+    assert (rep["span"]["from"], rep["span"]["to"]) == ("2009-06-01", "2012-01-09")
+
+
+def test_family_report_span_survives_a_chapter_with_no_dates():
+    """An empty date must not win the comparison and drag the range to ''."""
+    rep = ad.family_report_data(**_family_kwargs(
+        timeline={"chapters": [{"date_from": "", "date_to": None},
+                               {"date_from": "2015-01-01", "date_to": "2015-12-31"}],
+                  "undated": {"count": 0}}))
+    assert (rep["span"]["from"], rep["span"]["to"]) == ("2015-01-01", "2015-12-31")
+    # nothing dated at all → no span rather than a fabricated one
+    empty = ad.family_report_data(**_family_kwargs(timeline={"chapters": []}))
+    assert (empty["span"]["from"], empty["span"]["to"]) == (None, None)
+
+
+def test_family_report_counts_people_named_and_not():
+    rep = ad.family_report_data(**_family_kwargs())
+    assert (rep["people"]["total"], rep["people"]["named"], rep["people"]["unnamed"]) \
+        == (2, 1, 1)
+    # only named people are offered as chips — "Person_02" is not a name
+    assert [p["name"] for p in rep["people"]["top"]] == ["A"]
+
+
+def test_family_report_recording_kinds_come_from_the_rows():
+    rep = ad.family_report_data(**_family_kwargs())
+    recs = [s for s in rep["sections"] if s["key"] == "recordings"][0]
+    assert [(i["label"], i["count"]) for i in recs["items"]] == \
+        [("Voicemail", 2), ("Music & performance", 1)]
+
+
+def test_family_report_documents_come_from_the_index_not_classifications():
+    """The document classifications count every email as a document too — the
+    difference between about 4,600 and about 59,000 on a real case, and the larger
+    number has reached a screen before. The index is the only honest source."""
+    rep = ad.family_report_data(**_family_kwargs())
+    docs = [s for s in rep["sections"] if s["key"] == "documents"][0]
+    assert sum(i["count"] for i in docs["items"]) == 40
+    assert [i["label"] for i in docs["items"]] == ["Financial", "Work correspondence"]
+
+
+def test_family_report_says_how_much_is_undated_and_unnamed():
+    rep = ad.family_report_data(**_family_kwargs())
+    text = " ".join(rep["limitations"])
+    assert "25 items carry no date — about 25%" in text
+    assert "1 of the 2 people recognised have not been given a name" in text
+    assert "only the material that was supplied" in text
+
+
+def test_family_report_drops_the_undated_caveat_when_everything_is_dated():
+    rep = ad.family_report_data(**_family_kwargs(
+        timeline={"chapters": [{"date_from": "2015-01-01", "date_to": "2015-12-31"}],
+                  "undated": {"count": 0}}))
+    assert not any("carry no date" in x for x in rep["limitations"])

@@ -1429,6 +1429,153 @@ def estate_report_data(vital_docs, case_id=None, generated_at=None):
     }
 
 
+def _report_label(slug):
+    """A category slug as a person would read it: 'work_correspondence' →
+    'Work correspondence'. There is no Python `pretty()` in this module — the
+    front end has its own — so report labels are built here rather than shipped
+    as slugs and prettified twice with two different results."""
+    return (slug or "").replace("_", " ").strip().capitalize() or "Uncategorised"
+
+
+def _report_span(timeline):
+    """(earliest, latest) dated day across the timeline's chapters, or (None, None).
+
+    Read off the chapters rather than re-scanning every item: the chapters are
+    already the dated material, grouped, and a chapter that somehow carries no
+    dates simply contributes nothing instead of poisoning the range with "".
+    """
+    lo = hi = None
+    for c in (timeline or {}).get("chapters", []) or []:
+        a, b = c.get("date_from"), c.get("date_to")
+        for d in (a, b):
+            if not d:
+                continue
+            if lo is None or d < lo:
+                lo = d
+            if hi is None or d > hi:
+                hi = d
+    return lo, hi
+
+
+def family_report_data(*, counts, scene_counts, audio_rows_, document_index,
+                       email_categories, timeline, people, case_id=None,
+                       generated_at=None):
+    """An orientation document for somebody who has just been handed the archive.
+
+    Different question from the estate report, and so a different shape. That one
+    asks "do we hold the paperwork" and is answerable in three states. This one
+    asks "what is in here, and what does it hold" — the thing a family member
+    wants before they know what to click.
+
+    Two rules it inherits from the rest of this codebase, because both have
+    already burned us here:
+
+      * Count documents from the DOCUMENTS INDEX, never from
+        summary.document_classifications. The latter classifies every email as a
+        document too — on 813_mf that is the difference between 4,643 and about
+        59,000, and the larger number has been shipped to a screen before.
+
+      * Say what is NOT known as prominently as what is. Two thirds of the
+        photographs carry no date; most identified faces have no name. A report
+        that lists holdings and omits that is describing a more complete archive
+        than the one that exists.
+    """
+    counts = counts or {}
+    lo, hi = _report_span(timeline)
+    undated = ((timeline or {}).get("undated") or {}).get("count") or 0
+
+    people = people or []
+    named = sum(1 for p in people if p.get("named"))
+
+    def rows(pairs):
+        return [{"label": lab, "count": n} for lab, n in pairs if n]
+
+    sections = []
+
+    # Photographs by what the classifier saw in them — the most browsable cut,
+    # and the one that reads least like an inventory.
+    sections.append({
+        "key": "photos", "label": "Photographs, by what is in them",
+        "note": "A photograph can be in more than one of these.",
+        "items": rows(sorted((scene_counts or {}).items(), key=lambda kv: -kv[1])),
+    })
+
+    # Recordings by kind, folded through the same mapping the Recordings page uses.
+    kind_counts = {}
+    for r in audio_rows_ or []:
+        k = r.get("kind") or "other"
+        kind_counts[k] = kind_counts.get(k, 0) + 1
+    sections.append({
+        "key": "recordings", "label": "Recordings, by kind",
+        "note": "Grouped by the pipeline's classification, which is approximate — "
+                "see the limitations below.",
+        "items": rows([(audio_kind_label(k), kind_counts.get(k, 0))
+                       for k in AUDIO_KIND_ORDER]),
+    })
+
+    sections.append({
+        "key": "documents", "label": "Documents, by kind",
+        "note": "Scanned and digital documents. Emails are counted separately.",
+        "items": rows(sorted(
+            [(_report_label(c.get("category")), c.get("count") or 0)
+             for c in (document_index or [])], key=lambda kv: -kv[1])),
+    })
+
+    sections.append({
+        "key": "emails", "label": "Email conversations, by subject",
+        "note": "A conversation can be in more than one of these.",
+        "items": rows(sorted(
+            [(_report_label(c.get("name")), c.get("count") or 0)
+             for c in (email_categories or [])], key=lambda kv: -kv[1])),
+    })
+
+    limitations = []
+    photos = counts.get("photos") or 0
+    if undated:
+        share = " — about {}%".format(round(100.0 * undated / photos)) if photos else ""
+        limitations.append(
+            "{u:,} items carry no date{share}. They are in the archive and "
+            "searchable, but they cannot appear on the timeline or in any figure "
+            "above that is grouped by year.".format(u=undated, share=share))
+    if people:
+        unnamed = len(people) - named
+        if unnamed:
+            limitations.append(
+                "{n:,} of the {t:,} people recognised have not been given a name. "
+                "They are distinct faces the archive can group, not strangers — "
+                "naming them is a person's job and has not been finished.".format(
+                    n=unnamed, t=len(people)))
+    limitations.append(
+        "Recordings are grouped by an automatic classification that is known to "
+        "be unreliable on this collection; treat the recording kinds as a "
+        "starting point rather than a fact.")
+    limitations.append(
+        "This describes only the material that was supplied. Anything never "
+        "collected — a device not handed over, an account not exported — is "
+        "absent from these figures without appearing as a gap.")
+
+    return {
+        "case_id": case_id,
+        "generated_at": generated_at,
+        "span": {"from": lo, "to": hi, "undated": undated},
+        "headline": [
+            {"label": "photographs", "count": counts.get("photos") or 0},
+            {"label": "videos", "count": counts.get("videos") or 0},
+            {"label": "recordings", "count": counts.get("audio") or 0},
+            {"label": "documents", "count": counts.get("documents") or 0},
+            {"label": "email conversations", "count": counts.get("emails") or 0},
+            {"label": "message threads", "count": counts.get("messages") or 0},
+        ],
+        "people": {"total": len(people), "named": named,
+                   "unnamed": len(people) - named,
+                   "top": [{"name": p.get("name"), "photos": p.get("photo_count") or 0}
+                           for p in people if p.get("named")][:12]},
+        "places": counts.get("places") or 0,
+        "sections": sections,
+        "limitations": limitations,
+    }
+
+
 # ── audio kinds ───────────────────────────────────────────────────────────────
 # The classifier emits seven categories; the Recordings page groups them into six
 # KINDS, because "what sort of listening is this" is the question someone browsing

@@ -323,8 +323,8 @@
      // Emails index drill-down: significance band, year, and the break-down tab
      // the reader last had open, so a link into a group is fully addressable.
      "band", "year", "by", "sort",
-     // Recordings: which audio kind is being shown.
-     "kind"].forEach(function (k) {
+     // Recordings: which audio kind is being shown. Reports: which report.
+     "kind", "r"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -385,7 +385,7 @@
      // existed, with the consequence this comment describes: choosing a sort and
      // then touching any other control dropped it from the URL, so a reload or a
      // shared link lost it. `by` is the open break-down tab.
-     "band", "year", "by", "sort", "kind",
+     "band", "year", "by", "sort", "kind", "r",
      "group", "target", "list", "crumb", "from"]
       .forEach(function (k) { if (Q[k]) q.push(k + "=" + encodeURIComponent(Q[k])); });
     return location.pathname + (q.length ? "?" + q.join("&") : "");
@@ -4716,20 +4716,147 @@
   // hard to qualify for, and the limitations are stated up front rather than in
   // a footnote, because a reader who stops halfway must not stop having been
   // misled.
-  P.report = function (main, d) {
+  // A label / count / proportion row, no link. Same visual grammar as the Emails
+  // index so a count means the same thing everywhere; bar widths go through
+  // CSSOM because the page CSP forbids an inline style attribute.
+  function reportBars(container, items) {
+    var max = (items || []).reduce(function (m, i) { return Math.max(m, i.count); }, 0);
+    (items || []).forEach(function (i) {
+      var row = el("div", "eix-row rep-row");
+      row.appendChild(el("span", "eix-label", esc(i.label)));
+      row.appendChild(el("span", "eix-count", num(i.count)));
+      var track = el("span", "eix-bar"), fill = el("span", "eix-fill");
+      fill.style.width = Math.max(2, Math.round((i.count / (max || 1)) * 100)) + "%";
+      track.appendChild(fill);
+      row.appendChild(track);
+      container.appendChild(row);
+    });
+  }
+
+  function reportHead(main, title, d) {
+    var controls = head(main, "Reports", title,
+      "Case " + esc((d && d.case_id) || "") + " · prepared "
+      + esc((d && d.generated_at) || ""));
+    var back = el("button", "btn chip", "← All reports");
+    back.onclick = function () { go({ page: "reports" }); };
+    controls.appendChild(back);
+    var pr = el("button", "btn", "Print / Save as PDF");
+    pr.onclick = function () { window.print(); };
+    controls.appendChild(pr);
+    return controls;
+  }
+
+  function reportLimits(main, list) {
+    var lim = el("section", "rep-limits");
+    lim.appendChild(el("h2", null, "What this report cannot tell you"));
+    var ul = el("ul");
+    (list || []).forEach(function (x) { ul.appendChild(el("li", null, esc(x))); });
+    lim.appendChild(ul);
+    main.appendChild(lim);
+  }
+
+  function reportDate(iso) {
+    if (!iso) return "";
+    var p = String(iso).slice(0, 10).split("-");
+    if (p.length !== 3) return esc(iso);
+    var M = ["January", "February", "March", "April", "May", "June", "July",
+             "August", "September", "October", "November", "December"];
+    return (parseInt(p[2], 10) + " " + (M[parseInt(p[1], 10) - 1] || "") + " " + p[0]);
+  }
+
+  // The family report: an orientation document for somebody who has just been
+  // handed the archive, rather than a statement of position on it. Limitations
+  // sit at the END here, unlike the estate report where they lead — that one is
+  // acted on by a professional and its caveats change what the figures support;
+  // this one is read by a family, and opening on what is missing would be a
+  // strange way to hand somebody their own life back.
+  function familyReport(main, d) {
+    reportHead(main, "Family report", d);
+    var span = d.span || {};
+    if (span.from && span.to) {
+      main.appendChild(el("p", "rep-span",
+        "This archive covers " + esc(reportDate(span.from)) + " to "
+        + esc(reportDate(span.to)) + "."));
+    }
+
+    var bar = el("div", "vstats rep-stats");
+    (d.headline || []).forEach(function (h) { vitalStat(bar, h.count, h.label); });
+    main.appendChild(bar);
+
+    var ppl = d.people || {};
+    var psec = el("section", "rep-group");
+    psec.appendChild(el("h2", null, "People"));
+    psec.appendChild(el("p", "rep-note",
+      num(ppl.total || 0) + " people are recognised across the photographs, "
+      + num(ppl.named || 0) + " of them named. They appear in "
+      + num(d.places || 0) + " places."));
+    if ((ppl.top || []).length) {
+      var chips = el("div", "ebd-body");
+      ppl.top.forEach(function (p) {
+        var c = el("span", "ebd-chip");
+        c.appendChild(el("span", "ebd-chip-l", esc(p.name)));
+        c.appendChild(el("span", "ebd-chip-n", num(p.photos)));
+        chips.appendChild(c);
+      });
+      psec.appendChild(chips);
+    }
+    main.appendChild(psec);
+
+    (d.sections || []).forEach(function (sec) {
+      if (!(sec.items || []).length) return;
+      var el_ = el("section", "rep-group");
+      el_.appendChild(el("h2", null, esc(sec.label)));
+      if (sec.note) el_.appendChild(el("p", "rep-note", esc(sec.note)));
+      var panel = el("div", "rep-bars");
+      reportBars(panel, sec.items);
+      el_.appendChild(panel);
+      main.appendChild(el_);
+    });
+
+    reportLimits(main, d.limitations);
+  }
+
+  P.reports = function (main, d) {
+    // The router seeds every page from /api/<page> with NO query string, so the
+    // payload above is always the index. A specific report has to fetch itself —
+    // same as the recording and email-thread detail views do.
+    if (Q.r === "family" || Q.r === "estate") {
+      var which = Q.r;
+      setCrumb(which === "family" ? "Family report" : "Estate document report");
+      var holder = el("div"); main.appendChild(holder);
+      getJSON("/api/reports?r=" + encodeURIComponent(which)).then(function (rep) {
+        holder.innerHTML = "";
+        if (which === "family") familyReport(holder, rep);
+        else estateReport(holder, rep);
+      }).catch(function (e) {
+        holder.appendChild(el("p", "notice",
+          "Couldn't build the report: " + esc(e.message)));
+      });
+      return;
+    }
+    // The index.
+    head(main, "Reports", "Reports",
+      "Statements drawn from the archive, meant to be printed and handed over.");
+    var wrap = el("div", "eix-cols"); main.appendChild(wrap);
+    ((d && d.reports) || []).forEach(function (r) {
+      var card = el("a", "eix-panel rep-card");
+      card.href = urlFor({ page: "reports", r: r.key }, { label: r.label });
+      card.appendChild(el("h2", null, esc(r.label)));
+      card.appendChild(el("p", "eix-note", esc(r.note)));
+      wrap.appendChild(card);
+    });
+  };
+
+  function estateReport(main, d) {
     if (!d || d.available === false) {
-      head(main, "Estate report", "Estate document report", "");
+      reportHead(main, "Estate document report", d);
       main.appendChild(el("p", "notice",
         "The vital-document scan has not run for this case, so there is nothing "
         + "to report on yet."));
       return;
     }
     var t = d.totals;
-    var controls = head(main, "Estate report", "Estate document report",
-      "Case " + esc(d.case_id || "") + " · prepared " + esc(d.generated_at || ""));
-    var pr = el("button", "btn", "Print / Save as PDF");
-    pr.onclick = function () { window.print(); };
-    controls.appendChild(pr);
+    reportHead(main, "Estate document report", d);
 
     // The headline, in the terms an attorney reads: of the types an estate
     // needs, how many do we actually have.
@@ -4745,15 +4872,10 @@
       + " weaker matches that have not been reviewed."));
     main.appendChild(bar);
 
-    // Limitations BEFORE the table, deliberately. They change what every number
-    // below means, so a reader who takes in only the first screen still leaves
-    // with the caveat rather than the figure alone.
-    var lim = el("section", "rep-limits");
-    lim.appendChild(el("h2", null, "What this report cannot tell you"));
-    var ul = el("ul");
-    (d.limitations || []).forEach(function (x) { ul.appendChild(el("li", null, esc(x))); });
-    lim.appendChild(ul);
-    main.appendChild(lim);
+    // Limitations BEFORE the table, deliberately, and unlike the family report:
+    // this one is acted on by a professional, so a reader who takes in only the
+    // first screen must leave with the caveat rather than the figure alone.
+    reportLimits(main, d.limitations);
 
     (d.groups || []).forEach(function (g) {
       var sec = el("section", "rep-group rep-" + g.key);
@@ -4783,7 +4905,7 @@
       sec.appendChild(tbl);
       main.appendChild(sec);
     });
-  };
+  }
 
   // ── Recordings: grouped by what kind of listening it is ──
   // 1,051 recordings used to render as one flat significance-sorted list, every
