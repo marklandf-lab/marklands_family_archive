@@ -82,6 +82,7 @@ from tools._archive_data import (  # noqa: E402
     scanned_image_rows, timeline_rows, timeline_data, on_this_day_data, venues_data,
     tokenize, transcript_detail, video_rows, vital_docs_data, vital_doc_item_id,
     near_miss_rows, vital_doc_label, estate_report_data, family_report_data,
+    account_services, _email_address,
     quarantine_pager_items, vital_pager_items,
     junk_rows, transparency_data, guided_review_data,
     apply_face_overlay, resolve_merge, is_video_frame, SCENE_LABELS,
@@ -499,13 +500,8 @@ EMAIL_BANDS = [(5, "Major life events"), (4, "Emotionally resonant"), (3, "Perso
 
 _ADDR_RE = re.compile(r"<([^>]+)>")
 
-
-def _email_address(participant):
-    """The bare address inside a thread participant string. They arrive in mixed
-    forms — 'Display Name <addr>' or a bare address — so pull the angle-bracket
-    form when present and fall back to the whole string."""
-    m = _ADDR_RE.search(participant or "")
-    return (m.group(1) if m else (participant or "")).strip().lower()
+# `_email_address` now lives in _archive_data (imported above) so the accounts
+# builder there can use it without importing back into this module.
 
 
 def _email_display_name(participant):
@@ -1326,7 +1322,19 @@ class ArchiveCase:
             # All recordings (the old voicemail-only filter is gone — #14).
             return audio_rows(self.summary, self.transcription_index, self.role, self.cfg)
         if page == "accounts":
-            return accounts_data(self.summary, self.role)
+            data = accounts_data(self.summary, self.role)
+            # The pipeline's inventory is built from the RAW corpus and, on this
+            # case, holds only social and newsletter domains — every bank and
+            # brokerage the estate deals with is in the mail and was not on this
+            # page. Widen it here from the threads the Emails section actually
+            # holds, so each row's count is what its link will deliver.
+            threads = apply_curation(self.section("emails"),
+                                     self.curation_layer, "thread_id")
+            data["services"] = account_services(
+                threads,
+                inventory=(self.summary.get("digital_account_inventory") or {}),
+                owner_addresses=self._email_owner(threads))
+            return data
         if page == "review":
             decisions = self.decisions
             data = review_data(self.paths, self.summary)

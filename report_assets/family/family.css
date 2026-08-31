@@ -1144,3 +1144,20 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
    it has to be readable — it is the sentence that stops the chips below it
    being read as an absence the archive cannot support. */
 .ovnote { font-size: 12px; line-height: 1.45; color: var(--muted); margin: 2px 0 8px; }
+
+/* Online accounts: services found in the mail. */
+.svc-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+.svc-table th { text-align: right; font-family: var(--mono); font-size: 10px;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+  padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.svc-table th:first-child, .svc-table th:last-child { text-align: left; }
+.svc-table td { padding: 8px 10px; font-size: 13.5px; border-bottom: 1px solid var(--line); }
+.svc-n { text-align: right; font-family: var(--mono); font-size: 12.5px; }
+.svc-link { color: var(--ink); text-decoration: none; }
+.svc-link:hover { color: var(--accent); text-decoration: underline; }
+/* Which list a service came from — quiet, because it is provenance rather than
+   a property of the account. */
+.svc-src { font-family: var(--mono); font-size: 9.5px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 8px; padding: 1px 6px; margin-left: 8px; }
+.svc-note { font-size: 12px; color: var(--muted); }

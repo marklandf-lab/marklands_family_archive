@@ -1576,6 +1576,148 @@ def family_report_data(*, counts, scene_counts, audio_rows_, document_index,
     }
 
 
+# ── online accounts: services found in the mail ───────────────────────────────
+
+# Free consumer mail providers. A domain here is where PEOPLE have addresses, not
+# a service the estate holds an account with, and they are the highest-volume
+# domains in any mailbox — left in, they bury the finding under the obvious.
+CONSUMER_MAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
+    "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com",
+    "mac.com", "comcast.net", "verizon.net", "att.net", "sbcglobal.net",
+    "cox.net", "charter.net", "earthlink.net", "protonmail.com", "proton.me",
+}
+
+# Subject lines an account sends and a correspondent does not. This is the
+# evidence that a domain is somewhere the owner HELD an account, rather than a
+# company that merely emailed them — a shop's newsletter never says "reset your
+# password". Deliberately narrow: a false positive here adds a bogus account to
+# an estate inventory, which is worse than missing one, because somebody will go
+# looking for it.
+_ACCOUNT_SUBJECT_RE = re.compile(
+    r"password|verify your|verification code|sign[- ]?in|log[- ]?in|welcome to|"
+    r"your account|two[- ]factor|2fa|confirm your|activate your|security alert|"
+    r"new device|reset your|account statement|e[- ]?statement",
+    re.IGNORECASE)
+
+
+_PARTICIPANT_ADDR_RE = re.compile(r"<([^>]+)>")
+
+
+def _email_address(participant):
+    """The bare address inside a thread participant string. Mixed forms arrive —
+    'Display Name <addr>' or a bare address — so take the angle-bracket form when
+    there is one. Defined in this module rather than the server because the server
+    imports from here, not the other way round."""
+    m = _PARTICIPANT_ADDR_RE.search(participant or "")
+    return (m.group(1) if m else (participant or "")).strip().lower()
+
+
+def account_root(domain):
+    """The registrable-ish root of a mail domain: 'rs.email.nextdoor.com' →
+    'nextdoor.com'.
+
+    Last two labels. Crude — it is wrong for 'co.uk' style suffixes — but the
+    alternative is shipping a public-suffix list into a fork whose whole point is
+    UI work, and the failure mode is a service listed under a slightly wrong
+    name rather than a wrong count. It earns its place by fixing the opposite
+    problem, which is real and visible: one service arriving as several rows
+    (linkedin.com, e.linkedin.com and em.linkedin.com are one account, and an
+    events service was split five ways on 813_mf).
+    """
+    parts = [p for p in (domain or "").strip().lower().strip(".").split(".") if p]
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (parts[0] if parts else "")
+
+
+def account_services(threads, inventory=None, owner_addresses=()):
+    """Services the estate appears to hold an account with, found in the mail.
+
+    Two sources, deliberately merged rather than shown apart:
+
+      * `inventory` — the pipeline's digital_account_inventory, built from the
+        RAW corpus before triage.
+      * the threads themselves, which the pipeline's inventory never looked at
+        for this purpose. On 813_mf the inventory holds 23 social and newsletter
+        domains; the threads carry every bank, brokerage and insurer the estate
+        deals with, and not one of them was on the page.
+
+    The count on each row is the number of conversations THE EMAILS PAGE CAN
+    ACTUALLY OPEN, not the pipeline's raw figure, because the row is a link and a
+    link must deliver what it promises. Those two numbers diverge a long way:
+    triage discards bulk notification mail, so a service with hundreds of raw
+    notifications can have a handful of readable threads, or none. Where the raw
+    figure is higher it rides along as `filtered_out` so the gap is explained
+    rather than merely absorbed.
+    """
+    owner_domains = {(a or "").split("@")[-1].strip().lower()
+                     for a in (owner_addresses or []) if "@" in (a or "")}
+    owner_roots = {account_root(d) for d in owner_domains}
+
+    pipeline = {}
+    for domain, rec in (inventory or {}).items():
+        root = account_root(domain)
+        if not root:
+            continue
+        pipeline[root] = pipeline.get(root, 0) + ((rec or {}).get("count") or 0)
+
+    reach = {}
+    signals = {}
+    for t in threads or []:
+        subject = t.get("subject") or ""
+        is_signal = bool(_ACCOUNT_SUBJECT_RE.search(subject))
+        roots = set()
+        for p in (t.get("participants") or []):
+            a = _email_address(p)
+            if "@" not in a:
+                continue
+            dom = a.split("@")[-1]
+            root = account_root(dom)
+            if root and root not in owner_roots and root not in CONSUMER_MAIL_DOMAINS:
+                roots.add(root)
+        for r in roots:
+            reach[r] = reach.get(r, 0) + 1
+            if is_signal:
+                signals[r] = signals.get(r, 0) + 1
+
+    # A domain earns a row by being something the pipeline already called an
+    # account, or by sending mail that is PREDOMINANTLY account-shaped. The
+    # second test needs both halves. Counting signals alone put the deceased's
+    # own firm at the top of the list on 813_mf — 2,474 threads of ordinary
+    # correspondence containing, somewhere, six messages that said "password" —
+    # because a person emailing you for years will eventually use every word a
+    # service uses. A service's mail is transactional nearly all the way through:
+    # a bank here runs 20-40% account-shaped, a colleague runs a fraction of one
+    # percent.
+    #
+    # Set narrow on purpose. It drops a low-volume subscription or two, and that
+    # is the right way to be wrong: a false entry in an estate inventory sends
+    # somebody hunting for an account that was never there.
+    def looks_like_a_service(r):
+        n, sig = reach.get(r, 0), signals.get(r, 0)
+        return sig >= 2 and n and (sig / float(n)) >= 0.02
+
+    roots = {r for r in reach if looks_like_a_service(r)} | set(pipeline)
+    out = []
+    for r in roots:
+        if r in owner_roots or r in CONSUMER_MAIL_DOMAINS:
+            continue
+        threads_n = reach.get(r, 0)
+        raw = pipeline.get(r)
+        out.append({
+            "service": r,
+            "threads": threads_n,
+            "signals": signals.get(r, 0),
+            "from_pipeline": r in pipeline,
+            # Raw notification mail the triage stage dropped before the Emails
+            # section ever saw it. None when there is nothing to explain.
+            "filtered_out": (raw - threads_n) if (raw and raw > threads_n) else None,
+        })
+    # The ones that look most like a held account first, then by how much there
+    # is to read. A bank with ten sign-in alerts outranks a newsletter with 700.
+    out.sort(key=lambda x: (-x["signals"], -x["threads"], x["service"]))
+    return out
+
+
 # ── audio kinds ───────────────────────────────────────────────────────────────
 # The classifier emits seven categories; the Recordings page groups them into six
 # KINDS, because "what sort of listening is this" is the question someone browsing

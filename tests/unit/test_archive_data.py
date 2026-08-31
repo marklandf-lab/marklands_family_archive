@@ -2828,3 +2828,78 @@ def test_overview_card_withholds_the_near_miss_total_shape_from_family(tmp_path)
     assert all(t["near_misses"] is None for t in fam["types"])
     # nothing to total, so the card has no number to print and stays quiet
     assert fam["unfound_near_misses"] == 0
+
+
+# ── online accounts: services found in the mail ─────────────────────────────
+
+def _thr(subject, *addrs):
+    return {"subject": subject, "participants": list(addrs)}
+
+
+def test_account_root_folds_a_service_split_across_subdomains():
+    """One account arriving as several rows was the visible half of the problem:
+    linkedin.com / e.linkedin.com / em.linkedin.com are one service."""
+    assert ad.account_root("e.linkedin.com") == "linkedin.com"
+    assert ad.account_root("rs.email.nextdoor.com") == "nextdoor.com"
+    assert ad.account_root("schwab.com") == "schwab.com"
+    assert ad.account_root("") == "" and ad.account_root(None) == ""
+
+
+def test_account_services_finds_a_bank_the_inventory_missed():
+    threads = [_thr("Your sign-in from a new device", "alerts@bank.test", "me@own.test"),
+               _thr("Reset your password", "alerts@bank.test", "me@own.test"),
+               _thr("Account statement ready", "alerts@bank.test", "me@own.test")]
+    out = ad.account_services(threads, inventory={}, owner_addresses=["me@own.test"])
+    assert [x["service"] for x in out] == ["bank.test"]
+    assert out[0]["threads"] == 3 and out[0]["signals"] == 3
+    assert out[0]["from_pipeline"] is False
+
+
+def test_account_services_ignores_a_correspondent_who_once_said_password():
+    """The deceased's own firm topped this list on 813_mf: thousands of ordinary
+    threads containing, somewhere, a handful that said "password". A person
+    emailing you for years eventually uses every word a service uses; a service's
+    mail is transactional nearly all the way through."""
+    threads = [_thr("Reset your password", "jim@firm.test", "me@own.test")] + \
+              [_thr("lunch on tuesday?", "jim@firm.test", "me@own.test")
+               for _ in range(300)]
+    out = ad.account_services(threads, inventory={}, owner_addresses=["me@own.test"])
+    assert [x["service"] for x in out] == []
+
+
+def test_account_services_excludes_the_owner_and_consumer_mail():
+    threads = [_thr("Verify your email", "me@own.test", "friend@gmail.com")
+               for _ in range(5)]
+    out = ad.account_services(threads, inventory={},
+                              owner_addresses=["me@own.test"])
+    assert [x["service"] for x in out] == [], \
+        "the owner's own domain and free mail providers are people, not services"
+
+
+def test_account_services_counts_what_the_link_will_deliver():
+    """The pipeline's inventory counts RAW notification mail; the Emails page
+    holds post-triage threads. A row that promises 700 and opens onto 3 is a
+    broken link, so the count is the reachable one and the gap is explained."""
+    threads = [_thr("hello", "no-reply@social.test", "me@own.test")]
+    out = ad.account_services(threads, inventory={"social.test": {"count": 700}},
+                              owner_addresses=["me@own.test"])
+    row = [x for x in out if x["service"] == "social.test"][0]
+    assert row["threads"] == 1 and row["filtered_out"] == 699
+    assert row["from_pipeline"] is True
+
+
+def test_account_services_keeps_a_pipeline_service_with_nothing_readable():
+    """Its notifications were all triaged away. It still belongs on an estate's
+    account list — it just cannot be opened, and the page says so."""
+    out = ad.account_services([], inventory={"gone.test": {"count": 160}},
+                              owner_addresses=[])
+    assert out == [{"service": "gone.test", "threads": 0, "signals": 0,
+                    "from_pipeline": True, "filtered_out": 160}]
+
+
+def test_account_services_ranks_a_bank_above_a_bulk_newsletter():
+    threads = [_thr("Security alert", "a@bank.test", "me@own.test") for _ in range(4)] + \
+              [_thr("This week's picks", "n@news.test", "me@own.test") for _ in range(400)]
+    out = ad.account_services(threads, inventory={"news.test": {"count": 400}},
+                              owner_addresses=["me@own.test"])
+    assert [x["service"] for x in out] == ["bank.test", "news.test"]

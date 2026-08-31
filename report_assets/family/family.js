@@ -5078,13 +5078,61 @@
     main.appendChild(el("div", "banner",
       "<strong>" + num(creds.critical_count) + "</strong> critical and <strong>" + num(creds.informational_count) +
       "</strong> informational credential finding(s)."));
-    main.appendChild(el("h2", null, "Online accounts seen in mail"));
-    var tbl = el("table"); tbl.innerHTML = "<tr><th>Service</th><th>Messages</th><th>Example subject</th></tr>";
-    (d.domains || []).slice(0, 200).forEach(function (x) {
-      tbl.appendChild(el("tr", null, "<td>" + esc(x.domain) + "</td><td>" + num(x.count) + "</td><td class='preview'>" +
-        esc((x.sample_subjects || [])[0] || "") + "</td>"));
+    // The services list, replacing a flat table of raw sender domains. Two
+    // things changed. It is WIDER: the pipeline's inventory is built from the raw
+    // corpus and on this case held only social and newsletter domains, while every
+    // bank and brokerage the estate deals with sat unlisted in the mail. And it is
+    // CLICKABLE: a row opens that service's conversations.
+    //
+    // The count is the number of conversations the Emails page can actually open,
+    // not the pipeline's raw figure, because the row is a link and a link has to
+    // deliver what it promises. Those diverge a long way — triage discards bulk
+    // notification mail — so a service with hundreds of raw notifications can have
+    // a handful of readable threads, or none at all. Where none survive the row is
+    // NOT a link: an empty results page reads as a broken feature.
+    var services = d.services || [];
+    main.appendChild(el("h2", null, "Services found in the mail"));
+    main.appendChild(el("p", "eix-note",
+      num(services.length) + " services. A row opens that service's conversations. "
+      + "Found by looking for the kind of mail an account sends — sign-ins, "
+      + "security alerts, statements — so it is a strong hint rather than a "
+      + "certainty, and a service the owner never received such mail from will "
+      + "not appear."));
+    var stbl = el("table", "svc-table");
+    stbl.innerHTML = "<tr><th>Service</th><th>Conversations</th><th>Account mail</th><th></th></tr>";
+    services.forEach(function (x) {
+      var tr = el("tr");
+      var nameCell = el("td");
+      if (x.threads) {
+        var a = el("a", "svc-link", esc(x.service));
+        a.href = urlFor({ page: "emails", participant: x.service },
+                        { label: x.service });
+        nameCell.appendChild(a);
+      } else {
+        nameCell.appendChild(el("span", null, esc(x.service)));
+      }
+      if (x.from_pipeline) {
+        nameCell.appendChild(el("span", "svc-src", "inventory"));
+      }
+      tr.appendChild(nameCell);
+      tr.appendChild(el("td", "svc-n", x.threads ? num(x.threads) : "—"));
+      tr.appendChild(el("td", "svc-n", x.signals ? num(x.signals) : "—"));
+      // Say where the missing mail went rather than leaving a row that promises
+      // hundreds of messages and opens onto nothing.
+      var note = el("td", "svc-note");
+      if (!x.threads) {
+        note.textContent = x.filtered_out
+          ? "Its " + num(x.filtered_out) + " notification email"
+            + (x.filtered_out === 1 ? " was" : "s were")
+            + " filtered out of the readable mail as bulk — nothing to open."
+          : "Nothing readable in the mail.";
+      } else if (x.filtered_out) {
+        note.textContent = num(x.filtered_out) + " more filtered out as bulk.";
+      }
+      tr.appendChild(note);
+      stbl.appendChild(tr);
     });
-    main.appendChild(tbl);
+    main.appendChild(stbl);
     if ((creds.items || []).length) {
       main.appendChild(el("h2", null, "Credential documents"));
       if (creds.guidance) main.appendChild(el("p", "notice cred-guidance", esc(creds.guidance)));
