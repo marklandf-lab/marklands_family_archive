@@ -34,7 +34,41 @@ from Google Drive. Context and the verification command are in
 
 ---
 
-## 2. The pipeline never worked out whose mailbox it is
+## 2. Audio classification is unreliable, and this corpus is why
+
+**What.** Every recording carries a classifier category. Measured 31 Aug 2026:
+of the 47 recordings that exist as the same audio in two file formats, **17
+(36%) got a different category for each copy**; and **all 26 recordings
+classified as "voicemail" are, on inspection, songs.**
+
+**Why it is hard.** Much of this audio is *practice recordings* — takes of songs
+with a lot of banter before, during and after. A transcript of one reads like
+people talking, because people are talking. A classifier reasoning from
+transcript text alone cannot tell a rehearsal from a conversation, and no amount
+of prompt tuning will fix that. Treat it as a corpus shape the pipeline has not
+met before, not a regression.
+
+**What it breaks.** The Recordings section groups by this category, so the
+grouping inherits the error. A "Voicemail" group promises someone's actual
+voice — often the voice of the person who died — and holding songs instead is
+worse than no grouping. Separately, `non_speech` is not a content judgment: its
+members are exactly the set with no transcript, so it reports a transcription
+outcome while sitting among content types.
+
+**The fix.** The missing signal is acoustic, not textual — music detection,
+harmonicity, beat regularity would settle most of it before the transcript is
+consulted. Two cheap wins needing no new model: classify once per *recording*
+rather than per file so two encodings cannot disagree; and make "nothing was
+transcribed" a flag rather than a category.
+
+**Check it:**
+```bash
+curl -s localhost:7766/api/recordings | python3 -c "import json,sys,re; from collections import defaultdict; rows=json.load(sys.stdin); g=defaultdict(set); [g[re.sub(r'\.[^.]+$','',r['name']).lower()].add(r['category']) for r in rows]; print('same audio, two formats, two answers:', len([k for k,v in g.items() if len(v)>1]))"
+```
+
+---
+
+## 3. The pipeline never worked out whose mailbox it is
 
 **What:** `owner_email_addresses` is empty in the case's `case_config.json`, and
 `output/metadata/email_triage_summary.json` records `owner_source: "none"`. So
@@ -60,7 +94,7 @@ python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/WyeastCases/81
 
 ---
 
-## 3. The vital-document checklist has no home for a dissolution decree
+## 4. The vital-document checklist has no home for a dissolution decree
 
 **What:** the checklist searches a fixed list of document types. A
 dissolution-of-marriage judgment is an estate-relevant document with no type of
@@ -79,7 +113,7 @@ python3 -c "import json,os;print(sorted(json.load(open(os.path.expanduser('~/Wye
 
 ---
 
-## 4. Every near-miss list is truncated, on every type
+## 5. Every near-miss list is truncated, on every type
 
 **What:** the embed stage retrieves at most `vital_per_target_k` candidates per
 target before LLM confirmation. On this case that cap is set in the case config
@@ -98,7 +132,7 @@ adaptive per target.
 
 ---
 
-## 5. Duplicate vital candidates each demand their own decision
+## 6. Duplicate vital candidates each demand their own decision
 
 **What:** the same document saved twice, and several byte-identical notification
 emails, arrive as separate candidates. Each needs its own sign-off, inflating the
@@ -110,7 +144,7 @@ stage does not consult it.
 
 ---
 
-## 6. Ranked conversations carry no link target
+## 7. Ranked conversations carry no link target
 
 **What:** items in the Overview's "Most significant" list have no
 `conversation_id`, so they cannot open their own transcript. The UI points at the
@@ -120,7 +154,7 @@ Messages section by name instead — honest, but a dead end for the reader.
 
 ---
 
-## 7. Two front-end fixes that should go back upstream
+## 8. Two front-end fixes that should go back upstream
 
 Both are merged here and are not upstream. Neither is urgent; both are small.
 
