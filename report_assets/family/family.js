@@ -611,6 +611,39 @@
   // The distinct vital categories a given document PATH currently matches (used to
   // decide whether a reassign needs a scope prompt). A doc confirmed under >1 target
   // shows up once per target in vd.targets[].items.
+  // Display label for a vital target slug, from whichever list carries it.
+  function vitalTargetLabel(vd, target) {
+    var all = (vd.all_targets || []).filter(function (x) {
+      return (x.target || x.key) === target; })[0];
+    if (all && all.label) return all.label;
+    var t = (vd.targets || []).filter(function (x) { return x.target === target; })[0];
+    return (t && t.label) || pretty(target);
+  }
+
+  // A plain confirm dialog for a verb whose reach is wider than the row it sits
+  // on. Same shape as pickScope; the cautious option is the one that is focused.
+  function confirmModal(title, body, goLabel, cb) {
+    var back = el("div", "pickmodal-back");
+    var box = el("div", "pickmodal");
+    box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-label", title);
+    box.appendChild(el("h3", null, esc(title)));
+    box.appendChild(el("p", "pickmodal-note", esc(body)));
+    var actions = el("div", "pickmodal-actions");
+    var go = el("button", "btn", esc(goLabel));
+    var cancel = el("button", "btn primary", "Cancel");
+    function onKey(e) { if (e.key === "Escape") close(); }
+    function close() { document.removeEventListener("keydown", onKey); back.remove(); }
+    go.onclick = function () { close(); cb(); };
+    cancel.onclick = close;
+    back.addEventListener("click", function (e) { if (e.target === back) close(); });
+    document.addEventListener("keydown", onKey);
+    actions.appendChild(cancel); actions.appendChild(go);
+    box.appendChild(actions);
+    back.appendChild(box); document.body.appendChild(back);
+    try { cancel.focus(); } catch (e) { /* no focus */ }
+  }
+
   function vitalPathTargets(vd, path) {
     var seen = {};
     (vd.targets || []).forEach(function (t) {
@@ -1598,8 +1631,14 @@
       var nb = el("div", "notebadge", "✎"); nb.title = r.note; c.appendChild(nb);
     }
     var metaBits = [r.scene, prettyPlace(r.place)].filter(Boolean).join(" · ");
-    c.appendChild(el("div", "cap", '<span class="nm">' + esc(r.name) + '</span><span class="meta">' +
-      esc(metaBits) + "</span>" +
+    // What the vision model saw, where it looked. It ran on a minority of the
+    // document photos and the sentence has never been rendered — so a card that
+    // could say "a handwritten note listing…" has been showing IMG_1159.jpeg.
+    // Only the images that actually have one get it; the rest are unchanged.
+    var desc = r.description
+      ? '<span class="carddesc">' + esc(r.description) + "</span>" : "";
+    c.appendChild(el("div", "cap", '<span class="nm">' + esc(r.name) + '</span>' + desc +
+      '<span class="meta">' + esc(metaBits) + "</span>" +
       (r.source ? '<span class="srcchip">' + esc(pretty(r.source)) + "</span>" : "")));
     return c;
   }
@@ -3580,6 +3619,25 @@
              : (EXAMINER && where) ? "The pipeline filed this under " + where
              : "";
     if (prov) main_.appendChild(el("div", "vrow-prov", esc(prov)));
+
+    // WHERE ELSE THIS DOCUMENT IS. A vital match is per (document, type) pair, so
+    // the same file can sit under several types at once — and nothing on the row
+    // said so, which made two of this panel's verbs behave in ways a reader could
+    // not predict. Dismiss is keyed by PATH and silently drops the document from
+    // every type it matched; reassign moves only the clicked pairing and leaves
+    // the others where they are. Neither is wrong, but both are surprising while
+    // the row pretends the document exists only here.
+    if (EXAMINER) {
+      var elsewhere = vitalPathTargets(vd, it.path).filter(function (tgt) {
+        return tgt !== t.target;
+      });
+      if (elsewhere.length) {
+        main_.appendChild(el("div", "vrow-also",
+          "Also a candidate under " + esc(elsewhere.map(function (tgt) {
+            return vitalTargetLabel(vd, tgt);
+          }).join(", ")) + "."));
+      }
+    }
     row.appendChild(main_);
 
     if (EXAMINER) {
@@ -3605,7 +3663,29 @@
       }
       var dismiss = el("button", "vact", it.reviewed ? "Undo — not this" : "No");
       dismiss.onclick = function () {
-        doVerb("/api/vital/dismiss", { id: it.id }, "Dismissed").then(function (x) { if (x) render(); });
+        // "Not a vital document" is a statement about the DOCUMENT, so the verb
+        // is keyed by path and drops it from EVERY type it matched. That is a
+        // defensible design and an indefensible surprise: a reader clicking
+        // "Undo — not this" under one heading has no reason to expect a pending
+        // candidate under another heading to vanish with it. Ask first, and only
+        // when there is actually something else to lose.
+        var also = vitalPathTargets(vd, it.path).filter(function (tgt) {
+          return tgt !== t.target;
+        });
+        function send() {
+          doVerb("/api/vital/dismiss", { id: it.id }, "Dismissed")
+            .then(function (x) { if (x) render(); });
+        }
+        if (!also.length) return send();
+        confirmModal(
+          "Remove from " + (also.length + 1) + " document types?",
+          "\"Not a vital document\" is recorded about the document itself, so this "
+          + "also removes it from " + also.map(function (tgt) {
+              return vitalTargetLabel(vd, tgt); }).join(", ")
+          + ", where it is still awaiting a decision. To move it out of "
+          + t.label + " without touching those, use \u201CAnother type\u2026\u201D "
+          + "instead.",
+          "Remove from all of them", send);
       };
       acts.appendChild(dismiss);
       var reassign = el("button", "vact", "Another type…");
@@ -3984,74 +4064,70 @@
     return documentsIndex(main, data);
   };
 
+  // ── Document photos (was "Correspondence") ──
+  // The old section stapled two unrelated things together and named itself after
+  // the smaller one. Its "typed" list was an EXACT duplicate of Documents →
+  // Personal correspondence — the same 111 files, byte for byte — while its real
+  // content was 1,221 photographs and screenshots OF documents: pictures of
+  // paper, produced by the photo pipeline, carrying no extracted text.
+  //
+  // Those images are the reason this page has to exist. They are excluded from
+  // Photos for being documents ("photo universe: … excluded 1,221 scanned
+  // documents") and absent from Documents for being photographs, so this is the
+  // only place in the archive they can be seen at all. The duplicated letters
+  // now link to where they are actually filed instead of being listed twice.
   P.correspondence = function (main, d) {
     var typed = d.typed || [], hand = d.handwritten || [];
-    var scanned = d.scanned || { rows: [], total: 0 };   // paginated envelope (F-3)
+    var scanned = d.scanned || { rows: [], total: 0 };
     var scannedTotal = scanned.total || 0;
-    var controls = head(main, "Correspondence", "Correspondence",
-      typed.length + " typed · " + hand.length + " handwritten · " + num(scannedTotal) + " scanned.");
-    // Modality dropdown in the sticky controls (#10): shows/hides the groups.
-    var opts = [["typed", "Typed", typed.length], ["handwritten", "Handwritten", hand.length],
-                ["scanned", "Scanned letters & documents", scannedTotal]].filter(function (o) { return o[2]; });
-    var sel = el("select");
-    sel.appendChild(new Option("All", ""));
-    opts.forEach(function (o) { sel.appendChild(new Option(o[1] + " (" + num(o[2]) + ")", o[0])); });
-    sel.value = Q.modality || (opts.length ? opts[0][0] : "");  // restore, else first non-empty
-    controls.appendChild(el("span", "flabel", "View")); controls.appendChild(sel);
+
+    var controls = head(main, "Document Photos", "Document photos",
+      num(scannedTotal) + " photographs and screenshots of documents and letters.");
+    main.appendChild(el("p", "eix-note",
+      "Pictures of paper, rather than files the archive could read. They come "
+      + "from the photographs rather than the documents, so they carry no "
+      + "extracted text and no summary — and because they are set aside from "
+      + "Photos for being documents, and absent from Documents for being "
+      + "photographs, this page is the only place they appear."));
+
+    // The letters that used to be listed here are filed as documents. Point at
+    // them rather than printing the same rows a second time under a second name.
+    if (typed.length || hand.length) {
+      var note = el("p", "eix-note");
+      note.appendChild(document.createTextNode(
+        num(typed.length + hand.length) + " written letters and cards are filed "
+        + "with the documents, because that is what they are. "));
+      var a_ = el("a", null, "Open them under Documents →");
+      a_.href = urlFor({ page: "documents", cat: "personal_correspondence" },
+                       { label: "Personal correspondence" });
+      note.appendChild(a_);
+      main.appendChild(note);
+    }
+
+    if (!scannedTotal) {
+      main.appendChild(el("p", "notice", "No photographed documents in this archive."));
+      return;
+    }
 
     var holder = el("div"); main.appendChild(holder);
-    // Each group builds ONCE into its own section; the modality selector toggles
-    // visibility (so the scanned Load-more state survives a modality switch).
-    var secTyped = null, secHand = null, secScan = null;
-    if (typed.length) {
-      secTyped = el("div", "corr-sec"); secTyped.appendChild(el("h2", null, "Typed (" + num(typed.length) + ")"));
-      fileTable(secTyped, typed); holder.appendChild(secTyped);
-    }
-    if (hand.length) {
-      secHand = el("div", "corr-sec"); secHand.appendChild(el("h2", null, "Handwritten (" + num(hand.length) + ")"));
-      fileTable(secHand, hand); holder.appendChild(secHand);
-    }
-    if (scannedTotal) {
-      secScan = el("div", "corr-sec"); secScan.appendChild(el("h2", null, "Scanned letters & documents (" + num(scannedTotal) + ")"));
-      // #19: drag-select over the scanned grid, same infra as the Photos page
-      // (marqueeSelect + the shared selbar batch banner) — previously an
-      // examiner could only act one scanned image at a time.
-      var scanCtrls = el("div", "controls"); secScan.appendChild(scanCtrls);
-      var scanGrid = el("div"); secScan.appendChild(scanGrid);
-      if (EXAMINER) marqueeSelect(scanCtrls, scanGrid, ".card", selPick);
-      // correspondence's Load-more refetches the full payload; the paginated rows
-      // live under `.scanned`, so the pager unwraps that sub-envelope.
-      var scanCtrl = null;
-      var pg = pager("/api/correspondence", {
-        unwrap: function (resp) { return resp.scanned || resp; },
-        // Reuse one virtualized grid across Load-more pages: extend the set in place
-        // instead of tearing down and rebuilding (keeps scroll, F-4/F-8).
-        render: function (all) {
-          if (scanCtrl) scanCtrl.setRows(all); else scanCtrl = photoGrid(scanGrid, all);
-        },
-      });
-      secScan.appendChild(pg.footer);
-      pg.seed(d);   // d is the full correspondence payload; unwrap picks .scanned
-      holder.appendChild(secScan);
-    }
-    function applyModality() {
-      var pick = sel.value;
-      [[secTyped, "typed"], [secHand, "handwritten"], [secScan, "scanned"]].forEach(function (pair) {
-        if (pair[0]) pair[0].style.display = (!pick || pick === pair[1]) ? "" : "none";
-      });
-      // The scanned grid may have been built while hidden (0-width) if another
-      // modality was active — re-measure/re-window now that it's visible.
-      if (secScan && secScan.style.display !== "none" && scanCtrl) scanCtrl.refresh();
-    }
-    sel.onchange = function () { setQ({ modality: sel.value }); applyModality(); };
-    applyModality();
-    if (!typed.length && !hand.length && !scannedTotal) holder.appendChild(el("p", "notice", "No correspondence in this case."));
+    var sec = el("div", "corr-sec"); holder.appendChild(sec);
+    var scanCtrls = el("div", "controls"); sec.appendChild(scanCtrls);
+    var scanGrid = el("div"); sec.appendChild(scanGrid);
+    if (EXAMINER) marqueeSelect(scanCtrls, scanGrid, ".card", selPick);
+    // The scanned images live under `.scanned` in the payload, so the pager
+    // unwraps that sub-envelope. photoGrid is stateful — build once, then feed
+    // it rows — so a Load-more does not rebuild the grid under the reader.
+    var scanCtrl = null;
+    var pg = pager("/api/correspondence", {
+      unwrap: function (resp) { return resp.scanned || resp; },
+      render: function (all) {
+        if (scanCtrl) scanCtrl.setRows(all); else scanCtrl = photoGrid(scanGrid, all);
+      },
+    });
+    sec.appendChild(pg.footer);
+    pg.seed(d);   // the full payload; unwrap picks .scanned out of it
   };
 
-  // Examiner toggle: demote a thread out of the top of the significance sort (it
-  // drops to the bottom band, stays visible) or restore it. Single-item → no
-  // confirm; reversible from History. The server verb toggles, so it's safe even
-  // if the row's demoted flag is briefly stale.
   function emailDemoteBtn(r) {
     var b = el("button", "btn small" + (r.demoted ? " primary" : ""), r.demoted ? "Restore" : "Demote");
     b.title = r.demoted ? "Restore to its ranked position" : "Remove from top of the sort";

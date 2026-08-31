@@ -1109,6 +1109,29 @@ def person_detail(face_clustering, universe, archive_map, metadata_index, scene_
     }
 
 
+def _llava_description(raw):
+    """The vision model's sentence about one image, or None.
+
+    Its results are stored inconsistently: sometimes a bare string, sometimes a
+    JSON string holding {label, description}, sometimes a dict. Decode all three
+    rather than rendering a JSON blob at somebody, and return None for anything
+    unrecognised — a card with no sentence is fine, a card showing `{"label":` is
+    not.
+    """
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("{"):
+            try:
+                raw = json.loads(text)
+            except ValueError:
+                return neutralize_summary(text[:300]) or None
+        else:
+            return neutralize_summary(text[:300]) or None
+    if isinstance(raw, dict):
+        return neutralize_summary((raw.get("description") or "").strip()[:300]) or None
+    return None
+
+
 def scanned_image_rows(scene_index, archive_map, metadata_index, role, *,
                        frame_map=None, cap=None, released=None):
     """Images CLIP-tagged as scanned documents / handwritten letters (category in
@@ -1124,6 +1147,11 @@ def scanned_image_rows(scene_index, archive_map, metadata_index, role, *,
     gallery instead, via build_photo_universe's matching `scanned_released` param)."""
     clip = scene_index.get("clip_results", {}) or {}
     junk = set((scene_index.get("junk_results", {}) or {}).keys())
+    # What the vision model said about the picture, where it looked at all. It
+    # ran on a minority of these images (177 of 1,221 on 813_mf) and the result
+    # has never been rendered anywhere, so a card that could say what it shows
+    # has been showing a camera-roll filename instead.
+    llava = scene_index.get("llava_results", {}) or {}
     frame_set = set(frame_map or {})
     entries = archive_map.get("entries", {}) or {}
     released = released or ()
@@ -1147,6 +1175,9 @@ def scanned_image_rows(scene_index, archive_map, metadata_index, role, *,
             "id": src,
             "name": os.path.basename(src),
             "scene": SCENE_LABELS.get(rec.get("category")) or rec.get("category"),
+            # None when the model never saw this image, which is the common case.
+            # Neutralised like every other generated sentence we put on a screen.
+            "description": _llava_description(llava.get(src)),
             "place": md.get("place"),
             "ts": md.get("timestamp"),
             "delivered": delivered,
