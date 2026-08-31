@@ -611,6 +611,39 @@
   // The distinct vital categories a given document PATH currently matches (used to
   // decide whether a reassign needs a scope prompt). A doc confirmed under >1 target
   // shows up once per target in vd.targets[].items.
+  // Display label for a vital target slug, from whichever list carries it.
+  function vitalTargetLabel(vd, target) {
+    var all = (vd.all_targets || []).filter(function (x) {
+      return (x.target || x.key) === target; })[0];
+    if (all && all.label) return all.label;
+    var t = (vd.targets || []).filter(function (x) { return x.target === target; })[0];
+    return (t && t.label) || pretty(target);
+  }
+
+  // A plain confirm dialog for a verb whose reach is wider than the row it sits
+  // on. Same shape as pickScope; the cautious option is the one that is focused.
+  function confirmModal(title, body, goLabel, cb) {
+    var back = el("div", "pickmodal-back");
+    var box = el("div", "pickmodal");
+    box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-label", title);
+    box.appendChild(el("h3", null, esc(title)));
+    box.appendChild(el("p", "pickmodal-note", esc(body)));
+    var actions = el("div", "pickmodal-actions");
+    var go = el("button", "btn", esc(goLabel));
+    var cancel = el("button", "btn primary", "Cancel");
+    function onKey(e) { if (e.key === "Escape") close(); }
+    function close() { document.removeEventListener("keydown", onKey); back.remove(); }
+    go.onclick = function () { close(); cb(); };
+    cancel.onclick = close;
+    back.addEventListener("click", function (e) { if (e.target === back) close(); });
+    document.addEventListener("keydown", onKey);
+    actions.appendChild(cancel); actions.appendChild(go);
+    box.appendChild(actions);
+    back.appendChild(box); document.body.appendChild(back);
+    try { cancel.focus(); } catch (e) { /* no focus */ }
+  }
+
   function vitalPathTargets(vd, path) {
     var seen = {};
     (vd.targets || []).forEach(function (t) {
@@ -3580,6 +3613,25 @@
              : (EXAMINER && where) ? "The pipeline filed this under " + where
              : "";
     if (prov) main_.appendChild(el("div", "vrow-prov", esc(prov)));
+
+    // WHERE ELSE THIS DOCUMENT IS. A vital match is per (document, type) pair, so
+    // the same file can sit under several types at once — and nothing on the row
+    // said so, which made two of this panel's verbs behave in ways a reader could
+    // not predict. Dismiss is keyed by PATH and silently drops the document from
+    // every type it matched; reassign moves only the clicked pairing and leaves
+    // the others where they are. Neither is wrong, but both are surprising while
+    // the row pretends the document exists only here.
+    if (EXAMINER) {
+      var elsewhere = vitalPathTargets(vd, it.path).filter(function (tgt) {
+        return tgt !== t.target;
+      });
+      if (elsewhere.length) {
+        main_.appendChild(el("div", "vrow-also",
+          "Also a candidate under " + esc(elsewhere.map(function (tgt) {
+            return vitalTargetLabel(vd, tgt);
+          }).join(", ")) + "."));
+      }
+    }
     row.appendChild(main_);
 
     if (EXAMINER) {
@@ -3605,7 +3657,29 @@
       }
       var dismiss = el("button", "vact", it.reviewed ? "Undo — not this" : "No");
       dismiss.onclick = function () {
-        doVerb("/api/vital/dismiss", { id: it.id }, "Dismissed").then(function (x) { if (x) render(); });
+        // "Not a vital document" is a statement about the DOCUMENT, so the verb
+        // is keyed by path and drops it from EVERY type it matched. That is a
+        // defensible design and an indefensible surprise: a reader clicking
+        // "Undo — not this" under one heading has no reason to expect a pending
+        // candidate under another heading to vanish with it. Ask first, and only
+        // when there is actually something else to lose.
+        var also = vitalPathTargets(vd, it.path).filter(function (tgt) {
+          return tgt !== t.target;
+        });
+        function send() {
+          doVerb("/api/vital/dismiss", { id: it.id }, "Dismissed")
+            .then(function (x) { if (x) render(); });
+        }
+        if (!also.length) return send();
+        confirmModal(
+          "Remove from " + (also.length + 1) + " document types?",
+          "\"Not a vital document\" is recorded about the document itself, so this "
+          + "also removes it from " + also.map(function (tgt) {
+              return vitalTargetLabel(vd, tgt); }).join(", ")
+          + ", where it is still awaiting a decision. To move it out of "
+          + t.label + " without touching those, use \u201CAnother type\u2026\u201D "
+          + "instead.",
+          "Remove from all of them", send);
       };
       acts.appendChild(dismiss);
       var reassign = el("button", "vact", "Another type…");
