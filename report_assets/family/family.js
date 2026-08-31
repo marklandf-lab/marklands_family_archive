@@ -1631,8 +1631,14 @@
       var nb = el("div", "notebadge", "✎"); nb.title = r.note; c.appendChild(nb);
     }
     var metaBits = [r.scene, prettyPlace(r.place)].filter(Boolean).join(" · ");
-    c.appendChild(el("div", "cap", '<span class="nm">' + esc(r.name) + '</span><span class="meta">' +
-      esc(metaBits) + "</span>" +
+    // What the vision model saw, where it looked. It ran on a minority of the
+    // document photos and the sentence has never been rendered — so a card that
+    // could say "a handwritten note listing…" has been showing IMG_1159.jpeg.
+    // Only the images that actually have one get it; the rest are unchanged.
+    var desc = r.description
+      ? '<span class="carddesc">' + esc(r.description) + "</span>" : "";
+    c.appendChild(el("div", "cap", '<span class="nm">' + esc(r.name) + '</span>' + desc +
+      '<span class="meta">' + esc(metaBits) + "</span>" +
       (r.source ? '<span class="srcchip">' + esc(pretty(r.source)) + "</span>" : "")));
     return c;
   }

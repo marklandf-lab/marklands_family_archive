@@ -3097,3 +3097,24 @@ def test_documents_index_unfiled_bucket_does_not_depend_on_row_order():
                             {"category": "legal", "subcategory": None}])
     assert a == b
     assert sum(s["count"] for s in a[0]["subcategories"]) == 2
+
+
+def test_llava_description_decodes_every_shape_it_is_stored_in():
+    """The vision model's results are stored three different ways. A card showing
+    a raw JSON blob is worse than a card showing nothing."""
+    assert ad._llava_description("A photo of a handwritten note.") \
+        == "A photo of a handwritten note."
+    assert ad._llava_description('{"label": "photo", "description": "A receipt."}') \
+        == "A receipt."
+    assert ad._llava_description({"label": "photo", "description": "A ledger page."}) \
+        == "A ledger page."
+    # unparseable JSON falls back to the raw text rather than vanishing
+    assert ad._llava_description('{not json') == "{not json"
+    # nothing usable → None, so the card simply has no sentence
+    for empty in (None, "", "   ", {}, {"description": ""}, 42):
+        assert ad._llava_description(empty) is None
+
+
+def test_llava_description_is_neutralised_like_every_other_generated_line():
+    assert "deceased" not in (ad._llava_description(
+        "A photo of the deceased's handwritten note.") or "")
