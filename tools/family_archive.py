@@ -82,7 +82,7 @@ from tools._archive_data import (  # noqa: E402
     scanned_image_rows, timeline_rows, timeline_data, on_this_day_data, venues_data,
     tokenize, transcript_detail, video_rows, vital_docs_data, vital_doc_item_id,
     near_miss_rows, vital_doc_label, estate_report_data, family_report_data,
-    account_services, _email_address,
+    account_services, _email_address, pipeline_report_data,
     quarantine_pager_items, vital_pager_items,
     junk_rows, transparency_data, guided_review_data,
     apply_face_overlay, resolve_merge, is_video_frame, SCENE_LABELS,
@@ -1308,6 +1308,10 @@ class ArchiveCase:
                 {"key": "family", "label": "Family report",
                  "note": "For someone opening the archive: what it holds, what "
                          "period it covers, and what it cannot tell you."},
+                {"key": "pipeline", "label": "Pipeline report",
+                 "note": "What was examined to build this: how much material went "
+                         "in, how much reached the archive, where the rest went, "
+                         "how big it is and how long it took."},
             ]}
         if page == "emails":
             return email_rows(self.email_threads, decisions=self.decisions)
@@ -1434,6 +1438,12 @@ class ArchiveCase:
                         emails, owner=self._email_owner(emails)).get("categories"),
                     timeline=self.section("timeline"),
                     people=self.section("people"),
+                    case_id=self.paths.case_id, generated_at=when)
+            if which == "pipeline":
+                return pipeline_report_data(
+                    summaries=self._stage_summaries(),
+                    counts=(self.section("overview").get("counts") or {}),
+                    sizes=self._output_sizes(),
                     case_id=self.paths.case_id, generated_at=when)
             return self.section("reports")
         if name == "overview":
@@ -1683,6 +1693,73 @@ class ArchiveCase:
                 while len(self._conversation_cache) > _CONVERSATION_CACHE_CAP:
                     self._conversation_cache.popitem(last=False)  # evict LRU
         return conv
+
+    # The per-stage summaries the pipeline writes. Named explicitly rather than
+    # globbed: a report that silently absorbs whatever files appear next to it
+    # would change meaning without anyone editing it.
+    _STAGE_SUMMARIES = (
+        "collect_dedup_summary.json", "expandfiles_summary.json",
+        "route_junk_summary.json", "ocr_summary.json",
+        "transcription_summary.json", "audio_events_summary.json",
+        "email_triage_summary.json", "message_triage_summary.json",
+    )
+
+    def _stage_summaries(self):
+        """Every stage summary that exists, by filename. Missing ones are simply
+        absent — a case that skipped a stage reports fewer rows rather than
+        zeroes, which would read as "nothing was found" instead of "this did not
+        run"."""
+        cached = getattr(self, "_stage_summary_cache", None)
+        if cached is None:
+            cached = {}
+            for name in self._STAGE_SUMMARIES:
+                doc = load_json(self.paths.metadata_dir / name, None)
+                if isinstance(doc, dict):
+                    cached[name] = doc
+            self._stage_summary_cache = cached
+        return cached
+
+    def _output_sizes(self):
+        """Bytes on disk under output/, per top-level directory.
+
+        Nothing in the metadata records file sizes, so the only honest source is
+        the tree itself. Walked once per process and cached: it is ~123,000 files
+        and about a second on this case, which is fine for a report somebody
+        opens deliberately and much too slow to repeat per request.
+
+        This measures the DELIVERED archive, not the source corpus — the source
+        is not on this machine — and the report says so.
+        """
+        cached = getattr(self, "_output_size_cache", None)
+        if cached is not None:
+            return cached
+        root = self.paths.output_dir
+        parts, total, files = {}, 0, 0
+        try:
+            entries = list(os.scandir(root))
+        except OSError:
+            entries = []
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    sub = 0
+                    for dirpath, _dirnames, filenames in os.walk(entry.path):
+                        for fn in filenames:
+                            try:
+                                sub += os.lstat(os.path.join(dirpath, fn)).st_size
+                                files += 1
+                            except OSError:
+                                pass
+                    parts[entry.name] = sub
+                    total += sub
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+                    files += 1
+            except OSError:
+                continue
+        cached = {"parts": parts, "total": total, "files": files}
+        self._output_size_cache = cached
+        return cached
 
     def _mangled_conversation_path(self, msgdir, cid):
         """Resolve a conversation id to its on-disk file when the filename has had

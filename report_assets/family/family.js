@@ -4739,7 +4739,9 @@
     (items || []).forEach(function (i) {
       var row = el("div", "eix-row rep-row");
       row.appendChild(el("span", "eix-label", esc(i.label)));
-      row.appendChild(el("span", "eix-count", num(i.count)));
+      // `display` lets a caller show a formatted figure (a file size) while the
+      // bar is still sized by the underlying number.
+      row.appendChild(el("span", "eix-count", i.display ? esc(i.display) : num(i.count)));
       var track = el("span", "eix-bar"), fill = el("span", "eix-fill");
       fill.style.width = Math.max(2, Math.round((i.count / (max || 1)) * 100)) + "%";
       track.appendChild(fill);
@@ -4831,18 +4833,121 @@
     reportLimits(main, d.limitations);
   }
 
+  // The pipeline report: what was examined to build this archive, and how much
+  // of it survived to be looked at again. The interesting column is neither the
+  // input nor the output but the GAP, and it is a different story in every row —
+  // photographs mostly lost to duplicates, mail to bulk triage — so each row
+  // carries a sentence saying where its difference went.
+  function pipelineReport(main, d) {
+    reportHead(main, "Pipeline report", d);
+    var t = d.totals || {}, sz = d.size || {}, run = d.run || {};
+
+    var bar = el("div", "vstats rep-stats");
+    vitalStat(bar, t.examined, "items examined");
+    vitalStat(bar, t.surfaced, "reached the archive");
+    bar.appendChild(el("p", "vstats-hint",
+      "The archive occupies " + esc(sz.total_human || "—") + " across "
+      + num(sz.files || 0) + " files"
+      + (run.elapsed ? ", and the run that produced it spans " + esc(run.elapsed) : "")
+      + "."));
+    main.appendChild(bar);
+
+    var sec = el("section", "rep-group");
+    sec.appendChild(el("h2", null, "What was examined"));
+    sec.appendChild(el("p", "rep-note",
+      "Everything the pipeline read, against what the archive shows today."));
+    var tbl = el("table", "rep-table pipe-table");
+    tbl.innerHTML = "<tr><th>Material</th><th>Examined</th><th>Surfaced</th>"
+      + "<th>Share</th></tr>";
+    (d.rows || []).forEach(function (r) {
+      var tr = el("tr");
+      tr.innerHTML = "<td>" + esc(r.kind) + "</td><td>" + num(r.examined)
+        + "</td><td>" + num(r.surfaced) + "</td><td>"
+        + (r.share == null ? "—" : esc(r.share + "%")) + "</td>";
+      tbl.appendChild(tr);
+      // The explanation rides directly under its row, spanning the table, so a
+      // share of 38% is never read without the reason beside it.
+      var note = el("tr", "pipe-note");
+      var td = el("td", null,
+        (r.unit_change ? '<em>' + esc(r.unit_change) + '.</em> ' : "") + esc(r.note));
+      td.colSpan = 4;
+      note.appendChild(td);
+      tbl.appendChild(note);
+    });
+    sec.appendChild(tbl);
+    main.appendChild(sec);
+
+    var rd = d.reading || {}, ex = d.expansion || {};
+    var work = el("section", "rep-group");
+    work.appendChild(el("h2", null, "The work behind it"));
+    var wl = el("ul", "pipe-list");
+    if (ex.archives_found) wl.appendChild(el("li", null,
+      num(ex.archives_found) + " archives and containers were unpacked, adding "
+      + num(ex.files_added) + " files that were inside them — including "
+      + num(ex.email_attachments) + " email attachments that would otherwise "
+      + "never have been seen."));
+    if (rd.documents_read) wl.appendChild(el("li", null,
+      num(rd.documents_read) + " documents were read for text — by optical "
+      + "character recognition where they were scans — and text was recovered "
+      + "from " + num(rd.text_recovered) + " of them."));
+    if (rd.audio_hours) wl.appendChild(el("li", null,
+      esc(String(rd.audio_hours)) + " hours of audio were transcribed."));
+    work.appendChild(wl);
+    main.appendChild(work);
+
+    var ssec = el("section", "rep-group");
+    ssec.appendChild(el("h2", null, "Size on disk"));
+    ssec.appendChild(el("p", "rep-note",
+      "The delivered archive as it sits on this machine. The material it was "
+      + "built from is much larger and is not here."));
+    var sbars = el("div", "rep-bars");
+    reportBars(sbars, (sz.parts || []).map(function (p) {
+      return { label: p.name, count: p.bytes, display: p.human };
+    }));
+    ssec.appendChild(sbars);
+    main.appendChild(ssec);
+
+    if ((run.stages || []).length) {
+      var rsec = el("section", "rep-group");
+      rsec.appendChild(el("h2", null, "The run"));
+      // Say what this measurement IS. These are the completion times each stage
+      // recorded, so the span includes any time the machine sat idle between
+      // them, and a stage that was re-run appears where it actually happened
+      // rather than in pipeline order. Calling it "processing time" would be a
+      // stronger claim than the data supports.
+      rsec.appendChild(el("p", "rep-note",
+        "When each stage finished. The span between the first and the last is "
+        + (run.elapsed ? esc(run.elapsed) + ", " : "") + "wall clock — it "
+        + "includes any time the machine spent idle between stages, and is not "
+        + "a measure of how much computing was done."));
+      var rt = el("table", "rep-table");
+      rt.innerHTML = "<tr><th>Stage</th><th>Finished</th></tr>";
+      run.stages.forEach(function (st) {
+        var tr = el("tr");
+        tr.innerHTML = "<td>" + esc(pretty(st.stage || "")) + "</td><td>"
+          + esc(String(st.at).replace("T", " ").slice(0, 19)) + "</td>";
+        rt.appendChild(tr);
+      });
+      rsec.appendChild(rt);
+      main.appendChild(rsec);
+    }
+  }
+
   P.reports = function (main, d) {
     // The router seeds every page from /api/<page> with NO query string, so the
     // payload above is always the index. A specific report has to fetch itself —
     // same as the recording and email-thread detail views do.
-    if (Q.r === "family" || Q.r === "estate") {
+    var RENDER = { family: familyReport, estate: estateReport,
+                   pipeline: pipelineReport };
+    var LABEL = { family: "Family report", estate: "Estate document report",
+                  pipeline: "Pipeline report" };
+    if (RENDER[Q.r]) {
       var which = Q.r;
-      setCrumb(which === "family" ? "Family report" : "Estate document report");
+      setCrumb(LABEL[which]);
       var holder = el("div"); main.appendChild(holder);
       getJSON("/api/reports?r=" + encodeURIComponent(which)).then(function (rep) {
         holder.innerHTML = "";
-        if (which === "family") familyReport(holder, rep);
-        else estateReport(holder, rep);
+        RENDER[which](holder, rep);
       }).catch(function (e) {
         holder.appendChild(el("p", "notice",
           "Couldn't build the report: " + esc(e.message)));

@@ -2903,3 +2903,91 @@ def test_account_services_ranks_a_bank_above_a_bulk_newsletter():
     out = ad.account_services(threads, inventory={"news.test": {"count": 400}},
                               owner_addresses=["me@own.test"])
     assert [x["service"] for x in out] == ["bank.test", "news.test"]
+
+
+# ── pipeline report: what went in against what came out ─────────────────────
+
+def _pipe_summaries():
+    return {
+        "collect_dedup_summary.json": {
+            "timestamp": "2026-01-01T10:00:00",
+            "type_counts": {"image": 100, "video": 10, "document": 50, "audio": 8},
+            "exact_dupes_moved": 20, "perceptual_dupes_moved": 30,
+            "docs_exact_dupes_moved": 5, "video_exact_dupes_moved": 1},
+        "email_triage_summary.json": {
+            "timestamp": "2026-01-03T15:30:00", "email_count": 1000,
+            "kept_count": 600,
+            "triage": {"discarded_bulk": 380, "discarded_platform": 20,
+                       "rescued_by_estate_keywords": 40}},
+        "message_triage_summary.json": {
+            "timestamp": "2026-01-02T09:00:00", "conversation_files_written": 30},
+        "transcription_summary.json": {
+            "timestamp": "2026-01-01T12:00:00", "total_audio": 8, "failed": 1,
+            "total_duration_seconds": 7200},
+        "ocr_summary.json": {"timestamp": "2026-01-01T11:00:00",
+                             "total_documents": 55, "ocr_results_count": 40},
+        "expandfiles_summary.json": {"timestamp": "2026-01-01T09:00:00",
+                                     "archives_found": 12, "files_added": 300,
+                                     "email_attachments": 44},
+    }
+
+
+_PIPE_COUNTS = {"photos": 40, "videos": 9, "documents": 25, "audio": 7,
+                "emails": 250, "messages": 28}
+
+
+def test_pipeline_report_pairs_examined_with_surfaced():
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS)
+    by = {r["kind"]: r for r in rep["rows"]}
+    assert (by["Photographs"]["examined"], by["Photographs"]["surfaced"]) == (100, 40)
+    assert by["Photographs"]["share"] == 40.0
+    assert by["Videos"]["share"] == 90.0
+    assert by["Recordings"]["examined"] == 8 and by["Recordings"]["surfaced"] == 7
+
+
+def test_pipeline_report_refuses_a_share_when_the_units_change():
+    """1,000 messages become 250 CONVERSATIONS. A percentage there is arithmetic
+    on two different units, so the row carries the counts and says why."""
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS)
+    mail = [r for r in rep["rows"] if r["kind"] == "Emails"][0]
+    assert mail["share"] is None
+    assert "conversations surfaced" in mail["unit_change"]
+    assert "600" in mail["note"] and "400" in mail["note"]  # kept, and bulk+platform
+
+
+def test_pipeline_report_elapsed_is_wall_clock_across_the_stages():
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS)
+    run = rep["run"]
+    assert run["first"] == "2026-01-01T09:00:00"
+    assert run["last"] == "2026-01-03T15:30:00"
+    assert run["elapsed"] == "2 days 6 hours"
+    # ordered by when they actually finished, not by pipeline order
+    assert [s["at"] for s in run["stages"]] == sorted(s["at"] for s in run["stages"])
+
+
+def test_pipeline_report_survives_a_case_that_skipped_stages():
+    """A missing summary must not become a row of zeroes — that reads as
+    "nothing was found" rather than "this did not run"."""
+    rep = ad.pipeline_report_data(summaries={}, counts={})
+    assert rep["run"]["elapsed"] is None and rep["run"]["stages"] == []
+    assert rep["totals"]["examined"] == 0
+    assert rep["size"]["total_human"] == "0 B"
+
+
+def test_pipeline_report_formats_sizes_and_shares():
+    rep = ad.pipeline_report_data(
+        summaries=_pipe_summaries(), counts=_PIPE_COUNTS,
+        sizes={"total": 3 * 1024 ** 3, "files": 12,
+               "parts": {"audio": 2 * 1024 ** 3, "photos": 1024 ** 3, "empty": 0}})
+    assert rep["size"]["total_human"] == "3.0 GB"
+    # biggest first, and a part with nothing in it is not a row
+    assert [p["name"] for p in rep["size"]["parts"]] == ["audio", "photos"]
+    assert rep["size"]["parts"][0]["human"] == "2.0 GB"
+    assert rep["size"]["parts"][0]["share"] == 66.7
+
+
+def test_pipeline_report_reading_figures():
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS)
+    assert rep["reading"] == {"documents_read": 55, "text_recovered": 40,
+                              "audio_hours": 2.0}
+    assert rep["expansion"]["files_added"] == 300

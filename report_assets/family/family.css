@@ -1161,3 +1161,13 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
   text-transform: uppercase; color: var(--muted); border: 1px solid var(--line);
   border-radius: 8px; padding: 1px 6px; margin-left: 8px; }
 .svc-note { font-size: 12px; color: var(--muted); }
+
+/* Pipeline report: the explanation row under each figure. It has to read as a
+   continuation of the row above, not a row in its own right, so it loses the
+   rule between them and is indented under the material name. */
+.pipe-table tr.pipe-note td { border-bottom: 1px solid var(--line);
+  padding: 0 10px 10px 10px; font-size: 12.5px; line-height: 1.5;
+  color: var(--muted); text-align: left; }
+.pipe-table tr:not(.pipe-note) td { border-bottom: 0; padding-bottom: 4px; }
+.pipe-list { margin: 6px 0 0; padding-left: 18px; }
+.pipe-list li { font-size: 13.5px; line-height: 1.55; margin-bottom: 8px; }

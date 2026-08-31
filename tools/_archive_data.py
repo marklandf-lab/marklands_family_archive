@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+from datetime import datetime
 import sys
 from collections import Counter
 from pathlib import Path
@@ -1573,6 +1574,200 @@ def family_report_data(*, counts, scene_counts, audio_rows_, document_index,
         "places": counts.get("places") or 0,
         "sections": sections,
         "limitations": limitations,
+    }
+
+
+# ── pipeline report: what was examined, and what reached the archive ─────────
+
+def _pct(part, whole):
+    """part as a percentage of whole, or None when the question is meaningless.
+    Returned as a number so the page can decide how to render it."""
+    if not whole:
+        return None
+    return round(100.0 * part / whole, 1)
+
+
+def _human_bytes(n):
+    """Bytes as a person reads them. Binary steps, decimal label — what every
+    file manager shows, so the figure matches what the user sees in Finder."""
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return ("%.0f %s" % (n, unit)) if unit in ("B", "KB") else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+    return "%.1f TB" % n
+
+
+def _stage_timeline(summaries):
+    """(first, last, [(stage, ts)]) across every stage summary that recorded a
+    timestamp. Sorted by time, not by pipeline order — a stage that was re-run
+    lands where it actually happened, which is the honest picture of a run."""
+    seen = []
+    for name, doc in sorted((summaries or {}).items()):
+        if not isinstance(doc, dict):
+            continue
+        ts = doc.get("timestamp") or doc.get("ts")
+        if not isinstance(ts, str) or not ts:
+            continue
+        seen.append({"stage": doc.get("step") or doc.get("stage")
+                     or name.replace("_summary.json", "").replace(".json", ""),
+                     "at": ts})
+    seen.sort(key=lambda x: x["at"])
+    return (seen[0]["at"] if seen else None,
+            seen[-1]["at"] if seen else None,
+            seen)
+
+
+def _elapsed_words(first, last):
+    """Plain-language gap between two ISO timestamps, or None. Deliberately
+    coarse: this is wall clock between the first and last stage a run recorded,
+    which includes any time the machine sat idle between them, so a figure to
+    the second would imply a precision it does not have."""
+    if not first or not last:
+        return None
+    try:
+        a = datetime.fromisoformat(first.split("+")[0].replace("Z", ""))
+        b = datetime.fromisoformat(last.split("+")[0].replace("Z", ""))
+    except ValueError:
+        return None
+    secs = (b - a).total_seconds()
+    if secs < 0:
+        return None
+    days, rem = divmod(int(secs), 86400)
+    hours, rem = divmod(rem, 3600)
+    mins = rem // 60
+    if days:
+        return "%d day%s %d hour%s" % (days, "" if days == 1 else "s",
+                                       hours, "" if hours == 1 else "s")
+    if hours:
+        return "%d hour%s %d minute%s" % (hours, "" if hours == 1 else "s",
+                                          mins, "" if mins == 1 else "s")
+    return "%d minute%s" % (mins, "" if mins == 1 else "s")
+
+
+def pipeline_report_data(*, summaries, counts, sizes=None, case_id=None,
+                         generated_at=None):
+    """What the pipeline went through to produce this archive.
+
+    A different question again from the other two reports: not "do we hold the
+    paperwork" and not "what is in here", but "what was looked at, and how much
+    of it survived to be looked at again".
+
+    Every row is examined → surfaced with the share, plus a sentence saying where
+    the difference went, because the difference is the interesting part and it is
+    never the same story twice: photographs mostly lost to duplicates, mail
+    mostly to bulk triage, documents to both.
+
+    The comparison is only honest where the two numbers count the same kind of
+    thing, and for mail they do not — 80,486 messages become 21,988
+    CONVERSATIONS, so a percentage there would be arithmetic on two different
+    units. Those rows carry the counts and no share.
+    """
+    summaries = summaries or {}
+    counts = counts or {}
+
+    def sm(name, *keys, default=0):
+        doc = summaries.get(name) or {}
+        for k in keys:
+            if not isinstance(doc, dict):
+                return default
+            doc = doc.get(k)
+            if doc is None:
+                return default
+        return doc
+
+    collect = summaries.get("collect_dedup_summary.json") or {}
+    types = collect.get("type_counts") or {}
+
+    photos_found = types.get("image") or collect.get("source_photos_found") or 0
+    videos_found = types.get("video") or collect.get("source_videos_found") or 0
+    docs_found = types.get("document") or collect.get("source_docs_found") or 0
+    audio_found = sm("transcription_summary.json", "total_audio") or types.get("audio") or 0
+    mail_found = sm("email_triage_summary.json", "email_count")
+    convs_written = sm("message_triage_summary.json", "conversation_files_written")
+
+    photo_dupes = (collect.get("exact_dupes_moved") or 0) + \
+                  (collect.get("perceptual_dupes_moved") or 0)
+    doc_dupes = collect.get("docs_exact_dupes_moved") or 0
+    video_dupes = collect.get("video_exact_dupes_moved") or 0
+    mail_bulk = sm("email_triage_summary.json", "triage", "discarded_bulk")
+    mail_platform = sm("email_triage_summary.json", "triage", "discarded_platform")
+    mail_rescued = sm("email_triage_summary.json", "triage", "rescued_by_estate_keywords")
+    mail_kept = sm("email_triage_summary.json", "kept_count")
+
+    rows = [
+        {"kind": "Photographs", "examined": photos_found,
+         "surfaced": counts.get("photos") or 0,
+         "note": "{:,} were duplicates of another photograph — {:,} byte-identical, "
+                 "{:,} the same picture saved again at a different size or "
+                 "quality.".format(photo_dupes, collect.get("exact_dupes_moved") or 0,
+                                   collect.get("perceptual_dupes_moved") or 0)},
+        {"kind": "Videos", "examined": videos_found,
+         "surfaced": counts.get("videos") or 0,
+         "note": "{:,} were byte-identical duplicates.".format(video_dupes)},
+        {"kind": "Documents", "examined": docs_found,
+         "surfaced": counts.get("documents") or 0,
+         "note": "{:,} were byte-identical duplicates; the rest were read but did "
+                 "not resolve to a document the archive shows — see the OCR "
+                 "figures below.".format(doc_dupes)},
+        {"kind": "Recordings", "examined": audio_found,
+         "surfaced": counts.get("audio") or 0,
+         "note": "{:,} could not be transcribed.".format(
+             sm("transcription_summary.json", "failed"))},
+        # Unit change: messages in, conversations out. No share — see docstring.
+        {"kind": "Emails", "examined": mail_found,
+         "surfaced": counts.get("emails") or 0, "share": None,
+         "unit_change": "messages examined, conversations surfaced",
+         "note": "{:,} were kept as worth reading and {:,} discarded as bulk "
+                 "({:,} more were pulled back out of the discards because they "
+                 "mentioned the estate). The kept messages were then grouped into "
+                 "conversations, which is what the archive shows.".format(
+                     mail_kept, mail_bulk + mail_platform, mail_rescued)},
+        {"kind": "Message threads", "examined": convs_written,
+         "surfaced": counts.get("messages") or 0,
+         "note": "Conversations the pipeline wrote out, against those the archive "
+                 "shows; the difference was triaged away as noise."},
+    ]
+    for r in rows:
+        if "share" not in r:
+            r["share"] = _pct(r["surfaced"], r["examined"])
+
+    first, last, stages = _stage_timeline(summaries)
+
+    sizes = sizes or {}
+    parts = sorted(((k, v) for k, v in (sizes.get("parts") or {}).items() if v),
+                   key=lambda kv: -kv[1])
+    total_bytes = sizes.get("total") or 0
+
+    audio_secs = sm("transcription_summary.json", "total_duration_seconds") or 0
+
+    return {
+        "case_id": case_id,
+        "generated_at": generated_at,
+        "rows": rows,
+        "totals": {
+            "examined": sum(r["examined"] for r in rows),
+            "surfaced": sum(r["surfaced"] for r in rows),
+        },
+        "expansion": {
+            "archives_found": sm("expandfiles_summary.json", "archives_found"),
+            "files_added": sm("expandfiles_summary.json", "files_added"),
+            "email_attachments": sm("expandfiles_summary.json", "email_attachments"),
+        },
+        "reading": {
+            "documents_read": sm("ocr_summary.json", "total_documents"),
+            "text_recovered": sm("ocr_summary.json", "ocr_results_count"),
+            "audio_hours": round(audio_secs / 3600.0, 1) if audio_secs else 0,
+        },
+        "size": {
+            "total_bytes": total_bytes,
+            "total_human": _human_bytes(total_bytes),
+            "parts": [{"name": k, "bytes": v, "human": _human_bytes(v),
+                       "share": _pct(v, total_bytes)} for k, v in parts],
+            "files": sizes.get("files") or 0,
+        },
+        "run": {"first": first, "last": last, "elapsed": _elapsed_words(first, last),
+                "stages": stages},
     }
 
 
