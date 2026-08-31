@@ -500,6 +500,10 @@ EMAIL_BANDS = [(5, "Major life events"), (4, "Emotionally resonant"), (3, "Perso
 
 _ADDR_RE = re.compile(r"<([^>]+)>")
 
+# Everything a conversation id and its filename have in common once a character
+# has been rewritten in transit — see _mangled_conversation_path.
+_ID_KEEP_RE = re.compile(r"[^A-Za-z0-9_-]")
+
 # `_email_address` now lives in _archive_data (imported above) so the accounts
 # builder there can use it without importing back into this module.
 
@@ -1646,11 +1650,32 @@ class ArchiveCase:
             if cached is not None:
                 self._conversation_cache.move_to_end(cid)  # LRU touch
                 return cached
+        msgdir = self.paths.metadata_dir / "messages"
         try:
-            path = contained_child(self.paths.metadata_dir / "messages", f"{cid}.json")
+            path = contained_child(msgdir, f"{cid}.json")
         except VerbError:
             return None
         conv = load_json(path)
+        if not conv:
+            # The file may be on disk under a MANGLED name. A conversation id
+            # contains a colon ("imessage:3e61ffec470e"); a colon is illegal in a
+            # filename on Windows and on SMB shares, and a case that reached this
+            # machine through one arrives with that character rewritten. On 813_mf
+            # every one of the 569 files carries U+F022 — a private-use codepoint —
+            # where the colon should be, so EVERY conversation in the Messages
+            # list failed to open.
+            #
+            # Rather than guess which character was substituted (the mapping here
+            # is not even a clean SFM round-trip — U+F022 decodes to a double
+            # quote, not a colon), match on what survived: strip everything that
+            # is not [A-Za-z0-9_-] from both the id and the candidate filenames.
+            # A match is used ONLY when it is unique, so a directory that would
+            # make this ambiguous falls through to None instead of opening
+            # somebody else's conversation. Names come from listing the directory,
+            # so no client-supplied string reaches the filesystem.
+            path = self._mangled_conversation_path(msgdir, cid)
+            if path is not None:
+                conv = load_json(path)
         if conv:
             with self._conversation_lock:
                 self._conversation_cache[cid] = conv
@@ -1658,6 +1683,43 @@ class ArchiveCase:
                 while len(self._conversation_cache) > _CONVERSATION_CACHE_CAP:
                     self._conversation_cache.popitem(last=False)  # evict LRU
         return conv
+
+    def _mangled_conversation_path(self, msgdir, cid):
+        """Resolve a conversation id to its on-disk file when the filename has had
+        an illegal character rewritten in transit. See conversation_by_id. Returns
+        None when there is no unique match, and logs once so the mangling is
+        visible rather than silently worked around forever."""
+        want = _ID_KEEP_RE.sub("", cid)
+        if not want:
+            return None
+        with self._conversation_lock:
+            index = getattr(self, "_conversation_file_index", None)
+            if index is None:
+                index = {}
+                try:
+                    names = os.listdir(msgdir)
+                except OSError:
+                    names = []
+                for name in names:
+                    if not name.endswith(".json"):
+                        continue
+                    key = _ID_KEEP_RE.sub("", name[:-5])
+                    # A colliding key is dropped entirely: opening the wrong
+                    # person's transcript is far worse than failing to open one.
+                    index[key] = None if key in index else name
+                self._conversation_file_index = index
+                mangled = sum(1 for n in names if any(ord(c) > 127 for c in n))
+                if mangled:
+                    log(f"messages: {mangled} conversation file(s) on disk carry a "
+                        f"rewritten character in their name (a colon that did not "
+                        f"survive transfer) — matching them by their readable part")
+        name = index.get(want)
+        if not name:
+            return None
+        try:
+            return contained_child(msgdir, name)
+        except VerbError:
+            return None
 
     def _attachment_src(self, src):
         """Resolve a message attachment's source-side path to a servable /media
