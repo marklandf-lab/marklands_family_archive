@@ -1202,3 +1202,4 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
   text-transform: uppercase; border-radius: 8px; padding: 1px 6px;
   white-space: nowrap; border: 1px solid var(--line); color: var(--muted); }
 .est-chip.cand { border-color: var(--accent); color: var(--accent); }
+.est-chip.resc { border-style: dashed; }

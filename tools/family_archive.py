@@ -606,9 +606,11 @@ def _email_facets(rows, owner=(), merges=None):
         e = r.get("estate")
         if e:
             estate[e.get("kind")] += 1
+    rescued_n = sum(1 for r in rows if r.get("rescued"))
     return {
         "estate": [{"kind": k, "count": estate[k]}
                    for k in ("candidate", "near_miss") if estate.get(k)],
+        "rescued": rescued_n,
         "bands": [{"n": n, "label": lab, "count": bands.get(n, 0)}
                   for n, lab in EMAIL_BANDS if bands.get(n, 0)],
         "categories": [{"name": k, "count": v} for k, v in cats.most_common()],
@@ -622,6 +624,13 @@ def _email_facets(rows, owner=(), merges=None):
         # visible rather than silently reshaping the list.
         "owner_addresses": sorted(owner),
     }
+
+
+def _filter_emails_rescued(rows, params):
+    """?rescued=1 — only the estate-rescued mail, which the family never sees."""
+    if _one(params, "rescued") not in ("1", "true", "yes"):
+        return rows
+    return [r for r in rows if r.get("rescued")]
 
 
 def _filter_emails_estate(rows, params):
@@ -1213,6 +1222,29 @@ class ArchiveCase:
         return {"hits": hits, "total": total, "building": True}
 
     # ── data sections (thumbs/media are served live, so builders get no thumbs) ──
+    def _rescued_threads(self):
+        """Thread ids the family will never see: the estate-rescued mail.
+
+        `estate_rescued` is a per-email flag — 5,707 of 55,115 on this case — set
+        when relevance triage had ALREADY discarded a message and it was pulled
+        back because it mentioned the estate. audience.py makes those
+        examiner-only, so the family thread index simply lacks them. Subtracting
+        one index from the other is therefore the authoritative answer and needs
+        no second rule to keep in step with the gate.
+
+        Cached: one extra file read per process, and the answer cannot change
+        without a reload.
+        """
+        cached = getattr(self, "_rescued_thread_cache", None)
+        if cached is None:
+            fam = load_thread_index(self.paths.metadata_dir, "family")
+            fam_ids = {str(t.get("thread_id")) for t in (fam or {}).get("threads", []) or []}
+            mine = {str(t.get("thread_id"))
+                    for t in (self.email_threads or {}).get("threads", []) or []}
+            cached = mine - fam_ids if fam_ids else set()
+            self._rescued_thread_cache = cached
+        return cached
+
     def _estate_threads(self):
         """thread_id -> estate-scan marking, built once per process. ~0.06s, but
         it is the same answer for every request against a generation."""
@@ -1527,13 +1559,18 @@ class ArchiveCase:
             # Which conversations the estate scan touched. Examiner-only: it is
             # review state, and a family session has no use for "near miss".
             estate = self._estate_threads() if self.role == "examiner" else {}
-            if estate:
+            rescued = self._rescued_threads() if self.role == "examiner" else set()
+            if estate or rescued:
                 for r in full:
-                    e = estate.get(str(r.get("thread_id") or ""))
-                    r["estate"] = e or None
+                    tid = str(r.get("thread_id") or "")
+                    r["estate"] = estate.get(tid) or None
+                    # Mail the family will never see, because triage had already
+                    # discarded it before the estate keywords pulled it back.
+                    r["rescued"] = tid in rescued
             rows = _filter_emails_by_participant(full, params, merges)
             rows = _filter_emails_group(rows, params)
             rows = _filter_emails_estate(rows, params)
+            rows = _filter_emails_rescued(rows, params)
             rows = _filter_emails_search(rows, params)
             page = _paginate(rows, offset, limit)
             # Facets come from the FILTERED set, not the page slice: on the index

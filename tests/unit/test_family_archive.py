@@ -5084,3 +5084,16 @@ def test_email_facets_omit_estate_when_nothing_is_marked():
     """A family session gets no estate marking at all, so the break-down must not
     offer an empty dimension."""
     assert fa._email_facets([{"thread_id": "a"}, {"thread_id": "b"}])["estate"] == []
+
+
+def test_email_rescued_filter_and_facet():
+    rows = [{"thread_id": "a", "rescued": True},
+            {"thread_id": "b", "rescued": False},
+            {"thread_id": "c"}]
+    got = fa._filter_emails_rescued(rows, {"rescued": "1"})
+    assert [r["thread_id"] for r in got] == ["a"]
+    # no filter leaves the set alone
+    assert len(fa._filter_emails_rescued(rows, {})) == 3
+    assert fa._email_facets(rows)["rescued"] == 1
+    # a family session marks nothing, so the break-down offers no dimension
+    assert fa._email_facets([{"thread_id": "a"}])["rescued"] == 0
