@@ -155,26 +155,75 @@ python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/WyeastCases/81
 
 ---
 
-## 5. The vital-document checklist has no home for a dissolution decree
+## 5. A dissolution decree is a vital document with nowhere to go
 
-**What:** the checklist searches a fixed list of document types. A
-dissolution-of-marriage judgment is an estate-relevant document with no type of
-its own, so the nearest bucket is the marriage certificate — and on this case one
-was duly signed off there. The screen was right that a document mattered; the
-list had nowhere correct to put it.
+_Updated 31 Aug 2026 with the case owner's decision._
 
-**The fix:** a type for dissolution / divorce judgments in the vital-doc target
-list, and a look at what else an estate needs that the 27 do not name (a trust
-instrument and a death certificate are worth checking for).
+**What.** The checklist searches a fixed list of 27 estate document types. A
+dissolution-of-marriage judgment has no type of its own, so on this case one was
+signed off under *Marriage certificate* — the nearest bucket, and the wrong one.
 
-**Check the current list:**
+**The owner's call, which settles the question we were unsure about:** it IS a
+vital document and it should have its own type. So it has NOT been dismissed. It
+is deliberately parked under *Marriage certificate* as a placeholder, because
+that is the marital-status bucket and nothing among the 27 fits better. The
+estate report therefore still reports a marriage certificate this estate does
+not have, and will keep doing so until there is somewhere correct to put it.
+
+**What it breaks generally.** Any type the list omits keeps landing in whichever
+neighbour is closest, quietly, and the checklist then reports that neighbour as
+satisfied. This is not a reviewer error to be trained away — the reviewer was
+right that the document mattered.
+
+**The fix.** Add a dissolution / divorce judgment type. While in there, audit the
+27 against what an estate actually needs; a trust instrument and a death
+certificate are the two to check next.
+
+**To see the current list:**
 ```bash
-python3 -c "import json,os;print(sorted(json.load(open(os.path.expanduser('~/WyeastCases/813_mf/output/metadata/vital_doc_candidates.json'))).keys()))"
+python3 -c "import json,os; print(sorted(json.load(open(os.path.expanduser('~/WyeastCases/813_mf/output/metadata/vital_doc_candidates.json'))).keys()))"
 ```
 
 ---
 
-## 6. Every near-miss list is truncated, on every type
+## 6. A vital match has no way to say "here, and only here"
+
+**What.** A vital match is a (document, type) pair, and one document can be a
+candidate under several types at once. There is no way to express either of the
+two things a reviewer actually wants:
+
+* **"This belongs here and nowhere else."** Reassigning moves the clicked pairing
+  and leaves the others; dismissing removes the document from every type it
+  matched. Neither narrows the set. On this case, moving a draft will out of
+  *Property deed* into *Will / testament* left it appearing TWICE under Will /
+  testament — once reassigned, once as the original pending candidate — because
+  nothing merges the two.
+
+* **"This genuinely belongs in two places."** Sometimes right: a will that also
+  functions as a letter of instruction, a POA that is also the evidence for
+  something else. The model cannot record that as a deliberate decision, so a
+  legitimate double is indistinguishable from an unresolved duplicate.
+
+**What it breaks.** The counts. 183 candidate decisions covered 164 distinct
+documents on this case, and a reviewer cannot tell which of those doubles are
+real. It also makes dismiss dangerous in a way the UI had to be taught to warn
+about (now done in the fork: the row names the other types and dismiss confirms
+first).
+
+**The fix, roughly.** Some way to resolve a pairing that is narrower than
+dismiss — "not this type" as distinct from "not a vital document" — plus a way to
+mark a multi-type match as intentional so it stops reading as an error. A
+reassign that merges into an existing pairing rather than sitting beside it would
+remove the duplicate case entirely.
+
+**Check the current shape:**
+```bash
+curl -s localhost:7766/api/documents | python3 -c "import json,sys;from collections import Counter;t=json.load(sys.stdin)['vital_docs']['targets'];c=Counter(i['path'] for x in t for i in x['items']);print('documents in >1 pairing:', sum(1 for v in c.values() if v>1), 'of', len(c))"
+```
+
+---
+
+## 7. Every near-miss list is truncated, on every type
 
 **What:** the embed stage retrieves at most `vital_per_target_k` candidates per
 target before LLM confirmation. On this case that cap is set in the case config
@@ -193,7 +242,7 @@ adaptive per target.
 
 ---
 
-## 7. Five document categories have no sub-taxonomy at all
+## 8. Five document categories have no sub-taxonomy at all
 
 **What.** `financial` and `legal` are second-passed into subcategories and their
 documents are delivered into folders. The other five — `creative_writing`,
@@ -222,7 +271,7 @@ curl -s localhost:7766/api/documents | python3 -c "import json,sys; [print('%-26
 
 ---
 
-## 8. Duplicate vital candidates each demand their own decision
+## 9. Duplicate vital candidates each demand their own decision
 
 **What:** the same document saved twice, and several byte-identical notification
 emails, arrive as separate candidates. Each needs its own sign-off, inflating the
@@ -234,7 +283,7 @@ stage does not consult it.
 
 ---
 
-## 9. Ranked conversations carry no link target
+## 10. Ranked conversations carry no link target
 
 **What:** items in the Overview's "Most significant" list have no
 `conversation_id`, so they cannot open their own transcript. The UI points at the
@@ -244,7 +293,7 @@ Messages section by name instead — honest, but a dead end for the reader.
 
 ---
 
-## 10. Two front-end fixes that should go back upstream
+## 11. Two front-end fixes that should go back upstream
 
 Both are merged here and are not upstream. Neither is urgent; both are small.
 
