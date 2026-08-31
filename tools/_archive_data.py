@@ -1635,6 +1635,16 @@ def estate_relevance_data(vital_docs, paths, summary, decisions=None):
     cand_pairs = [(t.get("target"), i.get("path"))
                   for t in (vital_docs or {}).get("targets", []) or []
                   for i in (t.get("items") or [])]
+    # Where each candidate decision actually stands. This is the number the
+    # examiner is looking for — "169 still to decide" — and it was reachable only
+    # by opening the Documents screen and reading a stat bar.
+    decided = undecided = 0
+    for t in (vital_docs or {}).get("targets", []) or []:
+        for i in (t.get("items") or []):
+            if i.get("reviewed"):
+                decided += 1
+            else:
+                undecided += 1
     near_pairs = []
     for target in candidates:
         for hit in _near_miss_hits(candidates, confirmed, decisions, target):
@@ -1643,6 +1653,7 @@ def estate_relevance_data(vital_docs, paths, summary, decisions=None):
     return {"available": True,
             "candidates": tally(cand_pairs),
             "near_misses": tally(near_pairs),
+            "decided": decided, "undecided": undecided,
             "per_target_k": (vital_docs or {}).get("per_target_k")}
 
 
@@ -1800,6 +1811,15 @@ def pipeline_report_data(*, summaries, counts, sizes=None, relevance=None,
     for r in rows:
         if "share" not in r:
             r["share"] = _pct(r["surfaced"], r["examined"])
+    # "Surfaced" was doing too much work unexplained. It means one specific
+    # thing — the number that section of the archive shows today — and it counts
+    # a different KIND of thing per row (files for photographs, conversations for
+    # mail). Both facts now ship with the figure instead of being inferable only
+    # by reading the builder.
+    surfaced_note = ("The right-hand column is what that section of the archive "
+                     "shows today. It is a count of browsable items, not of "
+                     "items judged important — and for mail it counts "
+                     "conversations, where the left-hand column counts messages.")
 
     first, last, stages = _stage_timeline(summaries)
 
@@ -1818,6 +1838,7 @@ def pipeline_report_data(*, summaries, counts, sizes=None, relevance=None,
             "examined": sum(r["examined"] for r in rows),
             "surfaced": sum(r["surfaced"] for r in rows),
         },
+        "surfaced_note": surfaced_note,
         "expansion": {
             "archives_found": sm("expandfiles_summary.json", "archives_found"),
             "files_added": sm("expandfiles_summary.json", "files_added"),
@@ -1854,6 +1875,8 @@ def _estate_reach(relevance, mail_kept, mail_examined):
     return {
         "candidates": cand,
         "near_misses": near,
+        "decided": relevance.get("decided") or 0,
+        "undecided": relevance.get("undecided") or 0,
         "mail_denominator": mail_kept or mail_examined or 0,
         "mail_denominator_label": "messages kept as worth reading"
                                   if mail_kept else "messages examined",

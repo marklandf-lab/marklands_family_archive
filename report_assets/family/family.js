@@ -4844,7 +4844,7 @@
 
     var bar = el("div", "vstats rep-stats");
     vitalStat(bar, t.examined, "items examined");
-    vitalStat(bar, t.surfaced, "reached the archive");
+    vitalStat(bar, t.surfaced, "browsable in the archive");
     bar.appendChild(el("p", "vstats-hint",
       "The archive occupies " + esc(sz.total_human || "—") + " across "
       + num(sz.files || 0) + " files"
@@ -4856,8 +4856,9 @@
     sec.appendChild(el("h2", null, "What was examined"));
     sec.appendChild(el("p", "rep-note",
       "Everything the pipeline read, against what the archive shows today."));
+    if (d.surfaced_note) sec.appendChild(el("p", "rep-note", esc(d.surfaced_note)));
     var tbl = el("table", "rep-table pipe-table");
-    tbl.innerHTML = "<tr><th>Material</th><th>Examined</th><th>Surfaced</th>"
+    tbl.innerHTML = "<tr><th>Material</th><th>Examined</th><th>In the archive</th>"
       + "<th>Share</th></tr>";
     (d.rows || []).forEach(function (r) {
       var tr = el("tr");
@@ -4902,6 +4903,30 @@
     if (est) {
       var esec = el("section", "rep-group");
       esec.appendChild(el("h2", null, "How much of it mattered to the estate"));
+      esec.appendChild(el("p", "rep-note",
+        "Browsable is not the same as important. Of everything in the archive, "
+        + "this is what the estate scan flagged — and what still has no answer."));
+      // A funnel, ending on the number somebody actually needs: how many
+      // decisions are still outstanding. That was previously reachable only by
+      // opening the Documents screen and reading a stat bar.
+      var fun = el("div", "vstats rep-stats");
+      // All four are DECISIONS, not documents. Mixing the two here would be the
+      // same unit error the email row refuses to make: signed-off and undecided
+      // are counts of answers, and a document that is a candidate for two types
+      // can be answered for one and not the other. The distinct-document figures
+      // are in the table directly below.
+      vitalStat(fun, (est.candidates || {}).decisions, "candidates to decide");
+      vitalStat(fun, est.decided, "signed off");
+      vitalStat(fun, est.undecided, "still undecided", est.undecided > 0);
+      vitalStat(fun, (est.near_misses || {}).decisions, "weaker matches unreviewed",
+                ((est.near_misses || {}).decisions || 0) > 0);
+      fun.appendChild(el("p", "vstats-hint",
+        "Counts of decisions. They cover "
+        + num((est.candidates || {}).documents) + " distinct documents and "
+        + num((est.near_misses || {}).documents) + " weaker matches — fewer than "
+        + "the decisions, because a document can be a candidate for more than "
+        + "one type and each pairing needs its own answer."));
+      esec.appendChild(fun);
       var et = el("table", "rep-table");
       et.innerHTML = "<tr><th>&nbsp;</th><th>Decisions</th><th>Documents</th>"
         + "<th>Of those, emails</th></tr>";
