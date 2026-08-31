@@ -58,6 +58,73 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-08-31 — Reports, Documents as an index, audio kinds, accounts, Messages fixed
+
+**All of it is merged.** PR #5 and PR #6 are in `main`; there are no open PRs and
+no unpushed branches. Earlier entries in this file that say "not yet pushed" are
+describing a state that no longer exists — read them as history.
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+Then decide the **eleven wrong vital-document sign-offs** (below). Everything
+else here is polish, and the user has said polish is wanted but not what kind —
+get that before starting on it.
+
+### What shipped
+
+- **Reports** (second in the rail, examiner-only, all print-styled):
+  estate document report, family report, pipeline report. See them rather than
+  trusting a description: `/reports`.
+- **Documents browses as an index** — estate checklist as one branch, categories
+  as siblings. `legal` subcategories were being discarded by `document_rows` and
+  are now recovered from the delivery path.
+- **Recordings** grouped into six kinds, collapsed.
+- **Online Accounts** finds services from the mail rather than listing the
+  pipeline's 23 social domains.
+- **Messages was completely broken** — every conversation failed to open — and
+  is fixed. See BACKEND.md #2 for the cause.
+- **Four screens stopped overclaiming**: the Overview's "Still missing", the
+  Emails band headings, the vital-doc row, the accounts list.
+
+### ⚠️ Decide first: the eleven wrong sign-offs
+
+Still recorded, and the estate report now repeats them to anybody it is shown
+to — it asserts a property deed and a marriage certificate on the strength of a
+power of attorney and a divorce judgment.
+
+**Do not take that sentence on trust.** Open `/documents?view=vital`, expand
+`Property deed / title` and `Marriage certificate`, and read the summaries now
+on each row. Undo is per-row ("Undo — not this"); one is a reassign rather than
+an undo. It writes to the real case, so it is the case owner's call, not a
+maintenance task.
+
+### Open, in rough order
+
+- **Polish.** Asked for, unspecified. Spacing, wording, table density.
+- The **27-type checklist moved** off the Documents landing to `?view=vital` —
+  one extra click on the main review surface. Put it back if it grates.
+- **BACKEND.md is the pipeline list** and is current through today (ten items).
+  A copy for the upstream maintainer lives in the shared Google Drive folder
+  (ask the user for the link — the file link changes on every edit, because the
+  Drive tooling here cannot edit a document in place; the folder link is stable).
+
+### Two things this session learned the hard way
+
+- **The pipeline computes things nothing reads.** Acoustic labels for every
+  recording, a dedup summary, per-document summaries, `legal` subcategories —
+  four separate cases found by accident. Before building anything that needs a
+  signal, check whether it is already on disk.
+- **A count is not a count.** Messages against conversations, decisions against
+  documents, examined against browsable. Three near-misses this session came
+  from comparing two units. When a percentage looks surprising, check the
+  denominator before believing it.
+
+---
+
 ## 🎯 2026-08-28 (later) — Emails opens on an index, not 21,988 rows
 
 ### ▶ Next action
