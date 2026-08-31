@@ -58,11 +58,11 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
-## 🎯 2026-08-31 — Reports, Documents as an index, audio kinds, accounts, Messages fixed
+## 🎯 2026-08-31 — Reports, Documents index, audio kinds, accounts, Messages, and the sign-offs cleared
 
-**All of it is merged.** PR #5 and PR #6 are in `main`; there are no open PRs and
-no unpushed branches. Earlier entries in this file that say "not yet pushed" are
-describing a state that no longer exists — read them as history.
+**Everything is merged.** PRs #5, #6, #7 and #8 are all in `main`. No open PRs, no
+unpushed branches, working tree clean. Any entry below this one that says "not
+yet pushed" is describing a state that no longer exists — read them as history.
 
 ### ▶ Next action
 
@@ -70,58 +70,77 @@ describing a state that no longer exists — read them as history.
 lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
 ```
 
-Then decide the **eleven wrong vital-document sign-offs** (below). Everything
-else here is polish, and the user has said polish is wanted but not what kind —
-get that before starting on it.
+**Polish, and you need to ask what kind.** The user has said twice that polish is
+wanted and has not said what — spacing, wording, table density are guesses.
+Get that steer before starting; do not pick for them.
 
-### What shipped
+Nothing else is blocked. The decision that was waiting at the top of this file
+all day has been made and carried out (below).
 
-- **Reports** (second in the rail, examiner-only, all print-styled):
-  estate document report, family report, pipeline report. See them rather than
-  trusting a description: `/reports`.
-- **Documents browses as an index** — estate checklist as one branch, categories
-  as siblings. `legal` subcategories were being discarded by `document_rows` and
-  are now recovered from the delivery path.
-- **Recordings** grouped into six kinds, collapsed.
-- **Online Accounts** finds services from the mail rather than listing the
+### ⚠️ The eleven wrong sign-offs are DONE — do not redo them
+
+This was the standing item and it is finished. On the real case, audited and
+reversible, decisions file backed up first:
+
+- **7 dismissed** under *Property deed / title* — a zoning letter, a research
+  response, five emails about deed research.
+- **2 reassigned** — a draft will to *Will / testament*, a durable power of
+  attorney to *Power of attorney*.
+- **1 left signed off** — the ALTA title policy, which is genuinely a deed.
+- **1 left in place deliberately** — the dissolution judgment under *Marriage
+  certificate*. It IS a vital document (the owner's call) and there is no correct
+  type for it, so it is parked as an explicit placeholder. **The estate report
+  therefore still reports a marriage certificate this estate does not have.**
+  That is known, intended, and waiting on BACKEND.md #5.
+
+Signed off went 14 → 7; undecided unchanged at 169. Re-derive rather than trust
+those: `/documents?view=vital`.
+
+### What shipped today
+
+- **Reports** (second in the rail): estate, family and pipeline reports, all
+  print-styled. `/reports`.
+- **Documents as an index** — estate checklist as one branch, categories as
+  siblings. `legal` subcategories were being discarded by the row builder and are
+  now recovered from the delivery path (nine of them).
+- **Recordings** in six kinds, collapsed.
+- **Online Accounts** finds ~38 services from the mail rather than the
   pipeline's 23 social domains.
-- **Messages was completely broken** — every conversation failed to open — and
-  is fixed. See BACKEND.md #2 for the cause.
-- **Four screens stopped overclaiming**: the Overview's "Still missing", the
-  Emails band headings, the vital-doc row, the accounts list.
+- **Messages was completely broken** — every conversation failed to open — fixed.
+- **Correspondence → Document Photos.** Its "typed" list was an exact duplicate
+  of Documents → Personal correspondence; its real content is 1,221 photographs
+  of documents that appear nowhere else in the archive.
+- **The vital row now says when a document is filed under other types**, and
+  dismiss asks first — it is keyed by path and silently removes the document from
+  every type it matched.
+- **176 document photos gained the vision model's description**, which had never
+  been rendered.
+- Five screens stopped overclaiming: the Overview's "Still missing", the Emails
+  band headings, the vital-doc row, the accounts list, the pipeline report's
+  "surfaced" column.
 
-### ⚠️ Decide first: the eleven wrong sign-offs
+### Open
 
-Still recorded, and the estate report now repeats them to anybody it is shown
-to — it asserts a property deed and a marriage certificate on the strength of a
-power of attorney and a divorce judgment.
+- **Polish** — asked for, unspecified. Ask.
+- The **27-type checklist moved** off the Documents landing to `?view=vital`.
+  One extra click on the main review surface; put it back if it grates.
+- A handful of **Document Photos thumbnails fail to render** and fall back to the
+  filename, mostly `.heic` and `.png`. Pre-existing, not investigated.
+- **BACKEND.md is the pipeline list** and is current through today (twelve
+  sections, nine numbered items). A copy for the upstream maintainer lives in the
+  shared Google Drive folder — ask the user for the link; the file link changes
+  on every edit because the Drive tooling cannot edit a document in place.
 
-**Do not take that sentence on trust.** Open `/documents?view=vital`, expand
-`Property deed / title` and `Marriage certificate`, and read the summaries now
-on each row. Undo is per-row ("Undo — not this"); one is a reassign rather than
-an undo. It writes to the real case, so it is the case owner's call, not a
-maintenance task.
+### Two things worth carrying forward
 
-### Open, in rough order
-
-- **Polish.** Asked for, unspecified. Spacing, wording, table density.
-- The **27-type checklist moved** off the Documents landing to `?view=vital` —
-  one extra click on the main review surface. Put it back if it grates.
-- **BACKEND.md is the pipeline list** and is current through today (ten items).
-  A copy for the upstream maintainer lives in the shared Google Drive folder
-  (ask the user for the link — the file link changes on every edit, because the
-  Drive tooling here cannot edit a document in place; the folder link is stable).
-
-### Two things this session learned the hard way
-
-- **The pipeline computes things nothing reads.** Acoustic labels for every
-  recording, a dedup summary, per-document summaries, `legal` subcategories —
-  four separate cases found by accident. Before building anything that needs a
-  signal, check whether it is already on disk.
+- **The pipeline computes signals nothing reads.** Five found this session:
+  acoustic labels for every recording, a dedup summary, per-document summaries,
+  `legal` subcategories, and vision-model descriptions for 176 images. Four of
+  the five turned up by accident. Before building something to produce a signal,
+  check whether it is already on disk.
 - **A count is not a count.** Messages against conversations, decisions against
-  documents, examined against browsable. Three near-misses this session came
-  from comparing two units. When a percentage looks surprising, check the
-  denominator before believing it.
+  documents, examined against browsable. Several near-misses came from comparing
+  two units. When a percentage looks surprising, check the denominator first.
 
 ---
 
