@@ -34,7 +34,40 @@ from Google Drive. Context and the verification command are in
 
 ---
 
-## 2. Audio classification is unreliable, and this corpus is why
+## 2. Conversation ids contain a colon, and colons do not survive delivery
+
+**What.** A conversation id is `imessage:<hex>`, and the per-conversation JSON is
+written to `output/metadata/messages/<id>.json`. A colon is illegal in a filename
+on Windows and over SMB, so a case that reaches a Mac through either arrives with
+that character rewritten. On 813_mf every one of the 569 files carries **U+F022**,
+a private-use codepoint, where the colon should be.
+
+**What it broke.** Every conversation in the Messages section — all 552 — failed
+to open with "unknown conversation imessage:…", which reads as "this does not
+exist" when the file is sitting right there under a name nobody could construct.
+The fork now matches on the readable part of the name and works around it, but
+that is a patch over damaged data, not a fix.
+
+**Why it needs you.** Two candidate fixes and both are upstream:
+- Stop putting a colon in the on-disk filename. The id can keep its colon; the
+  file it is written to does not need to carry it. `wyeast/core/safe_names.py`
+  already exists for exactly this and is not used here.
+- Or make delivery/relocation aware of the rewrite, the way `rebase.py` is aware
+  of relocated paths — a delivered case is already known to need fixing up.
+
+The first is much cheaper and stops the problem at the source. Note that any case
+already delivered stays broken either way until it is re-delivered, so the reader
+tolerance is worth keeping regardless.
+
+**Check it:**
+```bash
+ls ~/WyeastCases/813_mf/output/metadata/messages | head -3 | cat -v
+python3 -c "import os;d=os.path.expanduser('~/WyeastCases/813_mf/output/metadata/messages');fs=os.listdir(d);print(len(fs),'files;',sum(1 for f in fs if any(ord(c)>127 for c in f)),'with a rewritten character')"
+```
+
+---
+
+## 3. Audio classification is unreliable, and this corpus is why
 
 **What.** Every recording carries a classifier category. Measured 31 Aug 2026:
 of the 47 recordings that exist as the same audio in two file formats, **17
@@ -68,7 +101,7 @@ curl -s localhost:7766/api/recordings | python3 -c "import json,sys,re; from col
 
 ---
 
-## 3. The pipeline never worked out whose mailbox it is
+## 4. The pipeline never worked out whose mailbox it is
 
 **What:** `owner_email_addresses` is empty in the case's `case_config.json`, and
 `output/metadata/email_triage_summary.json` records `owner_source: "none"`. So
@@ -94,7 +127,7 @@ python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/WyeastCases/81
 
 ---
 
-## 4. The vital-document checklist has no home for a dissolution decree
+## 5. The vital-document checklist has no home for a dissolution decree
 
 **What:** the checklist searches a fixed list of document types. A
 dissolution-of-marriage judgment is an estate-relevant document with no type of
@@ -113,7 +146,7 @@ python3 -c "import json,os;print(sorted(json.load(open(os.path.expanduser('~/Wye
 
 ---
 
-## 5. Every near-miss list is truncated, on every type
+## 6. Every near-miss list is truncated, on every type
 
 **What:** the embed stage retrieves at most `vital_per_target_k` candidates per
 target before LLM confirmation. On this case that cap is set in the case config
@@ -132,7 +165,7 @@ adaptive per target.
 
 ---
 
-## 6. Duplicate vital candidates each demand their own decision
+## 7. Duplicate vital candidates each demand their own decision
 
 **What:** the same document saved twice, and several byte-identical notification
 emails, arrive as separate candidates. Each needs its own sign-off, inflating the
@@ -144,7 +177,7 @@ stage does not consult it.
 
 ---
 
-## 7. Ranked conversations carry no link target
+## 8. Ranked conversations carry no link target
 
 **What:** items in the Overview's "Most significant" list have no
 `conversation_id`, so they cannot open their own transcript. The UI points at the
@@ -154,7 +187,7 @@ Messages section by name instead — honest, but a dead end for the reader.
 
 ---
 
-## 8. Two front-end fixes that should go back upstream
+## 9. Two front-end fixes that should go back upstream
 
 Both are merged here and are not upstream. Neither is urgent; both are small.
 
