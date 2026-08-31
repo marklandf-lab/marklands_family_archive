@@ -2648,3 +2648,75 @@ def test_audio_rows_carry_kind_and_label(tmp_path):
     # the raw classifier answer is kept beside it — the classifier is not reliable
     # enough to throw away what it actually said
     assert by["/a/song.aif"]["category"] == "non_speech"
+
+
+# ── the estate report: "not there" vs "not finished looking" ─────────────────
+
+def _vd(targets, per_target_k=25):
+    return {"available": True, "per_target_k": per_target_k, "targets": targets}
+
+
+def _t(label, items=(), near=0, capped=False):
+    return {"target": label.lower().replace(" ", "_"), "label": label,
+            "items": [{"reviewed": r} for r in items], "near_miss_count": near,
+            "near_miss_capped": capped}
+
+
+def test_estate_report_three_states():
+    rep = ad.estate_report_data(_vd([
+        _t("Will", items=[True, False]),        # signed off → present
+        _t("Deed", items=[False, False]),       # candidates, none ruled on
+        _t("Trust", near=4),                    # only weak matches
+        _t("Passport"),                         # nothing at all
+    ]))
+    by = {r["label"]: r for g in rep["groups"] for r in g["types"]}
+    assert by["Will"]["state"] == "present"
+    assert by["Deed"]["state"] == "unconfirmed"
+    assert by["Trust"]["state"] == "unconfirmed", \
+        "weak matches nobody reviewed cannot be reported as absent"
+    assert by["Passport"]["state"] == "absent"
+
+
+def test_estate_report_present_still_reports_what_is_outstanding():
+    """A type with the document AND unreviewed candidates is present — the estate
+    has it — but the reader is still owed the outstanding count."""
+    rep = ad.estate_report_data(_vd([_t("Will", items=[True, False, False], near=7)]))
+    row = rep["groups"][0]["types"][0]
+    assert (row["state"], row["signed_off"], row["undecided"], row["near_misses"]) \
+        == ("present", 1, 2, 7)
+
+
+def test_estate_report_totals():
+    rep = ad.estate_report_data(_vd([
+        _t("Will", items=[True, False], near=3),
+        _t("Deed", items=[False], near=2),
+        _t("Passport"),
+    ]))
+    assert rep["totals"] == {
+        "types": 3, "present": 1, "unconfirmed": 1, "absent": 1,
+        "candidates": 3, "signed_off": 1, "undecided": 2, "near_misses": 5}
+
+
+def test_estate_report_limitations_are_built_from_the_data():
+    """A caveat that does not move when the numbers move is worse than none."""
+    rep = ad.estate_report_data(_vd([_t("Will", items=[False], near=9, capped=True)]))
+    text = " ".join(rep["limitations"])
+    assert "25 candidates per document type" in text and "1 of the 1 types" in text
+    assert "1 candidate documents have been found but not yet reviewed" in text
+    assert "9 weaker matches" in text
+    # nothing qualified as absent here, and the report must say so out loud
+    assert "No document type can currently be reported as absent" in text
+    # and the standing caveat is always present
+    assert "not a search of public records" in text
+
+
+def test_estate_report_drops_the_absent_caveat_when_something_is_absent():
+    rep = ad.estate_report_data(_vd([_t("Passport"), _t("Will", items=[True])]))
+    text = " ".join(rep["limitations"])
+    assert "No document type can currently be reported as absent" not in text
+    assert rep["totals"]["absent"] == 1
+
+
+def test_estate_report_unavailable_when_the_scan_never_ran():
+    assert ad.estate_report_data({"available": False})["available"] is False
+    assert ad.estate_report_data(None)["available"] is False

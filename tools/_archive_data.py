@@ -1302,6 +1302,133 @@ def _clean_recording_name(name):
     return stripped or name
 
 
+# ── estate document report (attorney-facing) ─────────────────────────────────
+
+def estate_report_data(vital_docs, case_id=None, generated_at=None):
+    """A statement of position on the estate's vital documents, written for
+    somebody outside the review — an attorney — rather than for the reviewer.
+
+    The whole point of this view is a distinction the rest of the UI blurs:
+    **"we looked and it is not there" is not the same claim as "we have not
+    finished looking"**, and on screen they occupy the same empty space. An
+    attorney who reads a blank row as "no such document exists" and advises on
+    that basis has been misled by us, not by the archive.
+
+    So every type lands in exactly one of three groups, and the third one is
+    deliberately hard to qualify for:
+
+      present      at least one candidate has been signed off. We have it.
+      unconfirmed  something matched — a candidate, or only weaker near-misses —
+                   and nobody has ruled on it. We cannot say either way.
+      absent       nothing matched at all, at any strength. Only this group
+                   supports the sentence "the archive does not contain one",
+                   and even then only as far as retrieval reached (see below).
+
+    A type with a signed-off document AND outstanding candidates is `present`:
+    the estate has the document. The outstanding count still rides on the row,
+    because "we have a will, and four more candidates nobody has looked at" is
+    the true state and the reader is entitled to it.
+
+    Returns totals, the three groups, and a `limitations` list built FROM THE
+    DATA rather than written by hand — a caveat that does not update when the
+    numbers do is worse than no caveat.
+    """
+    vital_docs = vital_docs or {}
+    if not vital_docs.get("available"):
+        return {"available": False, "case_id": case_id, "generated_at": generated_at}
+
+    per_target_k = vital_docs.get("per_target_k")
+    rows = []
+    for t in vital_docs.get("targets", []) or []:
+        items = t.get("items") or []
+        signed = sum(1 for i in items if i.get("reviewed"))
+        near = t.get("near_miss_count") or 0
+        if signed:
+            state = "present"
+        elif items or near:
+            state = "unconfirmed"
+        else:
+            state = "absent"
+        rows.append({
+            "target": t.get("target"),
+            "label": t.get("label"),
+            "state": state,
+            "candidates": len(items),
+            "signed_off": signed,
+            "undecided": len(items) - signed,
+            "near_misses": near,
+            # This type's candidate list hit the retrieval ceiling, so its counts
+            # are a floor. Carried per row because it changes what the row MEANS.
+            "capped": bool(t.get("near_miss_capped")),
+        })
+
+    def tally(key):
+        return [r for r in rows if r["state"] == key]
+
+    groups = [
+        {"key": "present", "label": "Confirmed present",
+         "note": "A document of this type has been found and signed off.",
+         "types": tally("present")},
+        {"key": "unconfirmed", "label": "Not yet established",
+         "note": "Something matched, but nobody has ruled on it. This is not a "
+                 "statement that the document does or does not exist.",
+         "types": tally("unconfirmed")},
+        {"key": "absent", "label": "Nothing matched",
+         "note": "No candidate and no weaker match, at any strength.",
+         "types": tally("absent")},
+    ]
+
+    totals = {
+        "types": len(rows),
+        "present": len(tally("present")),
+        "unconfirmed": len(tally("unconfirmed")),
+        "absent": len(tally("absent")),
+        "candidates": sum(r["candidates"] for r in rows),
+        "signed_off": sum(r["signed_off"] for r in rows),
+        "undecided": sum(r["undecided"] for r in rows),
+        "near_misses": sum(r["near_misses"] for r in rows),
+    }
+
+    capped = [r for r in rows if r["capped"]]
+    # Thousands separators: this text is printed and handed to somebody outside
+    # the project, where "1147" reads as a typo rather than a figure.
+    def n(x):
+        return "{:,}".format(x)
+    limitations = []
+    if capped and per_target_k:
+        limitations.append(
+            "Retrieval stopped at {k} candidates per document type. {n} of the {t} "
+            "types reached that limit, so for those the counts below are a floor: "
+            "documents past the {k}th were never retrieved, and so were never "
+            "assessed.".format(k=n(per_target_k), n=n(len(capped)), t=n(len(rows))))
+    if totals["undecided"]:
+        limitations.append(
+            "{n} candidate documents have been found but not yet reviewed.".format(
+                n=n(totals["undecided"])))
+    if totals["near_misses"]:
+        limitations.append(
+            "{n} weaker matches have not been reviewed. A document of a type shown "
+            "as not established may be among them.".format(n=n(totals["near_misses"])))
+    if not totals["absent"]:
+        limitations.append(
+            "No document type can currently be reported as absent from this "
+            "archive: every type still has unreviewed matches.")
+    limitations.append(
+        "This describes only the material supplied to the archive. It is not a "
+        "search of public records, and its absence of a document is not evidence "
+        "that none exists elsewhere.")
+
+    return {
+        "available": True,
+        "case_id": case_id,
+        "generated_at": generated_at,
+        "per_target_k": per_target_k,
+        "totals": totals,
+        "groups": groups,
+        "limitations": limitations,
+    }
+
+
 # ── audio kinds ───────────────────────────────────────────────────────────────
 # The classifier emits seven categories; the Recordings page groups them into six
 # KINDS, because "what sort of listening is this" is the question someone browsing

@@ -1083,3 +1083,42 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
 .rec-seconly:hover { text-decoration: underline; }
 .rec-secbody { border: 1px solid var(--line); border-top: 0;
   border-radius: 0 0 9px 9px; padding: 4px 12px 12px; }
+
+/* ── Estate document report ────────────────────────────────────────────────
+   Meant to be printed and handed to somebody outside the review, so it reads as
+   a document rather than a screen: one column, generous leading, no colour
+   carrying meaning on its own. */
+.rep-stats { margin-bottom: 22px; }
+.rep-limits { background: var(--rail); border: 1px solid var(--line);
+  border-radius: 10px; padding: 14px 18px; margin: 0 0 26px; }
+.rep-limits h2 { font-size: 14px; margin: 0 0 8px; }
+.rep-limits ul { margin: 0; padding-left: 18px; }
+.rep-limits li { font-size: 13px; line-height: 1.55; margin-bottom: 6px; color: var(--ink); }
+.rep-group { margin-bottom: 28px; }
+.rep-group h2 { font-size: 16px; margin: 0 0 2px; }
+.rep-note { font-size: 12.5px; color: var(--muted); margin: 0 0 10px; }
+.rep-empty { font-size: 13px; color: var(--muted); font-style: italic; }
+.rep-table { width: 100%; border-collapse: collapse; }
+.rep-table th { text-align: right; font-family: var(--mono); font-size: 10px;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+  padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.rep-table th:first-child { text-align: left; }
+.rep-table td { padding: 8px 10px; font-size: 13.5px; text-align: right;
+  border-bottom: 1px solid var(--line); }
+.rep-table td:first-child { text-align: left; }
+.rep-cap { font-family: var(--mono); font-size: 9.5px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 8px; padding: 1px 6px; margin-left: 6px; }
+
+/* Print: this is the one view built to leave the screen. Drop the furniture,
+   keep a group and its table together, and spell out the cap marker — a
+   tooltip is worth nothing on paper. */
+@media print {
+  .rail, .pager, .actrow, .filterbar, .btn, .selbar, #toasts, .crumbs { display: none !important; }
+  body, .main { background: #fff; color: #000; }
+  .main { padding: 0; max-width: none; }
+  .rep-group { break-inside: avoid; }
+  .rep-limits { border: 1px solid #999; background: #fff; }
+  .rep-table td, .rep-table th { border-bottom: 1px solid #ccc; }
+  .rep-cap::after { content: " — retrieval reached its limit for this type"; }
+}

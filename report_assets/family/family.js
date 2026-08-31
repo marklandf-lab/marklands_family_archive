@@ -4708,6 +4708,83 @@
     });
   }
 
+  // ── Estate document report (attorney-facing) ──
+  // Everything this page is for turns on one distinction the rest of the UI
+  // blurs: "we searched and it is not there" and "we have not finished
+  // searching" look identical on screen — both are an empty row — and only the
+  // first supports advice. So the three states are named, the weakest one is
+  // hard to qualify for, and the limitations are stated up front rather than in
+  // a footnote, because a reader who stops halfway must not stop having been
+  // misled.
+  P.report = function (main, d) {
+    if (!d || d.available === false) {
+      head(main, "Estate report", "Estate document report", "");
+      main.appendChild(el("p", "notice",
+        "The vital-document scan has not run for this case, so there is nothing "
+        + "to report on yet."));
+      return;
+    }
+    var t = d.totals;
+    var controls = head(main, "Estate report", "Estate document report",
+      "Case " + esc(d.case_id || "") + " · prepared " + esc(d.generated_at || ""));
+    var pr = el("button", "btn", "Print / Save as PDF");
+    pr.onclick = function () { window.print(); };
+    controls.appendChild(pr);
+
+    // The headline, in the terms an attorney reads: of the types an estate
+    // needs, how many do we actually have.
+    var bar = el("div", "vstats rep-stats");
+    vitalStat(bar, t.present, "types confirmed present");
+    vitalStat(bar, t.unconfirmed, "types not yet established", t.unconfirmed > 0);
+    vitalStat(bar, t.absent, "types with nothing matched");
+    bar.appendChild(el("p", "vstats-hint",
+      "Across " + num(t.types) + " document types an estate needs. "
+      + num(t.candidates) + " candidate documents were found, of which "
+      + num(t.signed_off) + " have been confirmed and " + num(t.undecided)
+      + " are still unreviewed, alongside " + num(t.near_misses)
+      + " weaker matches that have not been reviewed."));
+    main.appendChild(bar);
+
+    // Limitations BEFORE the table, deliberately. They change what every number
+    // below means, so a reader who takes in only the first screen still leaves
+    // with the caveat rather than the figure alone.
+    var lim = el("section", "rep-limits");
+    lim.appendChild(el("h2", null, "What this report cannot tell you"));
+    var ul = el("ul");
+    (d.limitations || []).forEach(function (x) { ul.appendChild(el("li", null, esc(x))); });
+    lim.appendChild(ul);
+    main.appendChild(lim);
+
+    (d.groups || []).forEach(function (g) {
+      var sec = el("section", "rep-group rep-" + g.key);
+      sec.appendChild(el("h2", null, esc(g.label) + " (" + num((g.types || []).length) + ")"));
+      sec.appendChild(el("p", "rep-note", esc(g.note)));
+      if (!(g.types || []).length) {
+        sec.appendChild(el("p", "rep-empty", "None."));
+        main.appendChild(sec);
+        return;
+      }
+      var tbl = el("table", "rep-table");
+      tbl.innerHTML = "<tr><th>Document type</th><th>Found</th><th>Confirmed</th>"
+        + "<th>Unreviewed</th><th>Weaker matches</th></tr>";
+      g.types.forEach(function (r) {
+        var tr = el("tr");
+        // The cap marker rides on the row it qualifies, not only in the preamble:
+        // for a capped type "nothing matched" means "nothing within what we
+        // retrieved", which is a materially weaker claim.
+        var name = esc(r.label) + (r.capped
+          ? ' <span class="rep-cap" title="Retrieval reached its limit for this '
+            + 'type — these counts are a floor">capped</span>' : "");
+        tr.innerHTML = "<td>" + name + "</td><td>" + num(r.candidates) + "</td><td>"
+          + num(r.signed_off) + "</td><td>" + num(r.undecided) + "</td><td>"
+          + num(r.near_misses) + "</td>";
+        tbl.appendChild(tr);
+      });
+      sec.appendChild(tbl);
+      main.appendChild(sec);
+    });
+  };
+
   // ── Recordings: grouped by what kind of listening it is ──
   // 1,051 recordings used to render as one flat significance-sorted list, every
   // row carrying its own <audio> element, with no way to ask for the voicemails.
