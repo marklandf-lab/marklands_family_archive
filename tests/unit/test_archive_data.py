@@ -1710,7 +1710,10 @@ def test_overview_data_carries_vital_docs_card(tmp_path):
     ov = ad.overview_data(summary, "family", {}, vital_docs=vd)
     card = ov["vital_docs"]
     assert card["available"] is True and card["found_count"] == 3 and card["total_count"] == 4
-    assert {"label": "Passport / ID", "found": False} in card["types"]
+    assert {"label": "Passport / ID", "found": False, "near_misses": None} \
+        in card["types"], \
+        "near_misses stays absent for family — the card must not be able to say " \
+        "'0 unreviewed' to somebody who is not doing the reviewing"
     # omitting vital_docs (e.g. static explorer) must not crash — stub card
     assert ad.overview_data(summary, "family", {})["vital_docs"] == {"available": False}
 
@@ -2798,3 +2801,30 @@ def test_family_report_drops_the_undated_caveat_when_everything_is_dated():
         timeline={"chapters": [{"date_from": "2015-01-01", "date_to": "2015-12-31"}],
                   "undated": {"count": 0}}))
     assert not any("carry no date" in x for x in rep["limitations"])
+
+
+def test_overview_card_counts_near_misses_under_the_unfound_types(tmp_path):
+    """The Overview used to headline these types as "Still missing". They are the
+    types with no CONFIRMED document — and while weaker matches under them are
+    unread, "missing" states an absence the archive cannot support, and
+    contradicts the estate report, which files the same types under "not yet
+    established". The card needs this number to say so."""
+    paths, summary = _vital_case(tmp_path)
+    vd = ad.vital_docs_data(paths, summary, "examiner", per_target_k=25)
+    card = ad._vital_docs_overview(vd)
+    unfound = [t for t in card["types"] if not t["found"]]
+    assert unfound, "the fixture must have at least one unfound type"
+    assert card["unfound_near_misses"] == sum(t["near_misses"] or 0 for t in unfound)
+    # a FOUND type's near-misses are not counted — the claim is only about the
+    # types the card is about to list as not yet found
+    assert card["unfound_near_misses"] != sum(
+        (t["near_misses"] or 0) for t in card["types"]) or \
+        all(t["found"] is False for t in card["types"])
+
+
+def test_overview_card_withholds_the_near_miss_total_shape_from_family(tmp_path):
+    paths, summary = _vital_case(tmp_path)
+    fam = ad._vital_docs_overview(ad.vital_docs_data(paths, summary, "family"))
+    assert all(t["near_misses"] is None for t in fam["types"])
+    # nothing to total, so the card has no number to print and stays quiet
+    assert fam["unfound_near_misses"] == 0

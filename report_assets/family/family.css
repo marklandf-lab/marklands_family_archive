@@ -1139,3 +1139,8 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
   .rep-bars { border: 1px solid #ccc; }
   .rep-span { font-size: 15px; }
 }
+
+/* The qualifier under "Not yet found" on the Overview's vital card. Quiet, but
+   it has to be readable — it is the sentence that stops the chips below it
+   being read as an absence the archive cannot support. */
+.ovnote { font-size: 12px; line-height: 1.45; color: var(--muted); margin: 2px 0 8px; }

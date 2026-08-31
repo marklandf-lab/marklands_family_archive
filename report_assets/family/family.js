@@ -2182,9 +2182,24 @@
           unchecked.appendChild(a);
         }).catch(function () { unchecked.remove(); });
       }
+      // NOT "Still missing". These are the types with no CONFIRMED document, and
+      // on this case every one of them still has weaker matches nobody has read —
+      // so calling them missing states an absence the archive cannot support, and
+      // contradicts the estate report, which puts the same types under "not yet
+      // established". A reader who takes "missing" at face value concludes there
+      // is no death certificate, when the truth is that nobody has finished
+      // looking. The count is examiner-only upstream, so a family session gets
+      // the honest heading without the review vocabulary under it.
       var missing = (vd.types || []).filter(function (t) { return !t.found; });
       if (missing.length) {
-        vc.appendChild(el("p", "ovtally ovtally-sub", "Still missing"));
+        vc.appendChild(el("p", "ovtally ovtally-sub", "Not yet found"));
+        if (EXAMINER && vd.unfound_near_misses) {
+          vc.appendChild(el("p", "ovnote",
+            "Nothing matched well enough to be a candidate. "
+            + num(vd.unfound_near_misses)
+            + " weaker matches for these types have not been reviewed, so none of "
+            + "them can be called absent yet."));
+        }
         var chips = el("div", "ovchips");
         missing.forEach(function (t) { chips.appendChild(el("span", null, esc(t.label))); });
         vc.appendChild(chips);

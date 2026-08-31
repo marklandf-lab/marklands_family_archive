@@ -2070,12 +2070,24 @@ def _vital_docs_overview(vital_docs):
     paths — the full checklist with links lives on the Documents page)."""
     if not vital_docs or not vital_docs.get("available"):
         return {"available": bool(vital_docs and vital_docs.get("available"))}
+    targets = vital_docs.get("targets", []) or []
     return {
         "available": True,
         "found_count": vital_docs.get("found_count", 0),
         "total_count": vital_docs.get("total_count", 0),
-        "types": [{"label": t["label"], "found": t["found"]}
-                  for t in vital_docs.get("targets", [])],
+        "types": [{"label": t["label"], "found": t["found"],
+                   # Examiner-only upstream (vital_docs_data omits it for family),
+                   # so it stays absent rather than 0 for a family session — the
+                   # card must not be able to say "0 unreviewed" to somebody who
+                   # is not doing the reviewing.
+                   "near_misses": t.get("near_miss_count")}
+                  for t in targets],
+        # Weaker matches sitting under the types with NO confirmed document. This
+        # is what stops the card claiming those types are missing: a type nobody
+        # has finished looking at is not a type that is absent. Summed here rather
+        # than in the page so the card and the estate report read one number.
+        "unfound_near_misses": sum((t.get("near_miss_count") or 0)
+                                   for t in targets if not t.get("found")),
     }
 
 
