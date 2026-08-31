@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+from datetime import datetime
 import sys
 from collections import Counter
 from pathlib import Path
@@ -1263,9 +1264,22 @@ def document_rows(summary, ocr_index, role, *, cap=None, doc_placements=None):
             cat, sub_override = p, _UNSET
         else:
             cat, sub_override = derived, _UNSET
-        subcat = sub_override if sub_override is not _UNSET else d.get("subcategory")
-        if cat != "financial":
-            subcat = None            # subcategory is meaningless outside financial
+        if sub_override is not _UNSET:
+            subcat = sub_override                 # the examiner said so; it wins
+        elif cat == derived:
+            subcat = d.get("subcategory")         # still in its own category
+        else:
+            # §14.2: the examiner has re-categorised this document, so the
+            # pipeline's sub-taxonomy no longer describes it — a receipts
+            # subcategory on a document just moved to `legal` is nonsense.
+            subcat = None
+        if subcat is None:
+            # Not "meaningless outside financial", which is what this used to
+            # assume. The pipeline sub-sorts `legal` too and never fills the
+            # field in; the delivered path is where that answer survives. The
+            # path is category-scoped, so a moved document finds nothing here
+            # and correctly stays unfiled.
+            subcat = subcategory_from_path(f, cat)
         preview = (ocr_by_file.get(f, "") or "").strip().replace("\n", " ")
         rows.append({
             "file": f,
@@ -1302,6 +1316,780 @@ def _clean_recording_name(name):
     return stripped or name
 
 
+# ── estate document report (attorney-facing) ─────────────────────────────────
+
+def estate_report_data(vital_docs, case_id=None, generated_at=None):
+    """A statement of position on the estate's vital documents, written for
+    somebody outside the review — an attorney — rather than for the reviewer.
+
+    The whole point of this view is a distinction the rest of the UI blurs:
+    **"we looked and it is not there" is not the same claim as "we have not
+    finished looking"**, and on screen they occupy the same empty space. An
+    attorney who reads a blank row as "no such document exists" and advises on
+    that basis has been misled by us, not by the archive.
+
+    So every type lands in exactly one of three groups, and the third one is
+    deliberately hard to qualify for:
+
+      present      at least one candidate has been signed off. We have it.
+      unconfirmed  something matched — a candidate, or only weaker near-misses —
+                   and nobody has ruled on it. We cannot say either way.
+      absent       nothing matched at all, at any strength. Only this group
+                   supports the sentence "the archive does not contain one",
+                   and even then only as far as retrieval reached (see below).
+
+    A type with a signed-off document AND outstanding candidates is `present`:
+    the estate has the document. The outstanding count still rides on the row,
+    because "we have a will, and four more candidates nobody has looked at" is
+    the true state and the reader is entitled to it.
+
+    Returns totals, the three groups, and a `limitations` list built FROM THE
+    DATA rather than written by hand — a caveat that does not update when the
+    numbers do is worse than no caveat.
+    """
+    vital_docs = vital_docs or {}
+    if not vital_docs.get("available"):
+        return {"available": False, "case_id": case_id, "generated_at": generated_at}
+
+    per_target_k = vital_docs.get("per_target_k")
+    rows = []
+    for t in vital_docs.get("targets", []) or []:
+        items = t.get("items") or []
+        signed = sum(1 for i in items if i.get("reviewed"))
+        near = t.get("near_miss_count") or 0
+        if signed:
+            state = "present"
+        elif items or near:
+            state = "unconfirmed"
+        else:
+            state = "absent"
+        rows.append({
+            "target": t.get("target"),
+            "label": t.get("label"),
+            "state": state,
+            "candidates": len(items),
+            "signed_off": signed,
+            "undecided": len(items) - signed,
+            "near_misses": near,
+            # This type's candidate list hit the retrieval ceiling, so its counts
+            # are a floor. Carried per row because it changes what the row MEANS.
+            "capped": bool(t.get("near_miss_capped")),
+        })
+
+    def tally(key):
+        return [r for r in rows if r["state"] == key]
+
+    groups = [
+        {"key": "present", "label": "Confirmed present",
+         "note": "A document of this type has been found and signed off.",
+         "types": tally("present")},
+        {"key": "unconfirmed", "label": "Not yet established",
+         "note": "Something matched, but nobody has ruled on it. This is not a "
+                 "statement that the document does or does not exist.",
+         "types": tally("unconfirmed")},
+        {"key": "absent", "label": "Nothing matched",
+         "note": "No candidate and no weaker match, at any strength.",
+         "types": tally("absent")},
+    ]
+
+    totals = {
+        "types": len(rows),
+        "present": len(tally("present")),
+        "unconfirmed": len(tally("unconfirmed")),
+        "absent": len(tally("absent")),
+        "candidates": sum(r["candidates"] for r in rows),
+        "signed_off": sum(r["signed_off"] for r in rows),
+        "undecided": sum(r["undecided"] for r in rows),
+        "near_misses": sum(r["near_misses"] for r in rows),
+    }
+
+    capped = [r for r in rows if r["capped"]]
+    # Thousands separators: this text is printed and handed to somebody outside
+    # the project, where "1147" reads as a typo rather than a figure.
+    def n(x):
+        return "{:,}".format(x)
+    limitations = []
+    if capped and per_target_k:
+        limitations.append(
+            "Retrieval stopped at {k} candidates per document type. {n} of the {t} "
+            "types reached that limit, so for those the counts below are a floor: "
+            "documents past the {k}th were never retrieved, and so were never "
+            "assessed.".format(k=n(per_target_k), n=n(len(capped)), t=n(len(rows))))
+    if totals["undecided"]:
+        limitations.append(
+            "{n} candidate documents have been found but not yet reviewed.".format(
+                n=n(totals["undecided"])))
+    if totals["near_misses"]:
+        limitations.append(
+            "{n} weaker matches have not been reviewed. A document of a type shown "
+            "as not established may be among them.".format(n=n(totals["near_misses"])))
+    if not totals["absent"]:
+        limitations.append(
+            "No document type can currently be reported as absent from this "
+            "archive: every type still has unreviewed matches.")
+    limitations.append(
+        "This describes only the material supplied to the archive. It is not a "
+        "search of public records, and its absence of a document is not evidence "
+        "that none exists elsewhere.")
+
+    return {
+        "available": True,
+        "case_id": case_id,
+        "generated_at": generated_at,
+        "per_target_k": per_target_k,
+        "totals": totals,
+        "groups": groups,
+        "limitations": limitations,
+    }
+
+
+def _report_label(slug):
+    """A category slug as a person would read it: 'work_correspondence' →
+    'Work correspondence'. There is no Python `pretty()` in this module — the
+    front end has its own — so report labels are built here rather than shipped
+    as slugs and prettified twice with two different results."""
+    return (slug or "").replace("_", " ").strip().capitalize() or "Uncategorised"
+
+
+def _report_span(timeline):
+    """(earliest, latest) dated day across the timeline's chapters, or (None, None).
+
+    Read off the chapters rather than re-scanning every item: the chapters are
+    already the dated material, grouped, and a chapter that somehow carries no
+    dates simply contributes nothing instead of poisoning the range with "".
+    """
+    lo = hi = None
+    for c in (timeline or {}).get("chapters", []) or []:
+        a, b = c.get("date_from"), c.get("date_to")
+        for d in (a, b):
+            if not d:
+                continue
+            if lo is None or d < lo:
+                lo = d
+            if hi is None or d > hi:
+                hi = d
+    return lo, hi
+
+
+def family_report_data(*, counts, scene_counts, audio_rows_, document_index,
+                       email_categories, timeline, people, case_id=None,
+                       generated_at=None):
+    """An orientation document for somebody who has just been handed the archive.
+
+    Different question from the estate report, and so a different shape. That one
+    asks "do we hold the paperwork" and is answerable in three states. This one
+    asks "what is in here, and what does it hold" — the thing a family member
+    wants before they know what to click.
+
+    Two rules it inherits from the rest of this codebase, because both have
+    already burned us here:
+
+      * Count documents from the DOCUMENTS INDEX, never from
+        summary.document_classifications. The latter classifies every email as a
+        document too — on 813_mf that is the difference between 4,643 and about
+        59,000, and the larger number has been shipped to a screen before.
+
+      * Say what is NOT known as prominently as what is. Two thirds of the
+        photographs carry no date; most identified faces have no name. A report
+        that lists holdings and omits that is describing a more complete archive
+        than the one that exists.
+    """
+    counts = counts or {}
+    lo, hi = _report_span(timeline)
+    undated = ((timeline or {}).get("undated") or {}).get("count") or 0
+
+    people = people or []
+    named = sum(1 for p in people if p.get("named"))
+
+    def rows(pairs):
+        return [{"label": lab, "count": n} for lab, n in pairs if n]
+
+    sections = []
+
+    # Photographs by what the classifier saw in them — the most browsable cut,
+    # and the one that reads least like an inventory.
+    sections.append({
+        "key": "photos", "label": "Photographs, by what is in them",
+        "note": "A photograph can be in more than one of these.",
+        "items": rows(sorted((scene_counts or {}).items(), key=lambda kv: -kv[1])),
+    })
+
+    # Recordings by kind, folded through the same mapping the Recordings page uses.
+    kind_counts = {}
+    for r in audio_rows_ or []:
+        k = r.get("kind") or "other"
+        kind_counts[k] = kind_counts.get(k, 0) + 1
+    sections.append({
+        "key": "recordings", "label": "Recordings, by kind",
+        "note": "Grouped by the pipeline's classification, which is approximate — "
+                "see the limitations below.",
+        "items": rows([(audio_kind_label(k), kind_counts.get(k, 0))
+                       for k in AUDIO_KIND_ORDER]),
+    })
+
+    sections.append({
+        "key": "documents", "label": "Documents, by kind",
+        "note": "Scanned and digital documents. Emails are counted separately.",
+        "items": rows(sorted(
+            [(_report_label(c.get("category")), c.get("count") or 0)
+             for c in (document_index or [])], key=lambda kv: -kv[1])),
+    })
+
+    sections.append({
+        "key": "emails", "label": "Email conversations, by subject",
+        "note": "A conversation can be in more than one of these.",
+        "items": rows(sorted(
+            [(_report_label(c.get("name")), c.get("count") or 0)
+             for c in (email_categories or [])], key=lambda kv: -kv[1])),
+    })
+
+    limitations = []
+    photos = counts.get("photos") or 0
+    if undated:
+        share = " — about {}%".format(round(100.0 * undated / photos)) if photos else ""
+        limitations.append(
+            "{u:,} items carry no date{share}. They are in the archive and "
+            "searchable, but they cannot appear on the timeline or in any figure "
+            "above that is grouped by year.".format(u=undated, share=share))
+    if people:
+        unnamed = len(people) - named
+        if unnamed:
+            limitations.append(
+                "{n:,} of the {t:,} people recognised have not been given a name. "
+                "They are distinct faces the archive can group, not strangers — "
+                "naming them is a person's job and has not been finished.".format(
+                    n=unnamed, t=len(people)))
+    limitations.append(
+        "Recordings are grouped by an automatic classification that is known to "
+        "be unreliable on this collection; treat the recording kinds as a "
+        "starting point rather than a fact.")
+    limitations.append(
+        "This describes only the material that was supplied. Anything never "
+        "collected — a device not handed over, an account not exported — is "
+        "absent from these figures without appearing as a gap.")
+
+    return {
+        "case_id": case_id,
+        "generated_at": generated_at,
+        "span": {"from": lo, "to": hi, "undated": undated},
+        "headline": [
+            {"label": "photographs", "count": counts.get("photos") or 0},
+            {"label": "videos", "count": counts.get("videos") or 0},
+            {"label": "recordings", "count": counts.get("audio") or 0},
+            {"label": "documents", "count": counts.get("documents") or 0},
+            {"label": "email conversations", "count": counts.get("emails") or 0},
+            {"label": "message threads", "count": counts.get("messages") or 0},
+        ],
+        "people": {"total": len(people), "named": named,
+                   "unnamed": len(people) - named,
+                   "top": [{"name": p.get("name"), "photos": p.get("photo_count") or 0}
+                           for p in people if p.get("named")][:12]},
+        "places": counts.get("places") or 0,
+        "sections": sections,
+        "limitations": limitations,
+    }
+
+
+def estate_relevance_data(vital_docs, paths, summary, decisions=None):
+    """How much of the material the estate scan actually flagged, split by where
+    it came from.
+
+    Two numbers per row and both are needed. DECISIONS is the review workload:
+    one document can be a candidate for several document types and each pairing
+    needs its own answer. DOCUMENTS is how many distinct things there really are.
+    Reporting only the first overstates the corpus; only the second understates
+    the work. On 813_mf that is 1,147 near-miss decisions over 755 documents.
+
+    Email vs document is decided by the same test the checklist uses — presence
+    in the browsable document classifications — rather than by resolving each
+    item's thread, which is the expensive half of near_miss_rows and tells us
+    nothing extra here.
+
+    Candidates are read off the ALREADY-BUILT vital_docs payload rather than the
+    confirmed file, because that payload has the examiner's decisions folded in.
+    Counting the raw file instead reports 223 where the screen shows 183 — the
+    difference being documents somebody has since dismissed — and a report that
+    disagrees with the screen it describes is worse than no report.
+    """
+    md = paths.metadata_dir
+    confirmed = load_json(md / "vital_doc_confirmed.json", None)
+    candidates = load_json(md / "vital_doc_candidates.json", None)
+    if not (vital_docs or {}).get("available") and confirmed is None and candidates is None:
+        return {"available": False}
+    confirmed = confirmed if isinstance(confirmed, list) else []
+    candidates = candidates if isinstance(candidates, dict) else {}
+
+    browsable = set()
+    for d in (summary or {}).get("document_classifications", []) or []:
+        if (d.get("source") or "").lower() == "email":
+            continue
+        f = d.get("file")
+        if f:
+            browsable.add(f)
+
+    def tally(pairs):
+        """pairs: iterable of (target, path)."""
+        rows = docs = 0
+        seen, seen_mail = set(), set()
+        mail_rows = 0
+        for _t, path in pairs:
+            if not path:
+                continue
+            rows += 1
+            seen.add(path)
+            if path not in browsable:
+                mail_rows += 1
+                seen_mail.add(path)
+            else:
+                docs += 1
+        return {"decisions": rows, "documents": len(seen),
+                "from_mail_decisions": mail_rows, "from_mail_documents": len(seen_mail)}
+
+    cand_pairs = [(t.get("target"), i.get("path"))
+                  for t in (vital_docs or {}).get("targets", []) or []
+                  for i in (t.get("items") or [])]
+    # Where each candidate decision actually stands. This is the number the
+    # examiner is looking for — "169 still to decide" — and it was reachable only
+    # by opening the Documents screen and reading a stat bar.
+    decided = undecided = 0
+    for t in (vital_docs or {}).get("targets", []) or []:
+        for i in (t.get("items") or []):
+            if i.get("reviewed"):
+                decided += 1
+            else:
+                undecided += 1
+    near_pairs = []
+    for target in candidates:
+        for hit in _near_miss_hits(candidates, confirmed, decisions, target):
+            near_pairs.append((target, hit.get("path") if isinstance(hit, dict) else hit))
+
+    return {"available": True,
+            "candidates": tally(cand_pairs),
+            "near_misses": tally(near_pairs),
+            "decided": decided, "undecided": undecided,
+            "per_target_k": (vital_docs or {}).get("per_target_k")}
+
+
+# ── pipeline report: what was examined, and what reached the archive ─────────
+
+def _pct(part, whole):
+    """part as a percentage of whole, or None when the question is meaningless.
+    Returned as a number so the page can decide how to render it."""
+    if not whole:
+        return None
+    return round(100.0 * part / whole, 1)
+
+
+def _human_bytes(n):
+    """Bytes as a person reads them. Binary steps, decimal label — what every
+    file manager shows, so the figure matches what the user sees in Finder."""
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return ("%.0f %s" % (n, unit)) if unit in ("B", "KB") else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+    return "%.1f TB" % n
+
+
+def _stage_timeline(summaries):
+    """(first, last, [(stage, ts)]) across every stage summary that recorded a
+    timestamp. Sorted by time, not by pipeline order — a stage that was re-run
+    lands where it actually happened, which is the honest picture of a run."""
+    seen = []
+    for name, doc in sorted((summaries or {}).items()):
+        if not isinstance(doc, dict):
+            continue
+        ts = doc.get("timestamp") or doc.get("ts")
+        if not isinstance(ts, str) or not ts:
+            continue
+        seen.append({"stage": doc.get("step") or doc.get("stage")
+                     or name.replace("_summary.json", "").replace(".json", ""),
+                     "at": ts})
+    seen.sort(key=lambda x: x["at"])
+    return (seen[0]["at"] if seen else None,
+            seen[-1]["at"] if seen else None,
+            seen)
+
+
+def _elapsed_words(first, last):
+    """Plain-language gap between two ISO timestamps, or None. Deliberately
+    coarse: this is wall clock between the first and last stage a run recorded,
+    which includes any time the machine sat idle between them, so a figure to
+    the second would imply a precision it does not have."""
+    if not first or not last:
+        return None
+    try:
+        a = datetime.fromisoformat(first.split("+")[0].replace("Z", ""))
+        b = datetime.fromisoformat(last.split("+")[0].replace("Z", ""))
+    except ValueError:
+        return None
+    secs = (b - a).total_seconds()
+    if secs < 0:
+        return None
+    days, rem = divmod(int(secs), 86400)
+    hours, rem = divmod(rem, 3600)
+    mins = rem // 60
+    if days:
+        return "%d day%s %d hour%s" % (days, "" if days == 1 else "s",
+                                       hours, "" if hours == 1 else "s")
+    if hours:
+        return "%d hour%s %d minute%s" % (hours, "" if hours == 1 else "s",
+                                          mins, "" if mins == 1 else "s")
+    return "%d minute%s" % (mins, "" if mins == 1 else "s")
+
+
+def pipeline_report_data(*, summaries, counts, sizes=None, relevance=None,
+                         case_id=None, generated_at=None):
+    """What the pipeline went through to produce this archive.
+
+    A different question again from the other two reports: not "do we hold the
+    paperwork" and not "what is in here", but "what was looked at, and how much
+    of it survived to be looked at again".
+
+    Every row is examined → surfaced with the share, plus a sentence saying where
+    the difference went, because the difference is the interesting part and it is
+    never the same story twice: photographs mostly lost to duplicates, mail
+    mostly to bulk triage, documents to both.
+
+    The comparison is only honest where the two numbers count the same kind of
+    thing, and for mail they do not — 80,486 messages become 21,988
+    CONVERSATIONS, so a percentage there would be arithmetic on two different
+    units. Those rows carry the counts and no share.
+    """
+    summaries = summaries or {}
+    counts = counts or {}
+
+    def sm(name, *keys, default=0):
+        doc = summaries.get(name) or {}
+        for k in keys:
+            if not isinstance(doc, dict):
+                return default
+            doc = doc.get(k)
+            if doc is None:
+                return default
+        return doc
+
+    collect = summaries.get("collect_dedup_summary.json") or {}
+    types = collect.get("type_counts") or {}
+
+    photos_found = types.get("image") or collect.get("source_photos_found") or 0
+    videos_found = types.get("video") or collect.get("source_videos_found") or 0
+    docs_found = types.get("document") or collect.get("source_docs_found") or 0
+    audio_found = sm("transcription_summary.json", "total_audio") or types.get("audio") or 0
+    mail_found = sm("email_triage_summary.json", "email_count")
+    convs_written = sm("message_triage_summary.json", "conversation_files_written")
+
+    photo_dupes = (collect.get("exact_dupes_moved") or 0) + \
+                  (collect.get("perceptual_dupes_moved") or 0)
+    doc_dupes = collect.get("docs_exact_dupes_moved") or 0
+    video_dupes = collect.get("video_exact_dupes_moved") or 0
+    mail_bulk = sm("email_triage_summary.json", "triage", "discarded_bulk")
+    mail_platform = sm("email_triage_summary.json", "triage", "discarded_platform")
+    mail_rescued = sm("email_triage_summary.json", "triage", "rescued_by_estate_keywords")
+    mail_kept = sm("email_triage_summary.json", "kept_count")
+
+    rows = [
+        {"kind": "Photographs", "examined": photos_found,
+         "surfaced": counts.get("photos") or 0,
+         "note": "{:,} were duplicates of another photograph — {:,} byte-identical, "
+                 "{:,} the same picture saved again at a different size or "
+                 "quality.".format(photo_dupes, collect.get("exact_dupes_moved") or 0,
+                                   collect.get("perceptual_dupes_moved") or 0)},
+        {"kind": "Videos", "examined": videos_found,
+         "surfaced": counts.get("videos") or 0,
+         "note": "{:,} were byte-identical duplicates.".format(video_dupes)},
+        {"kind": "Documents", "examined": docs_found,
+         "surfaced": counts.get("documents") or 0,
+         "note": "{:,} were byte-identical duplicates; the rest were read but did "
+                 "not resolve to a document the archive shows — see the OCR "
+                 "figures below.".format(doc_dupes)},
+        {"kind": "Recordings", "examined": audio_found,
+         "surfaced": counts.get("audio") or 0,
+         "note": "{:,} could not be transcribed.".format(
+             sm("transcription_summary.json", "failed"))},
+        # Unit change: messages in, conversations out. No share — see docstring.
+        {"kind": "Emails", "examined": mail_found,
+         "surfaced": counts.get("emails") or 0, "share": None,
+         "unit_change": "messages examined, conversations surfaced",
+         "note": "{:,} were kept as worth reading and {:,} discarded as bulk "
+                 "({:,} more were pulled back out of the discards because they "
+                 "mentioned the estate). The kept messages were then grouped into "
+                 "conversations, which is what the archive shows.".format(
+                     mail_kept, mail_bulk + mail_platform, mail_rescued)},
+        {"kind": "Message threads", "examined": convs_written,
+         "surfaced": counts.get("messages") or 0,
+         "note": "Conversations the pipeline wrote out, against those the archive "
+                 "shows; the difference was triaged away as noise."},
+    ]
+    for r in rows:
+        if "share" not in r:
+            r["share"] = _pct(r["surfaced"], r["examined"])
+    # "Surfaced" was doing too much work unexplained. It means one specific
+    # thing — the number that section of the archive shows today — and it counts
+    # a different KIND of thing per row (files for photographs, conversations for
+    # mail). Both facts now ship with the figure instead of being inferable only
+    # by reading the builder.
+    surfaced_note = ("The right-hand column is what that section of the archive "
+                     "shows today. It is a count of browsable items, not of "
+                     "items judged important — and for mail it counts "
+                     "conversations, where the left-hand column counts messages.")
+
+    first, last, stages = _stage_timeline(summaries)
+
+    sizes = sizes or {}
+    parts = sorted(((k, v) for k, v in (sizes.get("parts") or {}).items() if v),
+                   key=lambda kv: -kv[1])
+    total_bytes = sizes.get("total") or 0
+
+    audio_secs = sm("transcription_summary.json", "total_duration_seconds") or 0
+
+    return {
+        "case_id": case_id,
+        "generated_at": generated_at,
+        "rows": rows,
+        "totals": {
+            "examined": sum(r["examined"] for r in rows),
+            "surfaced": sum(r["surfaced"] for r in rows),
+        },
+        "surfaced_note": surfaced_note,
+        "expansion": {
+            "archives_found": sm("expandfiles_summary.json", "archives_found"),
+            "files_added": sm("expandfiles_summary.json", "files_added"),
+            "email_attachments": sm("expandfiles_summary.json", "email_attachments"),
+        },
+        "reading": {
+            "documents_read": sm("ocr_summary.json", "total_documents"),
+            "text_recovered": sm("ocr_summary.json", "ocr_results_count"),
+            "audio_hours": round(audio_secs / 3600.0, 1) if audio_secs else 0,
+        },
+        "size": {
+            "total_bytes": total_bytes,
+            "total_human": _human_bytes(total_bytes),
+            "parts": [{"name": k, "bytes": v, "human": _human_bytes(v),
+                       "share": _pct(v, total_bytes)} for k, v in parts],
+            "files": sizes.get("files") or 0,
+        },
+        "run": {"first": first, "last": last, "elapsed": _elapsed_words(first, last),
+                "stages": stages},
+        # How much of the surfaced material the estate scan actually flagged.
+        # Shares are taken against KEPT MESSAGES, not conversations: these counts
+        # are individual emails, and a conversation is a group of them, so the
+        # conversation total is the wrong denominator by a unit.
+        "estate": _estate_reach(relevance, mail_kept, mail_found),
+    }
+
+
+def _estate_reach(relevance, mail_kept, mail_examined):
+    """The estate-scan funnel, ready to render, or None when the scan never ran."""
+    if not (relevance or {}).get("available"):
+        return None
+    cand = relevance.get("candidates") or {}
+    near = relevance.get("near_misses") or {}
+    return {
+        "candidates": cand,
+        "near_misses": near,
+        "decided": relevance.get("decided") or 0,
+        "undecided": relevance.get("undecided") or 0,
+        "mail_denominator": mail_kept or mail_examined or 0,
+        "mail_denominator_label": "messages kept as worth reading"
+                                  if mail_kept else "messages examined",
+        "candidate_mail_share": _pct(cand.get("from_mail_documents") or 0,
+                                     mail_kept or mail_examined),
+        "near_mail_share": _pct(near.get("from_mail_documents") or 0,
+                                mail_kept or mail_examined),
+        "per_target_k": relevance.get("per_target_k"),
+    }
+
+
+# ── online accounts: services found in the mail ───────────────────────────────
+
+# Free consumer mail providers. A domain here is where PEOPLE have addresses, not
+# a service the estate holds an account with, and they are the highest-volume
+# domains in any mailbox — left in, they bury the finding under the obvious.
+CONSUMER_MAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
+    "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com",
+    "mac.com", "comcast.net", "verizon.net", "att.net", "sbcglobal.net",
+    "cox.net", "charter.net", "earthlink.net", "protonmail.com", "proton.me",
+}
+
+# Subject lines an account sends and a correspondent does not. This is the
+# evidence that a domain is somewhere the owner HELD an account, rather than a
+# company that merely emailed them — a shop's newsletter never says "reset your
+# password". Deliberately narrow: a false positive here adds a bogus account to
+# an estate inventory, which is worse than missing one, because somebody will go
+# looking for it.
+_ACCOUNT_SUBJECT_RE = re.compile(
+    r"password|verify your|verification code|sign[- ]?in|log[- ]?in|welcome to|"
+    r"your account|two[- ]factor|2fa|confirm your|activate your|security alert|"
+    r"new device|reset your|account statement|e[- ]?statement",
+    re.IGNORECASE)
+
+
+_PARTICIPANT_ADDR_RE = re.compile(r"<([^>]+)>")
+
+
+def _email_address(participant):
+    """The bare address inside a thread participant string. Mixed forms arrive —
+    'Display Name <addr>' or a bare address — so take the angle-bracket form when
+    there is one. Defined in this module rather than the server because the server
+    imports from here, not the other way round."""
+    m = _PARTICIPANT_ADDR_RE.search(participant or "")
+    return (m.group(1) if m else (participant or "")).strip().lower()
+
+
+def account_root(domain):
+    """The registrable-ish root of a mail domain: 'rs.email.nextdoor.com' →
+    'nextdoor.com'.
+
+    Last two labels. Crude — it is wrong for 'co.uk' style suffixes — but the
+    alternative is shipping a public-suffix list into a fork whose whole point is
+    UI work, and the failure mode is a service listed under a slightly wrong
+    name rather than a wrong count. It earns its place by fixing the opposite
+    problem, which is real and visible: one service arriving as several rows
+    (linkedin.com, e.linkedin.com and em.linkedin.com are one account, and an
+    events service was split five ways on 813_mf).
+    """
+    parts = [p for p in (domain or "").strip().lower().strip(".").split(".") if p]
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (parts[0] if parts else "")
+
+
+def account_services(threads, inventory=None, owner_addresses=()):
+    """Services the estate appears to hold an account with, found in the mail.
+
+    Two sources, deliberately merged rather than shown apart:
+
+      * `inventory` — the pipeline's digital_account_inventory, built from the
+        RAW corpus before triage.
+      * the threads themselves, which the pipeline's inventory never looked at
+        for this purpose. On 813_mf the inventory holds 23 social and newsletter
+        domains; the threads carry every bank, brokerage and insurer the estate
+        deals with, and not one of them was on the page.
+
+    The count on each row is the number of conversations THE EMAILS PAGE CAN
+    ACTUALLY OPEN, not the pipeline's raw figure, because the row is a link and a
+    link must deliver what it promises. Those two numbers diverge a long way:
+    triage discards bulk notification mail, so a service with hundreds of raw
+    notifications can have a handful of readable threads, or none. Where the raw
+    figure is higher it rides along as `filtered_out` so the gap is explained
+    rather than merely absorbed.
+    """
+    owner_domains = {(a or "").split("@")[-1].strip().lower()
+                     for a in (owner_addresses or []) if "@" in (a or "")}
+    owner_roots = {account_root(d) for d in owner_domains}
+
+    pipeline = {}
+    for domain, rec in (inventory or {}).items():
+        root = account_root(domain)
+        if not root:
+            continue
+        pipeline[root] = pipeline.get(root, 0) + ((rec or {}).get("count") or 0)
+
+    reach = {}
+    signals = {}
+    for t in threads or []:
+        subject = t.get("subject") or ""
+        is_signal = bool(_ACCOUNT_SUBJECT_RE.search(subject))
+        roots = set()
+        for p in (t.get("participants") or []):
+            a = _email_address(p)
+            if "@" not in a:
+                continue
+            dom = a.split("@")[-1]
+            root = account_root(dom)
+            if root and root not in owner_roots and root not in CONSUMER_MAIL_DOMAINS:
+                roots.add(root)
+        for r in roots:
+            reach[r] = reach.get(r, 0) + 1
+            if is_signal:
+                signals[r] = signals.get(r, 0) + 1
+
+    # A domain earns a row by being something the pipeline already called an
+    # account, or by sending mail that is PREDOMINANTLY account-shaped. The
+    # second test needs both halves. Counting signals alone put the deceased's
+    # own firm at the top of the list on 813_mf — 2,474 threads of ordinary
+    # correspondence containing, somewhere, six messages that said "password" —
+    # because a person emailing you for years will eventually use every word a
+    # service uses. A service's mail is transactional nearly all the way through:
+    # a bank here runs 20-40% account-shaped, a colleague runs a fraction of one
+    # percent.
+    #
+    # Set narrow on purpose. It drops a low-volume subscription or two, and that
+    # is the right way to be wrong: a false entry in an estate inventory sends
+    # somebody hunting for an account that was never there.
+    def looks_like_a_service(r):
+        n, sig = reach.get(r, 0), signals.get(r, 0)
+        return sig >= 2 and n and (sig / float(n)) >= 0.02
+
+    roots = {r for r in reach if looks_like_a_service(r)} | set(pipeline)
+    out = []
+    for r in roots:
+        if r in owner_roots or r in CONSUMER_MAIL_DOMAINS:
+            continue
+        threads_n = reach.get(r, 0)
+        raw = pipeline.get(r)
+        out.append({
+            "service": r,
+            "threads": threads_n,
+            "signals": signals.get(r, 0),
+            "from_pipeline": r in pipeline,
+            # Raw notification mail the triage stage dropped before the Emails
+            # section ever saw it. None when there is nothing to explain.
+            "filtered_out": (raw - threads_n) if (raw and raw > threads_n) else None,
+        })
+    # The ones that look most like a held account first, then by how much there
+    # is to read. A bank with ten sign-in alerts outranks a newsletter with 700.
+    out.sort(key=lambda x: (-x["signals"], -x["threads"], x["service"]))
+    return out
+
+
+# ── audio kinds ───────────────────────────────────────────────────────────────
+# The classifier emits seven categories; the Recordings page groups them into six
+# KINDS, because "what sort of listening is this" is the question someone browsing
+# an estate's audio is actually asking.
+#
+# Two of the six are deliberately not a straight rename:
+#
+#   * `voicemail` stays apart from `voice_memo` even though both are one person
+#     talking. A voicemail is somebody ELSE's voice — very often the voice of the
+#     person who died — and there are a couple of dozen of them against several
+#     hundred self-recorded notes. Merged, they vanish.
+#
+#   * `non_speech` is not a kind of recording at all; it is a processing outcome.
+#     On 813_mf its members are EXACTLY the set with no transcript, and their
+#     summary is the literal string "No usable speech transcript." Their filenames
+#     are numbered album tracks. Calling that bucket "other" would file a few
+#     hundred songs under nothing-in-particular, so it is labelled for what it
+#     actually reports: transcription returned nothing.
+#
+# An unrecognised category falls to "other" rather than being dropped — a new
+# classifier label must never make recordings disappear from the page.
+AUDIO_KINDS = [
+    ("voicemail",     "Voicemail",                ("voicemail",)),
+    ("voice_note",    "Voice notes",              ("voice_memo",)),
+    ("conversation",  "Conversations & meetings", ("personal_recording",
+                                                   "interview_or_meeting")),
+    ("music",         "Music & performance",      ("music_or_performance",)),
+    ("untranscribed", "Nothing was transcribed",  ("non_speech",)),
+    ("other",         "Other",                    ("miscellaneous",)),
+]
+AUDIO_KIND_ORDER = [k for k, _, _ in AUDIO_KINDS]
+AUDIO_KIND_LABELS = {k: lab for k, lab, _ in AUDIO_KINDS}
+_AUDIO_CATEGORY_TO_KIND = {c: k for k, _, cats in AUDIO_KINDS for c in cats}
+
+
+def audio_kind(category):
+    """The Recordings-page kind slug for one classifier category. Anything the
+    mapping does not know — a new label, a blank, None — lands in "other", so the
+    page keeps showing the recording instead of silently losing it."""
+    return _AUDIO_CATEGORY_TO_KIND.get((category or "").strip().lower(), "other")
+
+
+def audio_kind_label(kind):
+    """Display name for a kind slug."""
+    return AUDIO_KIND_LABELS.get(kind, "Other")
+
+
 def audio_rows(summary, transcription_index, role, cfg):
     deliver = cfg.get("transcribe", {}).get("deliver", True)
     if role == "family" and deliver is False:
@@ -1321,6 +2109,13 @@ def audio_rows(summary, transcription_index, role, cfg):
             "file": f,
             "name": _clean_recording_name(a.get("filename") or os.path.basename(a.get("file", ""))),
             "category": a.get("category") or "uncategorized",
+            # The grouping the Recordings page reads. Kept beside the raw category
+            # rather than replacing it: the classifier is demonstrably unsure of
+            # itself — on 813_mf, 17 of the 47 recordings that exist in two file
+            # formats got a DIFFERENT category for each copy — so the examiner
+            # needs to see what it actually said, not only where we filed it.
+            "kind": audio_kind(a.get("category")),
+            "kind_label": audio_kind_label(audio_kind(a.get("category"))),
             "significance": a.get("significance"),
             "summary": neutralize_summary(a.get("summary")),
             "duration": a.get("duration") if a.get("duration") is not None else tr.get("duration"),
@@ -1742,12 +2537,24 @@ def _vital_docs_overview(vital_docs):
     paths — the full checklist with links lives on the Documents page)."""
     if not vital_docs or not vital_docs.get("available"):
         return {"available": bool(vital_docs and vital_docs.get("available"))}
+    targets = vital_docs.get("targets", []) or []
     return {
         "available": True,
         "found_count": vital_docs.get("found_count", 0),
         "total_count": vital_docs.get("total_count", 0),
-        "types": [{"label": t["label"], "found": t["found"]}
-                  for t in vital_docs.get("targets", [])],
+        "types": [{"label": t["label"], "found": t["found"],
+                   # Examiner-only upstream (vital_docs_data omits it for family),
+                   # so it stays absent rather than 0 for a family session — the
+                   # card must not be able to say "0 unreviewed" to somebody who
+                   # is not doing the reviewing.
+                   "near_misses": t.get("near_miss_count")}
+                  for t in targets],
+        # Weaker matches sitting under the types with NO confirmed document. This
+        # is what stops the card claiming those types are missing: a type nobody
+        # has finished looking at is not a type that is absent. Summed here rather
+        # than in the page so the card and the estate report read one number.
+        "unfound_near_misses": sum((t.get("near_miss_count") or 0)
+                                   for t in targets if not t.get("found")),
     }
 
 
@@ -3030,25 +3837,63 @@ def accounts_data(summary, role):
     }
 
 
+def subcategory_from_path(path, category):
+    """The sub-taxonomy folder a delivered document sits in, or None.
+
+    The pipeline second-passes some categories into subfolders and records the
+    result on the row — but only for `financial`. `legal` gained the same
+    treatment (case_config's `legal_subcategories`) and its documents ARE sorted
+    into will_testament / deed_title / power_of_attorney / court_filing and the
+    rest, while every legal row still arrives with `subcategory: None`. On 813_mf
+    that is 1,019 of 1,027 documents whose filing the archive could show and did
+    not.
+
+    The delivery path carries it — output/documents/<category>/<sub>/<file> — so
+    read it there rather than waiting for the field. A document sitting directly
+    in its category folder has no subcategory, which is the honest answer.
+    """
+    if not path or not category:
+        return None
+    marker = "/documents/" + category + "/"
+    i = path.find(marker)
+    if i < 0:
+        return None
+    rest = path[i + len(marker):]
+    head, sep, _tail = rest.partition("/")
+    return head if sep and head else None
+
+
 def documents_index(rows):
     """Group document rows into a category index for drill-through navigation.
 
     Returns [{category, count, subcategories:[{name,count}]}] sorted by count
-    desc. Sub-categories are only populated for 'financial' (the only category
-    the pipeline second-passes); others carry an empty list.
+    desc. A category is sub-counted when its rows actually carry a subcategory —
+    which now means `legal` as well as `financial`, since the row builder
+    recovers legal's from the delivered path. A category whose documents have no
+    subfolder gets an empty list and browses as a flat list, which is the truth
+    rather than an invented level.
     """
     cats = {}
     for r in rows:
         c = r.get("category") or "miscellaneous"
         cat = cats.setdefault(c, {"category": c, "count": 0, "subs": {}})
         cat["count"] += 1
-        if c == "financial":
-            sub = r.get("subcategory") or "uncategorized"
+        sub = r.get("subcategory")
+        if sub:
             cat["subs"][sub] = cat["subs"].get(sub, 0) + 1
+        else:
+            cat["unfiled"] = cat.get("unfiled", 0) + 1
     out = []
     for c in cats.values():
+        subs = dict(c["subs"])
+        # Only once the whole category has been seen: if ANY of it is filed, the
+        # unfiled remainder needs a bucket, or the sub-counts silently fail to
+        # add up to the category total. Deciding this per row would depend on
+        # which rows happened to come first.
+        if subs and c.get("unfiled"):
+            subs["uncategorized"] = subs.get("uncategorized", 0) + c["unfiled"]
         subs = [{"name": k, "count": v}
-                for k, v in sorted(c["subs"].items(), key=lambda kv: -kv[1])]
+                for k, v in sorted(subs.items(), key=lambda kv: -kv[1])]
         out.append({"category": c["category"], "count": c["count"], "subcategories": subs})
     out.sort(key=lambda c: -c["count"])
     return out

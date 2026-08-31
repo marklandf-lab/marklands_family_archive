@@ -1710,7 +1710,10 @@ def test_overview_data_carries_vital_docs_card(tmp_path):
     ov = ad.overview_data(summary, "family", {}, vital_docs=vd)
     card = ov["vital_docs"]
     assert card["available"] is True and card["found_count"] == 3 and card["total_count"] == 4
-    assert {"label": "Passport / ID", "found": False} in card["types"]
+    assert {"label": "Passport / ID", "found": False, "near_misses": None} \
+        in card["types"], \
+        "near_misses stays absent for family — the card must not be able to say " \
+        "'0 unreviewed' to somebody who is not doing the reviewing"
     # omitting vital_docs (e.g. static explorer) must not crash — stub card
     assert ad.overview_data(summary, "family", {})["vital_docs"] == {"available": False}
 
@@ -2595,3 +2598,502 @@ def test_vital_item_summary_withheld_when_the_email_is_unreachable(tmp_path):
     item = fam["deed_title"]["items"][0]
     assert item["thread_id"] is None          # nothing resolved it
     assert item["summary"] is None
+
+
+# ── audio kinds: the Recordings page's six groups ────────────────────────────
+
+def test_audio_kind_maps_every_classifier_category():
+    """Every category the classifier emits must land somewhere deliberate."""
+    assert ad.audio_kind("voicemail") == "voicemail"
+    assert ad.audio_kind("voice_memo") == "voice_note"
+    assert ad.audio_kind("personal_recording") == "conversation"
+    assert ad.audio_kind("interview_or_meeting") == "conversation"
+    assert ad.audio_kind("music_or_performance") == "music"
+    assert ad.audio_kind("non_speech") == "untranscribed"
+    assert ad.audio_kind("miscellaneous") == "other"
+
+
+def test_audio_kind_keeps_voicemail_apart_from_voice_notes():
+    """Both are one person talking, so merging them is tempting. A voicemail is
+    somebody ELSE's voice — often the voice of the person who died — and there are
+    a couple of dozen against several hundred notes. Merged, they disappear."""
+    assert ad.audio_kind("voicemail") != ad.audio_kind("voice_memo")
+
+
+def test_audio_kind_does_not_file_untranscribed_audio_as_other():
+    """`non_speech` is a processing outcome, not a kind: on 813_mf it is exactly
+    the set with no transcript, and the files are numbered album tracks. Filing it
+    under "other" would bury a few hundred songs."""
+    assert ad.audio_kind("non_speech") == "untranscribed"
+    assert ad.audio_kind_label("untranscribed") == "Nothing was transcribed"
+
+
+def test_audio_kind_never_drops_an_unknown_category():
+    """A classifier label we have never seen must still reach the page."""
+    for unknown in ("a_brand_new_label", "", None, "   ", "VOICEMAIL_TYPO"):
+        assert ad.audio_kind(unknown) == "other"
+    # and the known ones are case/whitespace tolerant
+    assert ad.audio_kind("  Voicemail  ") == "voicemail"
+
+
+def test_audio_rows_carry_kind_and_label(tmp_path):
+    summary = {"audio_classifications": [
+        {"file": "/a/vm.m4a", "filename": "vm.m4a", "category": "voicemail"},
+        {"file": "/a/song.aif", "filename": "song.aif", "category": "non_speech"},
+        {"file": "/a/new.wav", "filename": "new.wav", "category": "some_new_label"},
+    ]}
+    rows = ad.audio_rows(summary, [], "family", {})
+    by = {r["file"]: r for r in rows}
+    assert (by["/a/vm.m4a"]["kind"], by["/a/vm.m4a"]["kind_label"]) \
+        == ("voicemail", "Voicemail")
+    assert by["/a/song.aif"]["kind_label"] == "Nothing was transcribed"
+    assert by["/a/new.wav"]["kind"] == "other"
+    # the raw classifier answer is kept beside it — the classifier is not reliable
+    # enough to throw away what it actually said
+    assert by["/a/song.aif"]["category"] == "non_speech"
+
+
+# ── the estate report: "not there" vs "not finished looking" ─────────────────
+
+def _vd(targets, per_target_k=25):
+    return {"available": True, "per_target_k": per_target_k, "targets": targets}
+
+
+def _t(label, items=(), near=0, capped=False):
+    return {"target": label.lower().replace(" ", "_"), "label": label,
+            "items": [{"reviewed": r} for r in items], "near_miss_count": near,
+            "near_miss_capped": capped}
+
+
+def test_estate_report_three_states():
+    rep = ad.estate_report_data(_vd([
+        _t("Will", items=[True, False]),        # signed off → present
+        _t("Deed", items=[False, False]),       # candidates, none ruled on
+        _t("Trust", near=4),                    # only weak matches
+        _t("Passport"),                         # nothing at all
+    ]))
+    by = {r["label"]: r for g in rep["groups"] for r in g["types"]}
+    assert by["Will"]["state"] == "present"
+    assert by["Deed"]["state"] == "unconfirmed"
+    assert by["Trust"]["state"] == "unconfirmed", \
+        "weak matches nobody reviewed cannot be reported as absent"
+    assert by["Passport"]["state"] == "absent"
+
+
+def test_estate_report_present_still_reports_what_is_outstanding():
+    """A type with the document AND unreviewed candidates is present — the estate
+    has it — but the reader is still owed the outstanding count."""
+    rep = ad.estate_report_data(_vd([_t("Will", items=[True, False, False], near=7)]))
+    row = rep["groups"][0]["types"][0]
+    assert (row["state"], row["signed_off"], row["undecided"], row["near_misses"]) \
+        == ("present", 1, 2, 7)
+
+
+def test_estate_report_totals():
+    rep = ad.estate_report_data(_vd([
+        _t("Will", items=[True, False], near=3),
+        _t("Deed", items=[False], near=2),
+        _t("Passport"),
+    ]))
+    assert rep["totals"] == {
+        "types": 3, "present": 1, "unconfirmed": 1, "absent": 1,
+        "candidates": 3, "signed_off": 1, "undecided": 2, "near_misses": 5}
+
+
+def test_estate_report_limitations_are_built_from_the_data():
+    """A caveat that does not move when the numbers move is worse than none."""
+    rep = ad.estate_report_data(_vd([_t("Will", items=[False], near=9, capped=True)]))
+    text = " ".join(rep["limitations"])
+    assert "25 candidates per document type" in text and "1 of the 1 types" in text
+    assert "1 candidate documents have been found but not yet reviewed" in text
+    assert "9 weaker matches" in text
+    # nothing qualified as absent here, and the report must say so out loud
+    assert "No document type can currently be reported as absent" in text
+    # and the standing caveat is always present
+    assert "not a search of public records" in text
+
+
+def test_estate_report_drops_the_absent_caveat_when_something_is_absent():
+    rep = ad.estate_report_data(_vd([_t("Passport"), _t("Will", items=[True])]))
+    text = " ".join(rep["limitations"])
+    assert "No document type can currently be reported as absent" not in text
+    assert rep["totals"]["absent"] == 1
+
+
+def test_estate_report_unavailable_when_the_scan_never_ran():
+    assert ad.estate_report_data({"available": False})["available"] is False
+    assert ad.estate_report_data(None)["available"] is False
+
+
+# ── the family report: an orientation document ──────────────────────────────
+
+def _family_kwargs(**over):
+    base = dict(
+        counts={"photos": 100, "videos": 5, "audio": 10, "documents": 40,
+                "emails": 200, "messages": 3, "places": 7},
+        scene_counts={"beach": 30, "wedding": 4},
+        audio_rows_=[{"kind": "voicemail"}, {"kind": "voicemail"}, {"kind": "music"}],
+        document_index=[{"category": "financial", "count": 25},
+                        {"category": "work_correspondence", "count": 15}],
+        email_categories=[{"name": "personal_correspondence", "count": 120}],
+        timeline={"chapters": [{"date_from": "2011-04-02", "date_to": "2012-01-09"},
+                               {"date_from": "2009-06-01", "date_to": "2010-02-02"}],
+                  "undated": {"count": 25}},
+        people=[{"name": "A", "named": True, "photo_count": 9},
+                {"name": "Person_02", "named": False, "photo_count": 3}],
+    )
+    base.update(over)
+    return base
+
+
+def test_family_report_span_is_the_outer_edge_of_every_chapter():
+    rep = ad.family_report_data(**_family_kwargs())
+    assert (rep["span"]["from"], rep["span"]["to"]) == ("2009-06-01", "2012-01-09")
+
+
+def test_family_report_span_survives_a_chapter_with_no_dates():
+    """An empty date must not win the comparison and drag the range to ''."""
+    rep = ad.family_report_data(**_family_kwargs(
+        timeline={"chapters": [{"date_from": "", "date_to": None},
+                               {"date_from": "2015-01-01", "date_to": "2015-12-31"}],
+                  "undated": {"count": 0}}))
+    assert (rep["span"]["from"], rep["span"]["to"]) == ("2015-01-01", "2015-12-31")
+    # nothing dated at all → no span rather than a fabricated one
+    empty = ad.family_report_data(**_family_kwargs(timeline={"chapters": []}))
+    assert (empty["span"]["from"], empty["span"]["to"]) == (None, None)
+
+
+def test_family_report_counts_people_named_and_not():
+    rep = ad.family_report_data(**_family_kwargs())
+    assert (rep["people"]["total"], rep["people"]["named"], rep["people"]["unnamed"]) \
+        == (2, 1, 1)
+    # only named people are offered as chips — "Person_02" is not a name
+    assert [p["name"] for p in rep["people"]["top"]] == ["A"]
+
+
+def test_family_report_recording_kinds_come_from_the_rows():
+    rep = ad.family_report_data(**_family_kwargs())
+    recs = [s for s in rep["sections"] if s["key"] == "recordings"][0]
+    assert [(i["label"], i["count"]) for i in recs["items"]] == \
+        [("Voicemail", 2), ("Music & performance", 1)]
+
+
+def test_family_report_documents_come_from_the_index_not_classifications():
+    """The document classifications count every email as a document too — the
+    difference between about 4,600 and about 59,000 on a real case, and the larger
+    number has reached a screen before. The index is the only honest source."""
+    rep = ad.family_report_data(**_family_kwargs())
+    docs = [s for s in rep["sections"] if s["key"] == "documents"][0]
+    assert sum(i["count"] for i in docs["items"]) == 40
+    assert [i["label"] for i in docs["items"]] == ["Financial", "Work correspondence"]
+
+
+def test_family_report_says_how_much_is_undated_and_unnamed():
+    rep = ad.family_report_data(**_family_kwargs())
+    text = " ".join(rep["limitations"])
+    assert "25 items carry no date — about 25%" in text
+    assert "1 of the 2 people recognised have not been given a name" in text
+    assert "only the material that was supplied" in text
+
+
+def test_family_report_drops_the_undated_caveat_when_everything_is_dated():
+    rep = ad.family_report_data(**_family_kwargs(
+        timeline={"chapters": [{"date_from": "2015-01-01", "date_to": "2015-12-31"}],
+                  "undated": {"count": 0}}))
+    assert not any("carry no date" in x for x in rep["limitations"])
+
+
+def test_overview_card_counts_near_misses_under_the_unfound_types(tmp_path):
+    """The Overview used to headline these types as "Still missing". They are the
+    types with no CONFIRMED document — and while weaker matches under them are
+    unread, "missing" states an absence the archive cannot support, and
+    contradicts the estate report, which files the same types under "not yet
+    established". The card needs this number to say so."""
+    paths, summary = _vital_case(tmp_path)
+    vd = ad.vital_docs_data(paths, summary, "examiner", per_target_k=25)
+    card = ad._vital_docs_overview(vd)
+    unfound = [t for t in card["types"] if not t["found"]]
+    assert unfound, "the fixture must have at least one unfound type"
+    assert card["unfound_near_misses"] == sum(t["near_misses"] or 0 for t in unfound)
+    # a FOUND type's near-misses are not counted — the claim is only about the
+    # types the card is about to list as not yet found
+    assert card["unfound_near_misses"] != sum(
+        (t["near_misses"] or 0) for t in card["types"]) or \
+        all(t["found"] is False for t in card["types"])
+
+
+def test_overview_card_withholds_the_near_miss_total_shape_from_family(tmp_path):
+    paths, summary = _vital_case(tmp_path)
+    fam = ad._vital_docs_overview(ad.vital_docs_data(paths, summary, "family"))
+    assert all(t["near_misses"] is None for t in fam["types"])
+    # nothing to total, so the card has no number to print and stays quiet
+    assert fam["unfound_near_misses"] == 0
+
+
+# ── online accounts: services found in the mail ─────────────────────────────
+
+def _thr(subject, *addrs):
+    return {"subject": subject, "participants": list(addrs)}
+
+
+def test_account_root_folds_a_service_split_across_subdomains():
+    """One account arriving as several rows was the visible half of the problem:
+    linkedin.com / e.linkedin.com / em.linkedin.com are one service."""
+    assert ad.account_root("e.linkedin.com") == "linkedin.com"
+    assert ad.account_root("rs.email.nextdoor.com") == "nextdoor.com"
+    assert ad.account_root("schwab.com") == "schwab.com"
+    assert ad.account_root("") == "" and ad.account_root(None) == ""
+
+
+def test_account_services_finds_a_bank_the_inventory_missed():
+    threads = [_thr("Your sign-in from a new device", "alerts@bank.test", "me@own.test"),
+               _thr("Reset your password", "alerts@bank.test", "me@own.test"),
+               _thr("Account statement ready", "alerts@bank.test", "me@own.test")]
+    out = ad.account_services(threads, inventory={}, owner_addresses=["me@own.test"])
+    assert [x["service"] for x in out] == ["bank.test"]
+    assert out[0]["threads"] == 3 and out[0]["signals"] == 3
+    assert out[0]["from_pipeline"] is False
+
+
+def test_account_services_ignores_a_correspondent_who_once_said_password():
+    """The deceased's own firm topped this list on 813_mf: thousands of ordinary
+    threads containing, somewhere, a handful that said "password". A person
+    emailing you for years eventually uses every word a service uses; a service's
+    mail is transactional nearly all the way through."""
+    threads = [_thr("Reset your password", "jim@firm.test", "me@own.test")] + \
+              [_thr("lunch on tuesday?", "jim@firm.test", "me@own.test")
+               for _ in range(300)]
+    out = ad.account_services(threads, inventory={}, owner_addresses=["me@own.test"])
+    assert [x["service"] for x in out] == []
+
+
+def test_account_services_excludes_the_owner_and_consumer_mail():
+    threads = [_thr("Verify your email", "me@own.test", "friend@gmail.com")
+               for _ in range(5)]
+    out = ad.account_services(threads, inventory={},
+                              owner_addresses=["me@own.test"])
+    assert [x["service"] for x in out] == [], \
+        "the owner's own domain and free mail providers are people, not services"
+
+
+def test_account_services_counts_what_the_link_will_deliver():
+    """The pipeline's inventory counts RAW notification mail; the Emails page
+    holds post-triage threads. A row that promises 700 and opens onto 3 is a
+    broken link, so the count is the reachable one and the gap is explained."""
+    threads = [_thr("hello", "no-reply@social.test", "me@own.test")]
+    out = ad.account_services(threads, inventory={"social.test": {"count": 700}},
+                              owner_addresses=["me@own.test"])
+    row = [x for x in out if x["service"] == "social.test"][0]
+    assert row["threads"] == 1 and row["filtered_out"] == 699
+    assert row["from_pipeline"] is True
+
+
+def test_account_services_keeps_a_pipeline_service_with_nothing_readable():
+    """Its notifications were all triaged away. It still belongs on an estate's
+    account list — it just cannot be opened, and the page says so."""
+    out = ad.account_services([], inventory={"gone.test": {"count": 160}},
+                              owner_addresses=[])
+    assert out == [{"service": "gone.test", "threads": 0, "signals": 0,
+                    "from_pipeline": True, "filtered_out": 160}]
+
+
+def test_account_services_ranks_a_bank_above_a_bulk_newsletter():
+    threads = [_thr("Security alert", "a@bank.test", "me@own.test") for _ in range(4)] + \
+              [_thr("This week's picks", "n@news.test", "me@own.test") for _ in range(400)]
+    out = ad.account_services(threads, inventory={"news.test": {"count": 400}},
+                              owner_addresses=["me@own.test"])
+    assert [x["service"] for x in out] == ["bank.test", "news.test"]
+
+
+# ── pipeline report: what went in against what came out ─────────────────────
+
+def _pipe_summaries():
+    return {
+        "collect_dedup_summary.json": {
+            "timestamp": "2026-01-01T10:00:00",
+            "type_counts": {"image": 100, "video": 10, "document": 50, "audio": 8},
+            "exact_dupes_moved": 20, "perceptual_dupes_moved": 30,
+            "docs_exact_dupes_moved": 5, "video_exact_dupes_moved": 1},
+        "email_triage_summary.json": {
+            "timestamp": "2026-01-03T15:30:00", "email_count": 1000,
+            "kept_count": 600,
+            "triage": {"discarded_bulk": 380, "discarded_platform": 20,
+                       "rescued_by_estate_keywords": 40}},
+        "message_triage_summary.json": {
+            "timestamp": "2026-01-02T09:00:00", "conversation_files_written": 30},
+        "transcription_summary.json": {
+            "timestamp": "2026-01-01T12:00:00", "total_audio": 8, "failed": 1,
+            "total_duration_seconds": 7200},
+        "ocr_summary.json": {"timestamp": "2026-01-01T11:00:00",
+                             "total_documents": 55, "ocr_results_count": 40},
+        "expandfiles_summary.json": {"timestamp": "2026-01-01T09:00:00",
+                                     "archives_found": 12, "files_added": 300,
+                                     "email_attachments": 44},
+    }
+
+
+_PIPE_COUNTS = {"photos": 40, "videos": 9, "documents": 25, "audio": 7,
+                "emails": 250, "messages": 28}
+
+
+def test_pipeline_report_pairs_examined_with_surfaced():
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS)
+    by = {r["kind"]: r for r in rep["rows"]}
+    assert (by["Photographs"]["examined"], by["Photographs"]["surfaced"]) == (100, 40)
+    assert by["Photographs"]["share"] == 40.0
+    assert by["Videos"]["share"] == 90.0
+    assert by["Recordings"]["examined"] == 8 and by["Recordings"]["surfaced"] == 7
+
+
+def test_pipeline_report_refuses_a_share_when_the_units_change():
+    """1,000 messages become 250 CONVERSATIONS. A percentage there is arithmetic
+    on two different units, so the row carries the counts and says why."""
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS)
+    mail = [r for r in rep["rows"] if r["kind"] == "Emails"][0]
+    assert mail["share"] is None
+    assert "conversations surfaced" in mail["unit_change"]
+    assert "600" in mail["note"] and "400" in mail["note"]  # kept, and bulk+platform
+
+
+def test_pipeline_report_elapsed_is_wall_clock_across_the_stages():
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS)
+    run = rep["run"]
+    assert run["first"] == "2026-01-01T09:00:00"
+    assert run["last"] == "2026-01-03T15:30:00"
+    assert run["elapsed"] == "2 days 6 hours"
+    # ordered by when they actually finished, not by pipeline order
+    assert [s["at"] for s in run["stages"]] == sorted(s["at"] for s in run["stages"])
+
+
+def test_pipeline_report_survives_a_case_that_skipped_stages():
+    """A missing summary must not become a row of zeroes — that reads as
+    "nothing was found" rather than "this did not run"."""
+    rep = ad.pipeline_report_data(summaries={}, counts={})
+    assert rep["run"]["elapsed"] is None and rep["run"]["stages"] == []
+    assert rep["totals"]["examined"] == 0
+    assert rep["size"]["total_human"] == "0 B"
+
+
+def test_pipeline_report_formats_sizes_and_shares():
+    rep = ad.pipeline_report_data(
+        summaries=_pipe_summaries(), counts=_PIPE_COUNTS,
+        sizes={"total": 3 * 1024 ** 3, "files": 12,
+               "parts": {"audio": 2 * 1024 ** 3, "photos": 1024 ** 3, "empty": 0}})
+    assert rep["size"]["total_human"] == "3.0 GB"
+    # biggest first, and a part with nothing in it is not a row
+    assert [p["name"] for p in rep["size"]["parts"]] == ["audio", "photos"]
+    assert rep["size"]["parts"][0]["human"] == "2.0 GB"
+    assert rep["size"]["parts"][0]["share"] == 66.7
+
+
+def test_pipeline_report_reading_figures():
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS)
+    assert rep["reading"] == {"documents_read": 55, "text_recovered": 40,
+                              "audio_hours": 2.0}
+    assert rep["expansion"]["files_added"] == 300
+
+
+def test_pipeline_report_estate_reach_uses_messages_not_conversations():
+    """These counts are individual emails; a conversation is a group of them, so
+    the conversation total is the wrong denominator by a unit."""
+    rel = {"available": True, "per_target_k": 25,
+           "candidates": {"decisions": 10, "documents": 8,
+                          "from_mail_decisions": 4, "from_mail_documents": 3},
+           "near_misses": {"decisions": 100, "documents": 60,
+                           "from_mail_decisions": 40, "from_mail_documents": 30}}
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS,
+                                  relevance=rel)
+    est = rep["estate"]
+    assert est["mail_denominator"] == 600, "kept messages, not the 250 conversations"
+    assert est["mail_denominator_label"] == "messages kept as worth reading"
+    assert est["candidate_mail_share"] == 0.5   # 3 of 600
+    assert est["near_mail_share"] == 5.0        # 30 of 600
+
+
+def test_pipeline_report_estate_reach_absent_when_the_scan_never_ran():
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS,
+                                  relevance={"available": False})
+    assert rep["estate"] is None
+    assert ad.pipeline_report_data(summaries={}, counts={})["estate"] is None
+
+
+def test_estate_relevance_counts_decisions_and_documents_apart(tmp_path):
+    """One document can be a candidate for several types. Reporting only the
+    pairings overstates the corpus; only the documents understates the work."""
+    paths, summary = _vital_case(tmp_path)
+    vd = {"available": True, "per_target_k": 25, "targets": [
+        {"target": "will_testament", "items": [{"path": "/d/will.pdf"},
+                                               {"path": "/m/deed.eml"}]},
+        {"target": "deed_title", "items": [{"path": "/d/will.pdf"}]},
+    ]}
+    rel = ad.estate_relevance_data(vd, paths, summary, {})
+    c = rel["candidates"]
+    assert (c["decisions"], c["documents"]) == (3, 2)
+    # the .eml is not a browsable document, so it counts as mail
+    assert (c["from_mail_decisions"], c["from_mail_documents"]) == (1, 1)
+
+
+# ── document subcategories the pipeline built and the row builder discarded ──
+
+def test_subcategory_from_path_reads_the_delivery_folder():
+    p = "/c/813_mf/output/documents/legal/will_testament/Some Will.docx"
+    assert ad.subcategory_from_path(p, "legal") == "will_testament"
+    # sitting directly in its category folder is not a subcategory
+    assert ad.subcategory_from_path("/c/output/documents/legal/Loose.pdf", "legal") is None
+    # the lookup is category-scoped: a legal path yields nothing for financial
+    assert ad.subcategory_from_path(p, "financial") is None
+    assert ad.subcategory_from_path("", "legal") is None
+    assert ad.subcategory_from_path(p, None) is None
+
+
+def _doc_summary(rows):
+    return {"document_classifications": rows}
+
+
+def test_document_rows_recover_a_subcategory_the_pipeline_left_blank():
+    """`legal` gained a sub-taxonomy and its documents ARE sorted into folders,
+    but every legal row arrives with subcategory None — 1,019 of 1,027 on the
+    real case. The delivered path is where that answer survives."""
+    rows = ad.document_rows(_doc_summary([
+        {"file": "/o/documents/legal/deed_title/Deed.pdf", "filename": "Deed.pdf",
+         "category": "legal", "source": "document"},
+        {"file": "/o/documents/financial/taxes/1040.pdf", "filename": "1040.pdf",
+         "category": "financial", "subcategory": "taxes", "source": "document"},
+        {"file": "/o/documents/recipe/Soup.pdf", "filename": "Soup.pdf",
+         "category": "recipe", "source": "document"},
+    ]), {}, "examiner")
+    by = {r["file"]: r for r in rows}
+    assert by["/o/documents/legal/deed_title/Deed.pdf"]["subcategory"] == "deed_title"
+    # the pipeline's own value is untouched where it exists
+    assert by["/o/documents/financial/taxes/1040.pdf"]["subcategory"] == "taxes"
+    # a category with no sub-taxonomy stays unfiled rather than inventing one
+    assert by["/o/documents/recipe/Soup.pdf"]["subcategory"] is None
+
+
+def test_documents_index_sub_counts_add_up_to_the_category():
+    """A category that is partly filed needs a bucket for the remainder, or the
+    subcategory counts quietly fail to sum to the category total."""
+    idx = ad.documents_index([
+        {"category": "legal", "subcategory": "will_testament"},
+        {"category": "legal", "subcategory": "deed_title"},
+        {"category": "legal", "subcategory": None},
+        {"category": "recipe", "subcategory": None},
+    ])
+    legal = [c for c in idx if c["category"] == "legal"][0]
+    assert legal["count"] == 3
+    assert sum(s["count"] for s in legal["subcategories"]) == 3
+    assert {s["name"] for s in legal["subcategories"]} == \
+        {"will_testament", "deed_title", "uncategorized"}
+    # a wholly unfiled category gets no invented level
+    recipe = [c for c in idx if c["category"] == "recipe"][0]
+    assert recipe["subcategories"] == []
+
+
+def test_documents_index_unfiled_bucket_does_not_depend_on_row_order():
+    """Deciding this per row made it depend on which rows came first."""
+    a = ad.documents_index([{"category": "legal", "subcategory": None},
+                            {"category": "legal", "subcategory": "deed_title"}])
+    b = ad.documents_index([{"category": "legal", "subcategory": "deed_title"},
+                            {"category": "legal", "subcategory": None}])
+    assert a == b
+    assert sum(s["count"] for s in a[0]["subcategories"]) == 2

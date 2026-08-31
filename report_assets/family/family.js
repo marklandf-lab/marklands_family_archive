@@ -322,7 +322,9 @@
      "q", "otd", "group", "target", "list", "rec",
      // Emails index drill-down: significance band, year, and the break-down tab
      // the reader last had open, so a link into a group is fully addressable.
-     "band", "year", "by", "sort"].forEach(function (k) {
+     "band", "year", "by", "sort",
+     // Recordings: which audio kind is being shown. Reports: which report.
+     "kind", "r", "view"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -383,7 +385,7 @@
      // existed, with the consequence this comment describes: choosing a sort and
      // then touching any other control dropped it from the URL, so a reload or a
      // shared link lost it. `by` is the open break-down tab.
-     "band", "year", "by", "sort",
+     "band", "year", "by", "sort", "kind", "r", "view",
      "group", "target", "list", "crumb", "from"]
       .forEach(function (k) { if (Q[k]) q.push(k + "=" + encodeURIComponent(Q[k])); });
     return location.pathname + (q.length ? "?" + q.join("&") : "");
@@ -2180,9 +2182,24 @@
           unchecked.appendChild(a);
         }).catch(function () { unchecked.remove(); });
       }
+      // NOT "Still missing". These are the types with no CONFIRMED document, and
+      // on this case every one of them still has weaker matches nobody has read —
+      // so calling them missing states an absence the archive cannot support, and
+      // contradicts the estate report, which puts the same types under "not yet
+      // established". A reader who takes "missing" at face value concludes there
+      // is no death certificate, when the truth is that nobody has finished
+      // looking. The count is examiner-only upstream, so a family session gets
+      // the honest heading without the review vocabulary under it.
       var missing = (vd.types || []).filter(function (t) { return !t.found; });
       if (missing.length) {
-        vc.appendChild(el("p", "ovtally ovtally-sub", "Still missing"));
+        vc.appendChild(el("p", "ovtally ovtally-sub", "Not yet found"));
+        if (EXAMINER && vd.unfound_near_misses) {
+          vc.appendChild(el("p", "ovnote",
+            "Nothing matched well enough to be a candidate. "
+            + num(vd.unfound_near_misses)
+            + " weaker matches for these types have not been reviewed, so none of "
+            + "them can be called absent yet."));
+        }
         var chips = el("div", "ovchips");
         missing.forEach(function (t) { chips.appendChild(el("span", null, esc(t.label))); });
         vc.appendChild(chips);
@@ -3789,61 +3806,182 @@
     main.appendChild(panel);
   }
 
-  P.documents = function (main, data) {
-    var index = data.index || [];
-    var controls = head(main, "Documents", "Documents", num(data.total || 0) + " documents.");
-    // The lead used to be written once, from the seed payload, and never touched
-    // again — so filtering to medical (86) left the heading claiming 4,643. The
-    // pager knows the filtered total; let it say so.
-    var leadEl = main.querySelector(".pagehead .lead");
-    function setLead(total, cat, sub) {
-      if (!leadEl) return;
-      var what = pretty(sub || cat || "");
-      leadEl.textContent = num(total || 0) + (what ? " " + what : "") + " document"
-        + (total === 1 ? "" : "s") + (what ? "" : ".");
+  // ── Documents: an index of what is in here, then one branch at a time ──
+  // The page used to open on the vital checklist with a category dropdown under
+  // it. The dropdown worked, but a filter in a <select> is not a place anybody
+  // browses: the D&D character sheets under creative writing were reachable and
+  // effectively invisible. And the sub-taxonomy the pipeline had already built
+  // for `legal` was thrown away by the row builder, so a thousand documents that
+  // ARE sorted into will / deed / power-of-attorney folders looked unsorted.
+  //
+  // Same shape as Emails now: an index of branches with true counts, then a
+  // filtered list. The estate checklist is the first branch, because that is
+  // what the archive is for, but it is a branch rather than the whole page.
+
+  var DOC_CAT_LABELS = {
+    financial: "Financial", legal: "Legal", medical: "Medical",
+    recipe: "Recipes", creative_writing: "Creative writing",
+    personal_correspondence: "Personal correspondence",
+    miscellaneous: "Miscellaneous", account_credentials: "Account credentials",
+  };
+  function docCatLabel(c) { return DOC_CAT_LABELS[c] || pretty(c); }
+
+  // One expandable category branch: the name, its count, and its subcategories
+  // where the pipeline actually filed some. A category with no sub-taxonomy has
+  // no caret — offering one that opens onto a single row is a lie about depth.
+  function docCatRow(container, c) {
+    var subs = c.subcategories || [];
+    var sec = el("section", "rec-sec");
+    var head_ = el("div", "rec-sechead");
+    if (subs.length) {
+      var caret = el("span", "vcaret", "▸");
+      head_.appendChild(caret);
+    } else {
+      head_.appendChild(el("span", "vcaret vcaret-none", "·"));
     }
-    vitalDocsPanel(main, data.vital_docs);  // G-2 checklist at the top of Documents
-    // Category dropdown + (financial) sub-category dropdown in the sticky controls (#9).
-    // Both are SERVER filters now (applied before the page slice) so a category's
-    // tail is reachable via Load-more; the index (from ALL rows) drives the counts.
-    var selCat = el("select"); selCat.appendChild(new Option("All categories", ""));
-    index.forEach(function (c) { selCat.appendChild(new Option(pretty(c.category) + " (" + c.count + ")", c.category)); });
-    var fin = (index.filter(function (c) { return c.category === "financial"; })[0] || {}).subcategories || [];
-    var selSub = el("select"); selSub.style.display = "none";
-    (function fillSub() {
-      selSub.innerHTML = ""; selSub.appendChild(new Option("All sub-categories", ""));
-      fin.forEach(function (s) { selSub.appendChild(new Option(pretty(s.name) + " (" + s.count + ")", s.name)); });
-    })();
-    if (Q.cat) selCat.value = Q.cat;
-    if (Q.subcat) selSub.value = Q.subcat;
+    head_.appendChild(el("span", "rec-seclabel", esc(docCatLabel(c.category))));
+    head_.appendChild(el("span", "rec-secn", num(c.count)));
+    var open = el("a", "rec-seconly", "Open all " + num(c.count) + " →");
+    open.href = urlFor({ page: "documents", cat: c.category },
+                       { label: docCatLabel(c.category) });
+    open.onclick = function (e) { e.stopPropagation(); };
+    head_.appendChild(open);
+    sec.appendChild(head_);
+
+    if (subs.length) {
+      var body = el("div", "rec-secbody doc-subs");
+      body.hidden = true;
+      subs.forEach(function (sub) {
+        var a = el("a", "ebd-chip");
+        a.href = urlFor({ page: "documents", cat: c.category, subcat: sub.name },
+                        { label: docCatLabel(c.category) + " · " + pretty(sub.name) });
+        a.appendChild(el("span", "ebd-chip-l", esc(pretty(sub.name))));
+        a.appendChild(el("span", "ebd-chip-n", num(sub.count)));
+        body.appendChild(a);
+      });
+      head_.onclick = function () {
+        body.hidden = !body.hidden;
+        caret.textContent = body.hidden ? "▸" : "▾";
+        head_.classList.toggle("open", !body.hidden);
+        head_.setAttribute("aria-expanded", String(!body.hidden));
+      };
+      keyable(head_, "button", docCatLabel(c.category));
+      head_.setAttribute("aria-expanded", "false");
+      sec.appendChild(body);
+    }
+    container.appendChild(sec);
+  }
+
+  function documentsIndex(main, data) {
+    var index = data.index || [];
+    head(main, "Documents", "Documents",
+      num(data.total || 0) + " documents. Every count below is the whole "
+      + "collection, not a page of it.");
+
+    // The estate branch first — a summary and a way in, not the whole checklist.
+    var vd = data.vital_docs;
+    if (vd && vd.available) {
+      var st = vitalStats((vd.targets || []).slice());
+      var vsec = el("section", "eix-panel doc-estate");
+      vsec.appendChild(el("h2", null, "Estate documents"));
+      vsec.appendChild(el("p", "eix-note",
+        num(st.types) + " document types an estate needs, searched across every "
+        + "document and email in the archive."));
+      var bar = el("div", "vstats");
+      vitalStat(bar, st.found, "types have a candidate");
+      if (EXAMINER) {
+        vitalStat(bar, st.signed, "signed off");
+        vitalStat(bar, st.undecided, "candidates undecided", st.undecided > 0);
+        vitalStat(bar, st.near, "near-misses unreviewed", st.near > 0);
+      }
+      vsec.appendChild(bar);
+      var go_ = el("a", "eix-more", "Work the checklist, type by type →");
+      go_.href = urlFor({ page: "documents", view: "vital" },
+                        { label: "Vital documents" });
+      vsec.appendChild(go_);
+      main.appendChild(vsec);
+    }
+
+    var csec = el("section", "doc-cats");
+    csec.appendChild(el("h2", null, "By category"));
+    csec.appendChild(el("p", "eix-note",
+      "How the pipeline filed each document. Where it also sorted a category "
+      + "into subcategories, they open here."));
+    index.forEach(function (c) { docCatRow(csec, c); });
+    main.appendChild(csec);
+  }
+
+  // One category (optionally one subcategory): the documents, with the sibling
+  // subcategories offered as a break-down so a reader can move sideways without
+  // going back to the index.
+  function documentsCategory(main, data, cat, subcat) {
+    var index = data.index || [];
+    var entry = index.filter(function (c) { return c.category === cat; })[0] || {};
+    var subs = entry.subcategories || [];
+    var title = docCatLabel(cat) + (subcat ? " · " + pretty(subcat) : "");
+    setCrumb(Q.crumb || title);
+    // Seed the lead from the index we already have rather than an empty string:
+    // head() only creates the .lead element when there is something to put in
+    // it, so passing "" left nothing for the pager to write into afterwards.
+    var seedCount = subcat
+      ? ((subs.filter(function (x) { return x.name === subcat; })[0] || {}).count || 0)
+      : (entry.count || 0);
+    var controls = head(main, "Documents", title,
+      num(seedCount) + " document" + (seedCount === 1 ? "" : "s") + ".");
+    var back = el("button", "btn chip", "← All documents");
+    back.onclick = function () { go({ page: "documents" }); };
+    controls.appendChild(back);
     var expBtn = el("button", "btn", "Export filtered");
-    controls.appendChild(el("span", "flabel", "Category")); controls.appendChild(selCat);
-    controls.appendChild(selSub); controls.appendChild(expBtn);
+    controls.appendChild(expBtn);
+
+    if (subs.length) {
+      var strip = el("div", "ebd"); main.appendChild(strip);
+      var chips = el("div", "ebd-body"); strip.appendChild(chips);
+      function chip(name, label, n) {
+        var a = el("a", "ebd-chip" + (subcat === name ? " on" : ""));
+        a.href = urlFor(name ? { page: "documents", cat: cat, subcat: name }
+                             : { page: "documents", cat: cat },
+                        { label: docCatLabel(cat) + (name ? " · " + pretty(name) : "") });
+        a.appendChild(el("span", "ebd-chip-l", esc(label)));
+        a.appendChild(el("span", "ebd-chip-n", num(n)));
+        chips.appendChild(a);
+      }
+      chip("", "All " + docCatLabel(cat).toLowerCase(), entry.count || 0);
+      subs.forEach(function (s) { chip(s.name, pretty(s.name), s.count); });
+    }
 
     var holder = el("div"); main.appendChild(holder);
     var pg = pager("/api/documents", {
-      getParams: function () { return { cat: selCat.value, subcat: selSub.value }; },
+      getParams: function () { return { cat: cat, subcat: subcat || "" }; },
       render: function (all, total) {
         holder.innerHTML = "";
         fileTable(holder, all);
-        setLead(total, selCat.value, selSub.value);
+        var leadEl = main.querySelector(".pagehead-title .lead");
+        if (leadEl) leadEl.textContent = num(total || 0) + " document"
+          + (total === 1 ? "" : "s") + ".";
       },
     });
     main.appendChild(pg.footer);
-    selCat.onchange = function () {
-      selSub.value = ""; selSub.style.display = (selCat.value === "financial" && fin.length) ? "" : "none";
-      setQ({ cat: selCat.value, subcat: "" }); pg.load(true);
-    };
-    selSub.onchange = function () { setQ({ subcat: selSub.value }); pg.load(true); };
     expBtn.onclick = function () {
-      var cat = selCat.value;
-      if (!cat) return doVerb("/api/export", { items: pg.rows.map(function (r) { return r.file; }) }, "Exported documents");
-      var key = (cat === "financial" && selSub.value) ? cat + ":" + selSub.value : cat;
-      exportCollection("category", key, pretty(selSub.value || cat));
+      var key = subcat ? cat + ":" + subcat : cat;
+      exportCollection("category", key, pretty(subcat || cat));
     };
-    // Seed from page 1; re-fetch with the category filter if one is deep-linked.
-    selSub.style.display = (selCat.value === "financial" && fin.length) ? "" : "none";
-    if (selCat.value) pg.load(true); else pg.seed(data);
+    pg.load(true);
+  }
+
+  P.documents = function (main, data) {
+    // The 27-type checklist, on its own page now rather than above every browse.
+    if (Q.view === "vital") {
+      setCrumb(Q.crumb || "Vital documents");
+      var ctrls = head(main, "Documents", "Vital documents", "");
+      var back = el("button", "btn chip", "← All documents");
+      back.onclick = function () { go({ page: "documents" }); };
+      ctrls.appendChild(back);
+      vitalDocsPanel(main, data.vital_docs);
+      return;
+    }
+    if (Q.cat) return documentsCategory(main, data, Q.cat, Q.subcat || "");
+    return documentsIndex(main, data);
   };
 
   P.correspondence = function (main, d) {
@@ -4706,44 +4844,526 @@
     });
   }
 
+  // ── Estate document report (attorney-facing) ──
+  // Everything this page is for turns on one distinction the rest of the UI
+  // blurs: "we searched and it is not there" and "we have not finished
+  // searching" look identical on screen — both are an empty row — and only the
+  // first supports advice. So the three states are named, the weakest one is
+  // hard to qualify for, and the limitations are stated up front rather than in
+  // a footnote, because a reader who stops halfway must not stop having been
+  // misled.
+  // A label / count / proportion row, no link. Same visual grammar as the Emails
+  // index so a count means the same thing everywhere; bar widths go through
+  // CSSOM because the page CSP forbids an inline style attribute.
+  function reportBars(container, items) {
+    var max = (items || []).reduce(function (m, i) { return Math.max(m, i.count); }, 0);
+    (items || []).forEach(function (i) {
+      var row = el("div", "eix-row rep-row");
+      row.appendChild(el("span", "eix-label", esc(i.label)));
+      // `display` lets a caller show a formatted figure (a file size) while the
+      // bar is still sized by the underlying number.
+      row.appendChild(el("span", "eix-count", i.display ? esc(i.display) : num(i.count)));
+      var track = el("span", "eix-bar"), fill = el("span", "eix-fill");
+      fill.style.width = Math.max(2, Math.round((i.count / (max || 1)) * 100)) + "%";
+      track.appendChild(fill);
+      row.appendChild(track);
+      container.appendChild(row);
+    });
+  }
+
+  function reportHead(main, title, d) {
+    var controls = head(main, "Reports", title,
+      "Case " + esc((d && d.case_id) || "") + " · prepared "
+      + esc((d && d.generated_at) || ""));
+    var back = el("button", "btn chip", "← All reports");
+    back.onclick = function () { go({ page: "reports" }); };
+    controls.appendChild(back);
+    var pr = el("button", "btn", "Print / Save as PDF");
+    pr.onclick = function () { window.print(); };
+    controls.appendChild(pr);
+    return controls;
+  }
+
+  function reportLimits(main, list) {
+    var lim = el("section", "rep-limits");
+    lim.appendChild(el("h2", null, "What this report cannot tell you"));
+    var ul = el("ul");
+    (list || []).forEach(function (x) { ul.appendChild(el("li", null, esc(x))); });
+    lim.appendChild(ul);
+    main.appendChild(lim);
+  }
+
+  function reportDate(iso) {
+    if (!iso) return "";
+    var p = String(iso).slice(0, 10).split("-");
+    if (p.length !== 3) return esc(iso);
+    var M = ["January", "February", "March", "April", "May", "June", "July",
+             "August", "September", "October", "November", "December"];
+    return (parseInt(p[2], 10) + " " + (M[parseInt(p[1], 10) - 1] || "") + " " + p[0]);
+  }
+
+  // The family report: an orientation document for somebody who has just been
+  // handed the archive, rather than a statement of position on it. Limitations
+  // sit at the END here, unlike the estate report where they lead — that one is
+  // acted on by a professional and its caveats change what the figures support;
+  // this one is read by a family, and opening on what is missing would be a
+  // strange way to hand somebody their own life back.
+  function familyReport(main, d) {
+    reportHead(main, "Family report", d);
+    var span = d.span || {};
+    if (span.from && span.to) {
+      main.appendChild(el("p", "rep-span",
+        "This archive covers " + esc(reportDate(span.from)) + " to "
+        + esc(reportDate(span.to)) + "."));
+    }
+
+    var bar = el("div", "vstats rep-stats");
+    (d.headline || []).forEach(function (h) { vitalStat(bar, h.count, h.label); });
+    main.appendChild(bar);
+
+    var ppl = d.people || {};
+    var psec = el("section", "rep-group");
+    psec.appendChild(el("h2", null, "People"));
+    psec.appendChild(el("p", "rep-note",
+      num(ppl.total || 0) + " people are recognised across the photographs, "
+      + num(ppl.named || 0) + " of them named. They appear in "
+      + num(d.places || 0) + " places."));
+    if ((ppl.top || []).length) {
+      var chips = el("div", "ebd-body");
+      ppl.top.forEach(function (p) {
+        var c = el("span", "ebd-chip");
+        c.appendChild(el("span", "ebd-chip-l", esc(p.name)));
+        c.appendChild(el("span", "ebd-chip-n", num(p.photos)));
+        chips.appendChild(c);
+      });
+      psec.appendChild(chips);
+    }
+    main.appendChild(psec);
+
+    (d.sections || []).forEach(function (sec) {
+      if (!(sec.items || []).length) return;
+      var el_ = el("section", "rep-group");
+      el_.appendChild(el("h2", null, esc(sec.label)));
+      if (sec.note) el_.appendChild(el("p", "rep-note", esc(sec.note)));
+      var panel = el("div", "rep-bars");
+      reportBars(panel, sec.items);
+      el_.appendChild(panel);
+      main.appendChild(el_);
+    });
+
+    reportLimits(main, d.limitations);
+  }
+
+  // The pipeline report: what was examined to build this archive, and how much
+  // of it survived to be looked at again. The interesting column is neither the
+  // input nor the output but the GAP, and it is a different story in every row —
+  // photographs mostly lost to duplicates, mail to bulk triage — so each row
+  // carries a sentence saying where its difference went.
+  function pipelineReport(main, d) {
+    reportHead(main, "Pipeline report", d);
+    var t = d.totals || {}, sz = d.size || {}, run = d.run || {};
+
+    var bar = el("div", "vstats rep-stats");
+    vitalStat(bar, t.examined, "items examined");
+    vitalStat(bar, t.surfaced, "browsable in the archive");
+    bar.appendChild(el("p", "vstats-hint",
+      "The archive occupies " + esc(sz.total_human || "—") + " across "
+      + num(sz.files || 0) + " files"
+      + (run.elapsed ? ", and the run that produced it spans " + esc(run.elapsed) : "")
+      + "."));
+    main.appendChild(bar);
+
+    var sec = el("section", "rep-group");
+    sec.appendChild(el("h2", null, "What was examined"));
+    sec.appendChild(el("p", "rep-note",
+      "Everything the pipeline read, against what the archive shows today."));
+    if (d.surfaced_note) sec.appendChild(el("p", "rep-note", esc(d.surfaced_note)));
+    var tbl = el("table", "rep-table pipe-table");
+    tbl.innerHTML = "<tr><th>Material</th><th>Examined</th><th>In the archive</th>"
+      + "<th>Share</th></tr>";
+    (d.rows || []).forEach(function (r) {
+      var tr = el("tr");
+      tr.innerHTML = "<td>" + esc(r.kind) + "</td><td>" + num(r.examined)
+        + "</td><td>" + num(r.surfaced) + "</td><td>"
+        + (r.share == null ? "—" : esc(r.share + "%")) + "</td>";
+      tbl.appendChild(tr);
+      // The explanation rides directly under its row, spanning the table, so a
+      // share of 38% is never read without the reason beside it.
+      var note = el("tr", "pipe-note");
+      var td = el("td", null,
+        (r.unit_change ? '<em>' + esc(r.unit_change) + '.</em> ' : "") + esc(r.note));
+      td.colSpan = 4;
+      note.appendChild(td);
+      tbl.appendChild(note);
+    });
+    sec.appendChild(tbl);
+    main.appendChild(sec);
+
+    var rd = d.reading || {}, ex = d.expansion || {};
+    var work = el("section", "rep-group");
+    work.appendChild(el("h2", null, "The work behind it"));
+    var wl = el("ul", "pipe-list");
+    if (ex.archives_found) wl.appendChild(el("li", null,
+      num(ex.archives_found) + " archives and containers were unpacked, adding "
+      + num(ex.files_added) + " files that were inside them — including "
+      + num(ex.email_attachments) + " email attachments that would otherwise "
+      + "never have been seen."));
+    if (rd.documents_read) wl.appendChild(el("li", null,
+      num(rd.documents_read) + " documents were read for text — by optical "
+      + "character recognition where they were scans — and text was recovered "
+      + "from " + num(rd.text_recovered) + " of them."));
+    if (rd.audio_hours) wl.appendChild(el("li", null,
+      esc(String(rd.audio_hours)) + " hours of audio were transcribed."));
+    work.appendChild(wl);
+    main.appendChild(work);
+
+    // How much of all that mattered to the estate. This is the answer to "you
+    // surfaced 21,988 conversations — so what?", and it is a startlingly small
+    // number, which is the point of showing it.
+    var est = d.estate;
+    if (est) {
+      var esec = el("section", "rep-group");
+      esec.appendChild(el("h2", null, "How much of it mattered to the estate"));
+      esec.appendChild(el("p", "rep-note",
+        "Browsable is not the same as important. Of everything in the archive, "
+        + "this is what the estate scan flagged — and what still has no answer."));
+      // A funnel, ending on the number somebody actually needs: how many
+      // decisions are still outstanding. That was previously reachable only by
+      // opening the Documents screen and reading a stat bar.
+      var fun = el("div", "vstats rep-stats");
+      // All four are DECISIONS, not documents. Mixing the two here would be the
+      // same unit error the email row refuses to make: signed-off and undecided
+      // are counts of answers, and a document that is a candidate for two types
+      // can be answered for one and not the other. The distinct-document figures
+      // are in the table directly below.
+      vitalStat(fun, (est.candidates || {}).decisions, "candidates to decide");
+      vitalStat(fun, est.decided, "signed off");
+      vitalStat(fun, est.undecided, "still undecided", est.undecided > 0);
+      vitalStat(fun, (est.near_misses || {}).decisions, "weaker matches unreviewed",
+                ((est.near_misses || {}).decisions || 0) > 0);
+      fun.appendChild(el("p", "vstats-hint",
+        "Counts of decisions. They cover "
+        + num((est.candidates || {}).documents) + " distinct documents and "
+        + num((est.near_misses || {}).documents) + " weaker matches — fewer than "
+        + "the decisions, because a document can be a candidate for more than "
+        + "one type and each pairing needs its own answer."));
+      esec.appendChild(fun);
+      var et = el("table", "rep-table");
+      et.innerHTML = "<tr><th>&nbsp;</th><th>Decisions</th><th>Documents</th>"
+        + "<th>Of those, emails</th></tr>";
+      [["Candidates for a vital document", est.candidates],
+       ["Weaker matches (near misses)", est.near_misses]].forEach(function (pair) {
+        var r = pair[1] || {};
+        var tr = el("tr");
+        tr.innerHTML = "<td>" + esc(pair[0]) + "</td><td>" + num(r.decisions)
+          + "</td><td>" + num(r.documents) + "</td><td>"
+          + num(r.from_mail_documents) + "</td>";
+        et.appendChild(tr);
+      });
+      esec.appendChild(et);
+      // Two units in one table, so both get named rather than left to be
+      // inferred: one document can be a candidate for several types and each
+      // pairing is its own decision.
+      esec.appendChild(el("p", "rep-note",
+        "A document can be a candidate for more than one type, and each pairing "
+        + "needs its own answer — so the decisions outnumber the documents. "
+        + "Only " + num((est.candidates || {}).from_mail_documents)
+        + " emails became candidates and "
+        + num((est.near_misses || {}).from_mail_documents)
+        + " more were weaker matches: "
+        + (est.candidate_mail_share == null ? "—"
+           : esc(est.candidate_mail_share + "%")) + " and "
+        + (est.near_mail_share == null ? "—" : esc(est.near_mail_share + "%"))
+        + " of the " + num(est.mail_denominator) + " "
+        + esc(est.mail_denominator_label) + ". The share is taken against "
+        + "messages rather than conversations, because these counts are "
+        + "individual emails and a conversation is a group of them."
+        + (est.per_target_k
+           ? " Retrieval stopped at " + num(est.per_target_k)
+             + " candidates per document type, so both figures are a floor." : "")));
+      main.appendChild(esec);
+    }
+
+    var ssec = el("section", "rep-group");
+    ssec.appendChild(el("h2", null, "Size on disk"));
+    ssec.appendChild(el("p", "rep-note",
+      "The delivered archive as it sits on this machine. The material it was "
+      + "built from is much larger and is not here."));
+    var sbars = el("div", "rep-bars");
+    reportBars(sbars, (sz.parts || []).map(function (p) {
+      return { label: p.name, count: p.bytes, display: p.human };
+    }));
+    ssec.appendChild(sbars);
+    main.appendChild(ssec);
+
+    if ((run.stages || []).length) {
+      var rsec = el("section", "rep-group");
+      rsec.appendChild(el("h2", null, "The run"));
+      // Say what this measurement IS. These are the completion times each stage
+      // recorded, so the span includes any time the machine sat idle between
+      // them, and a stage that was re-run appears where it actually happened
+      // rather than in pipeline order. Calling it "processing time" would be a
+      // stronger claim than the data supports.
+      rsec.appendChild(el("p", "rep-note",
+        "When each stage finished. The span between the first and the last is "
+        + (run.elapsed ? esc(run.elapsed) + ", " : "") + "wall clock — it "
+        + "includes any time the machine spent idle between stages, and is not "
+        + "a measure of how much computing was done."));
+      var rt = el("table", "rep-table");
+      rt.innerHTML = "<tr><th>Stage</th><th>Finished</th></tr>";
+      run.stages.forEach(function (st) {
+        var tr = el("tr");
+        tr.innerHTML = "<td>" + esc(pretty(st.stage || "")) + "</td><td>"
+          + esc(String(st.at).replace("T", " ").slice(0, 19)) + "</td>";
+        rt.appendChild(tr);
+      });
+      rsec.appendChild(rt);
+      main.appendChild(rsec);
+    }
+  }
+
+  P.reports = function (main, d) {
+    // The router seeds every page from /api/<page> with NO query string, so the
+    // payload above is always the index. A specific report has to fetch itself —
+    // same as the recording and email-thread detail views do.
+    var RENDER = { family: familyReport, estate: estateReport,
+                   pipeline: pipelineReport };
+    var LABEL = { family: "Family report", estate: "Estate document report",
+                  pipeline: "Pipeline report" };
+    if (RENDER[Q.r]) {
+      var which = Q.r;
+      setCrumb(LABEL[which]);
+      var holder = el("div"); main.appendChild(holder);
+      getJSON("/api/reports?r=" + encodeURIComponent(which)).then(function (rep) {
+        holder.innerHTML = "";
+        RENDER[which](holder, rep);
+      }).catch(function (e) {
+        holder.appendChild(el("p", "notice",
+          "Couldn't build the report: " + esc(e.message)));
+      });
+      return;
+    }
+    // The index.
+    head(main, "Reports", "Reports",
+      "Statements drawn from the archive, meant to be printed and handed over.");
+    var wrap = el("div", "eix-cols"); main.appendChild(wrap);
+    ((d && d.reports) || []).forEach(function (r) {
+      var card = el("a", "eix-panel rep-card");
+      card.href = urlFor({ page: "reports", r: r.key }, { label: r.label });
+      card.appendChild(el("h2", null, esc(r.label)));
+      card.appendChild(el("p", "eix-note", esc(r.note)));
+      wrap.appendChild(card);
+    });
+  };
+
+  function estateReport(main, d) {
+    if (!d || d.available === false) {
+      reportHead(main, "Estate document report", d);
+      main.appendChild(el("p", "notice",
+        "The vital-document scan has not run for this case, so there is nothing "
+        + "to report on yet."));
+      return;
+    }
+    var t = d.totals;
+    reportHead(main, "Estate document report", d);
+
+    // The headline, in the terms an attorney reads: of the types an estate
+    // needs, how many do we actually have.
+    var bar = el("div", "vstats rep-stats");
+    vitalStat(bar, t.present, "types confirmed present");
+    vitalStat(bar, t.unconfirmed, "types not yet established", t.unconfirmed > 0);
+    vitalStat(bar, t.absent, "types with nothing matched");
+    bar.appendChild(el("p", "vstats-hint",
+      "Across " + num(t.types) + " document types an estate needs. "
+      + num(t.candidates) + " candidate documents were found, of which "
+      + num(t.signed_off) + " have been confirmed and " + num(t.undecided)
+      + " are still unreviewed, alongside " + num(t.near_misses)
+      + " weaker matches that have not been reviewed."));
+    main.appendChild(bar);
+
+    // Limitations BEFORE the table, deliberately, and unlike the family report:
+    // this one is acted on by a professional, so a reader who takes in only the
+    // first screen must leave with the caveat rather than the figure alone.
+    reportLimits(main, d.limitations);
+
+    (d.groups || []).forEach(function (g) {
+      var sec = el("section", "rep-group rep-" + g.key);
+      sec.appendChild(el("h2", null, esc(g.label) + " (" + num((g.types || []).length) + ")"));
+      sec.appendChild(el("p", "rep-note", esc(g.note)));
+      if (!(g.types || []).length) {
+        sec.appendChild(el("p", "rep-empty", "None."));
+        main.appendChild(sec);
+        return;
+      }
+      var tbl = el("table", "rep-table");
+      tbl.innerHTML = "<tr><th>Document type</th><th>Found</th><th>Confirmed</th>"
+        + "<th>Unreviewed</th><th>Weaker matches</th></tr>";
+      g.types.forEach(function (r) {
+        var tr = el("tr");
+        // The cap marker rides on the row it qualifies, not only in the preamble:
+        // for a capped type "nothing matched" means "nothing within what we
+        // retrieved", which is a materially weaker claim.
+        var name = esc(r.label) + (r.capped
+          ? ' <span class="rep-cap" title="Retrieval reached its limit for this '
+            + 'type — these counts are a floor">capped</span>' : "");
+        tr.innerHTML = "<td>" + name + "</td><td>" + num(r.candidates) + "</td><td>"
+          + num(r.signed_off) + "</td><td>" + num(r.undecided) + "</td><td>"
+          + num(r.near_misses) + "</td>";
+        tbl.appendChild(tr);
+      });
+      sec.appendChild(tbl);
+      main.appendChild(sec);
+    });
+  }
+
+  // ── Recordings: grouped by what kind of listening it is ──
+  // 1,051 recordings used to render as one flat significance-sorted list, every
+  // row carrying its own <audio> element, with no way to ask for the voicemails.
+  // The classifier's category was on every row and on /api/overview as
+  // `audio_counts`, and the page used neither.
+  //
+  // The grouping (and its reasoning) lives server-side in _archive_data.AUDIO_KINDS
+  // where pytest can hold it; the page reads `kind` / `kind_label` off each row.
+  // Counting here is honest because /api/recordings is not paginated — the client
+  // has every row, so a count over them IS the total.
+  var AUDIO_KIND_ORDER = ["voicemail", "voice_note", "conversation", "music",
+                          "untranscribed", "other"];
+
+  function recordingCard(r) {
+    var it = el("div", "item card-row");
+    addPick(it, r.file);
+    var affordance = r.has_transcript
+      ? ' <span class="tchip" title="Transcript available">📝 transcript</span>' : "";
+    var body = el("div", "ibody",
+      "<h3>" + esc(r.name) + " " + sig(r.significance) + affordance + "</h3>" +
+      (r.summary ? '<div class="why">' + esc(r.summary) + "</div>" : "") +
+      '<audio controls preload="none" src="' + mediaURL(r.file) + '"></audio>' +
+      (r.preview ? '<div class="body">' + esc(r.preview) + "</div>" : ""));
+    // What the classifier ACTUALLY said, for the examiner, beside where we filed
+    // it. The two disagree often enough to matter: recordings that exist in two
+    // file formats get two different answers about a third of the time, so a
+    // reader who can only see the group cannot tell a real grouping from a coin
+    // toss. Family sees the group only — this is a confidence signal, not content.
+    if (EXAMINER && r.category) {
+      body.appendChild(el("div", "rec-cat",
+        "Classified as " + esc(pretty(r.category))));
+    }
+    var actrow = el("div", "actrow");
+    var open = el("button", "btn small", "Open transcript");
+    open.onclick = function () {
+      go({ page: "recordings", rec: r.file },
+         { label: cleanRecordingName(basename(r.file)) });
+    };
+    actrow.appendChild(open);
+    var exp = el("button", "btn small", "Export");
+    exp.onclick = function () { doVerb("/api/export", { items: [r.file] }, "Exported " + r.name); };
+    actrow.appendChild(exp);
+    if (EXAMINER) {
+      var disc = el("button", "btn small danger", "Discard");
+      disc.onclick = function () {
+        doVerb("/api/banish", { src: r.file }, "Discarded").then(function (x) { if (x) it.remove(); });
+      };
+      actrow.appendChild(disc);
+    }
+    body.appendChild(actrow);
+    it.appendChild(body);
+    return it;
+  }
+
   P.recordings = function (main, rows) {
     // Recording detail (seek-synced player + transcript) when ?rec=<file> is present.
     if (Q.rec) { recordingDetail(main, Q.rec); return; }
-    head(main, "Recordings", "Recordings", rows.length + " recordings. Press play.");
-    var wrap = el("div", "reading");
+    rows = rows || [];
+
+    // Count every kind present, in the server's order. A kind with nothing in it
+    // is not offered — an empty group is a dead click.
+    var byKind = {};
     rows.forEach(function (r) {
-      var it = el("div", "item card-row");
-      addPick(it, r.file);
-      var affordance = r.has_transcript
-        ? ' <span class="tchip" title="Transcript available">📝 transcript</span>' : "";
-      var body = el("div", "ibody",
-        "<h3>" + esc(r.name) + " " + sig(r.significance) + affordance + "</h3>" +
-        (r.summary ? '<div class="why">' + esc(r.summary) + "</div>" : "") +
-        '<audio controls preload="none" src="' + mediaURL(r.file) + '"></audio>' +
-        (r.preview ? '<div class="body">' + esc(r.preview) + "</div>" : ""));
-      var actrow = el("div", "actrow");  // explicit per-item Export / Discard (#12)
-      // Open the seek-synced detail (transcript + click-to-seek).
-      var open = el("button", "btn small", "Open transcript");
-      open.onclick = function () {
-        go({ page: "recordings", rec: r.file },
-           { label: cleanRecordingName(basename(r.file)) });
-      };
-      actrow.appendChild(open);
-      var exp = el("button", "btn small", "Export");
-      exp.onclick = function () { doVerb("/api/export", { items: [r.file] }, "Exported " + r.name); };
-      actrow.appendChild(exp);
-      if (EXAMINER) {
-        var disc = el("button", "btn small danger", "Discard");
-        disc.onclick = function () {
-          doVerb("/api/banish", { src: r.file }, "Discarded").then(function (x) { if (x) it.remove(); });
-        };
-        actrow.appendChild(disc);
-      }
-      body.appendChild(actrow);
-      it.appendChild(body);
-      wrap.appendChild(it);
+      var k = r.kind || "other";
+      (byKind[k] = byKind[k] || []).push(r);
     });
-    main.appendChild(wrap);
+    var kinds = AUDIO_KIND_ORDER.filter(function (k) { return (byKind[k] || []).length; });
+    // Any kind the server invented that this list has not heard of still shows,
+    // after the known ones, rather than silently vanishing from the page.
+    Object.keys(byKind).forEach(function (k) {
+      if (kinds.indexOf(k) === -1) kinds.push(k);
+    });
+    function labelFor(k) {
+      var first = (byKind[k] || [])[0];
+      return (first && first.kind_label) || pretty(k);
+    }
+
+    var active = Q.kind && byKind[Q.kind] ? Q.kind : "";
+    if (active) setCrumb(Q.crumb || labelFor(active));
+    head(main, "Recordings", active ? labelFor(active) : "Recordings",
+      active ? num(byKind[active].length) + " recordings."
+             : num(rows.length) + " recordings, in " + num(kinds.length) + " kinds.");
+
+    // The filter strip. Same shape as the Emails break-down: each chip links and
+    // carries its own count, so a chip can only claim what was actually counted.
+    var strip = el("div", "ebd"); main.appendChild(strip);
+    var chips = el("div", "ebd-body"); strip.appendChild(chips);
+    function chip(k, label, n) {
+      var a = el("a", "ebd-chip" + (active === k ? " on" : ""));
+      a.href = urlFor(k ? { page: "recordings", kind: k } : { page: "recordings" },
+                      { label: label });
+      a.appendChild(el("span", "ebd-chip-l", esc(label)));
+      a.appendChild(el("span", "ebd-chip-n", num(n)));
+      chips.appendChild(a);
+    }
+    chip("", "All recordings", rows.length);
+    kinds.forEach(function (k) { chip(k, labelFor(k), byKind[k].length); });
+    // The grouping is only as good as the classifier, and this one contradicts
+    // itself often enough that saying so is part of reporting it honestly.
+    if (EXAMINER) {
+      strip.appendChild(el("p", "eix-note",
+        "Grouped by the pipeline's own classification of each recording, which is "
+        + "not always right — the same recording saved in two formats is "
+        + "sometimes filed two different ways. Each row says what it was "
+        + "classified as."));
+    }
+
+    var wrap = el("div", "reading"); main.appendChild(wrap);
+    if (active) {
+      byKind[active].forEach(function (r) { wrap.appendChild(recordingCard(r)); });
+      return;
+    }
+    // Unfiltered, every kind is a COLLAPSED section: six lines you can take in at
+    // once, rather than six headings separated by four hundred audio players. The
+    // headings alone were an improvement on a flat list and still left the second
+    // section a long scroll below the first. Rows are built on first expand, so
+    // the page does not pay for 1,051 <audio> elements nobody opened.
+    kinds.forEach(function (k) {
+      var sec = el("section", "rec-sec");
+      var head_ = el("div", "rec-sechead");
+      var caret = el("span", "vcaret", "▸");
+      head_.appendChild(caret);
+      head_.appendChild(el("span", "rec-seclabel", esc(labelFor(k))));
+      head_.appendChild(el("span", "rec-secn", num(byKind[k].length)));
+      var only = el("a", "rec-seconly", "Show only these");
+      only.href = urlFor({ page: "recordings", kind: k }, { label: labelFor(k) });
+      only.onclick = function (e) { e.stopPropagation(); };
+      head_.appendChild(only);
+      var body = el("div", "rec-secbody");
+      body.hidden = true;
+      var built = false;
+      function setOpen(on) {
+        body.hidden = !on;
+        caret.textContent = on ? "▾" : "▸";
+        head_.setAttribute("aria-expanded", String(on));
+        head_.classList.toggle("open", on);
+        if (on && !built) {
+          built = true;
+          byKind[k].forEach(function (r) { body.appendChild(recordingCard(r)); });
+        }
+      }
+      head_.onclick = function () { setOpen(body.hidden); };
+      keyable(head_, "button", labelFor(k));
+      head_.setAttribute("aria-expanded", "false");
+      sec.appendChild(head_);
+      sec.appendChild(body);
+      wrap.appendChild(sec);
+    });
   };
 
   P.accounts = function (main, d) {
@@ -4752,13 +5372,61 @@
     main.appendChild(el("div", "banner",
       "<strong>" + num(creds.critical_count) + "</strong> critical and <strong>" + num(creds.informational_count) +
       "</strong> informational credential finding(s)."));
-    main.appendChild(el("h2", null, "Online accounts seen in mail"));
-    var tbl = el("table"); tbl.innerHTML = "<tr><th>Service</th><th>Messages</th><th>Example subject</th></tr>";
-    (d.domains || []).slice(0, 200).forEach(function (x) {
-      tbl.appendChild(el("tr", null, "<td>" + esc(x.domain) + "</td><td>" + num(x.count) + "</td><td class='preview'>" +
-        esc((x.sample_subjects || [])[0] || "") + "</td>"));
+    // The services list, replacing a flat table of raw sender domains. Two
+    // things changed. It is WIDER: the pipeline's inventory is built from the raw
+    // corpus and on this case held only social and newsletter domains, while every
+    // bank and brokerage the estate deals with sat unlisted in the mail. And it is
+    // CLICKABLE: a row opens that service's conversations.
+    //
+    // The count is the number of conversations the Emails page can actually open,
+    // not the pipeline's raw figure, because the row is a link and a link has to
+    // deliver what it promises. Those diverge a long way — triage discards bulk
+    // notification mail — so a service with hundreds of raw notifications can have
+    // a handful of readable threads, or none at all. Where none survive the row is
+    // NOT a link: an empty results page reads as a broken feature.
+    var services = d.services || [];
+    main.appendChild(el("h2", null, "Services found in the mail"));
+    main.appendChild(el("p", "eix-note",
+      num(services.length) + " services. A row opens that service's conversations. "
+      + "Found by looking for the kind of mail an account sends — sign-ins, "
+      + "security alerts, statements — so it is a strong hint rather than a "
+      + "certainty, and a service the owner never received such mail from will "
+      + "not appear."));
+    var stbl = el("table", "svc-table");
+    stbl.innerHTML = "<tr><th>Service</th><th>Conversations</th><th>Account mail</th><th></th></tr>";
+    services.forEach(function (x) {
+      var tr = el("tr");
+      var nameCell = el("td");
+      if (x.threads) {
+        var a = el("a", "svc-link", esc(x.service));
+        a.href = urlFor({ page: "emails", participant: x.service },
+                        { label: x.service });
+        nameCell.appendChild(a);
+      } else {
+        nameCell.appendChild(el("span", null, esc(x.service)));
+      }
+      if (x.from_pipeline) {
+        nameCell.appendChild(el("span", "svc-src", "inventory"));
+      }
+      tr.appendChild(nameCell);
+      tr.appendChild(el("td", "svc-n", x.threads ? num(x.threads) : "—"));
+      tr.appendChild(el("td", "svc-n", x.signals ? num(x.signals) : "—"));
+      // Say where the missing mail went rather than leaving a row that promises
+      // hundreds of messages and opens onto nothing.
+      var note = el("td", "svc-note");
+      if (!x.threads) {
+        note.textContent = x.filtered_out
+          ? "Its " + num(x.filtered_out) + " notification email"
+            + (x.filtered_out === 1 ? " was" : "s were")
+            + " filtered out of the readable mail as bulk — nothing to open."
+          : "Nothing readable in the mail.";
+      } else if (x.filtered_out) {
+        note.textContent = num(x.filtered_out) + " more filtered out as bulk.";
+      }
+      tr.appendChild(note);
+      stbl.appendChild(tr);
     });
-    main.appendChild(tbl);
+    main.appendChild(stbl);
     if ((creds.items || []).length) {
       main.appendChild(el("h2", null, "Credential documents"));
       if (creds.guidance) main.appendChild(el("p", "notice cred-guidance", esc(creds.guidance)));

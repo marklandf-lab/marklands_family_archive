@@ -174,6 +174,9 @@ so one fictional person has one identity in both repos.
 
 ### Blocked
 
+_Back-end and upstream items now live in **`BACKEND.md`** — the list for Richard.
+Add there, not here; this section keeps only what blocks the next UI session._
+
 - **GitHub has not purged the pre-rewrite commits.** Force-pushing moved the branch tips;
   it did not delete the objects. The old commits — and the real names and numbers in them
   — are still retrievable by SHA from **both** repos, because forks share an object store.

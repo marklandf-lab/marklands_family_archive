@@ -4997,3 +4997,68 @@ def test_email_participant_filter_follows_a_merge():
     # without the overlay the merged-away thread "b" is missed
     got = fa._filter_emails_by_participant(rows, {"participant": "ann@x.test"})
     assert sorted(r["thread_id"] for r in got) == ["a", "c", "d"]
+
+
+# ── conversation files whose names were mangled in transit ──────────────────
+
+def test_conversation_opens_when_its_filename_lost_a_character(tmp_path):
+    """Every conversation on 813_mf failed to open: ids carry a colon
+    ("imessage:3e61ffec470e") and a colon is illegal in a filename on Windows and
+    on SMB, so a case that reached the Mac through one arrived with all 569 files
+    carrying U+F022 where the colon should be. The list showed them; clicking any
+    of them returned "unknown conversation".
+
+    Reproduced here with the same substitution. Fails against main with a 404.
+    """
+    case, paths = setup_case(tmp_path)
+    _add_messages(paths)
+    mdir = paths.metadata_dir / "messages"
+    cid = "imessage:abc123def456"
+    (paths.metadata_dir / "conversation_index.json").write_text(json.dumps([
+        {"conversation_id": cid, "platform": "imessage", "participants": ["Sam"],
+         "display_name": "Sam", "span": ["2020-01-01 09:00", "2020-01-01 09:01"],
+         "message_count": 1, "chunk_count": 1, "call_event_count": 0,
+         "attachment_count": 0, "direction_counts": {"sent": 1, "received": 0},
+         "triage_verdict": "keep", "triage_reason": "bidirectional",
+         "sources": ["/orig/chat.db"]},
+    ]))
+    # the colon rewritten exactly as the delivered case has it
+    (mdir / ("imessageabc123def456.json")).write_text(json.dumps({
+        "conversation_id": cid, "platform": "imessage", "display_name": "Sam",
+        "messages": [{"ts": "2020-01-01 09:00", "direction": "sent", "text": "hi"}],
+    }))
+    case.load()
+    d = case.conversation_section(cid)
+    assert d["display_name"] == "Sam"
+    assert [m["text"] for m in d["messages"]] == ["hi"]
+
+
+def test_a_mangled_name_is_not_used_when_it_could_be_two_conversations(tmp_path):
+    """Matching on what survived the rewrite is only safe while it is unique.
+    Opening the wrong person's transcript is far worse than failing to open one,
+    so an ambiguous key resolves to nothing."""
+    case, paths = setup_case(tmp_path)
+    _add_messages(paths)
+    mdir = paths.metadata_dir / "messages"
+    cid = "imessage:dup999"
+    (paths.metadata_dir / "conversation_index.json").write_text(json.dumps([
+        {"conversation_id": cid, "platform": "imessage", "participants": ["X"],
+         "display_name": "X", "message_count": 1, "triage_verdict": "keep"},
+    ]))
+    # two different rewrites collapsing to the same readable part
+    for ch in ("", ""):
+        (mdir / f"imessage{ch}dup999.json").write_text(json.dumps(
+            {"conversation_id": cid, "messages": []}))
+    case.load()
+    with pytest.raises(fa.VerbError) as e:
+        case.conversation_section(cid)
+    assert e.value.code == 404
+
+
+def test_an_intact_filename_is_still_preferred(tmp_path):
+    """The exact name wins — the fallback must not reorder normal cases."""
+    case, paths = setup_case(tmp_path)
+    _add_messages(paths)
+    case.load()
+    d = case.conversation_section(CONV_ID)
+    assert [m["direction"] for m in d["messages"]] == ["sent", "received"]

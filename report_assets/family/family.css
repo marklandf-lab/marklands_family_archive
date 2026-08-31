@@ -1055,3 +1055,132 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
 .ebd-chip:hover { border-color: var(--accent); color: var(--accent); }
 .ebd-chip-n { font-family: var(--mono); font-size: 11px; color: var(--muted); }
 .ebd-chip:hover .ebd-chip-n { color: var(--accent); }
+
+/* Recordings, grouped by kind. The heading has to separate two rows that are
+   otherwise identical in weight, so it gets air above it and a rule. */
+.rec-kind { font-size: 15px; margin: 26px 0 10px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--line); }
+.reading > .rec-kind:first-child { margin-top: 4px; }
+/* What the classifier said, under the row it produced. Quiet and monospaced: it
+   is a provenance note for the examiner, not part of the recording's own text,
+   and it sits next to a summary it sometimes contradicts. */
+.rec-cat { font-family: var(--mono); font-size: 10.5px; letter-spacing: .03em;
+  color: var(--muted); margin-top: 6px; }
+
+/* Collapsed kind sections. Six rows you can read at a glance; the recordings
+   inside are built on first expand, so an unopened kind costs nothing. */
+.rec-sec + .rec-sec { margin-top: 6px; }
+.rec-sechead { display: flex; align-items: baseline; gap: 10px; cursor: pointer;
+  padding: 12px 14px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 9px; }
+.rec-sechead:hover { border-color: var(--accent); }
+.rec-sechead.open { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.rec-seclabel { font-family: var(--serif, inherit); font-size: 15px; font-weight: 600; }
+.rec-secn { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+/* Pushed to the far end so it reads as a separate act from expanding in place. */
+.rec-seconly { margin-left: auto; font-size: 12.5px; color: var(--accent);
+  text-decoration: none; }
+.rec-seconly:hover { text-decoration: underline; }
+.rec-secbody { border: 1px solid var(--line); border-top: 0;
+  border-radius: 0 0 9px 9px; padding: 4px 12px 12px; }
+
+/* ── Estate document report ────────────────────────────────────────────────
+   Meant to be printed and handed to somebody outside the review, so it reads as
+   a document rather than a screen: one column, generous leading, no colour
+   carrying meaning on its own. */
+.rep-stats { margin-bottom: 22px; }
+.rep-limits { background: var(--rail); border: 1px solid var(--line);
+  border-radius: 10px; padding: 14px 18px; margin: 0 0 26px; }
+.rep-limits h2 { font-size: 14px; margin: 0 0 8px; }
+.rep-limits ul { margin: 0; padding-left: 18px; }
+.rep-limits li { font-size: 13px; line-height: 1.55; margin-bottom: 6px; color: var(--ink); }
+.rep-group { margin-bottom: 28px; }
+.rep-group h2 { font-size: 16px; margin: 0 0 2px; }
+.rep-note { font-size: 12.5px; color: var(--muted); margin: 0 0 10px; }
+.rep-empty { font-size: 13px; color: var(--muted); font-style: italic; }
+.rep-table { width: 100%; border-collapse: collapse; }
+.rep-table th { text-align: right; font-family: var(--mono); font-size: 10px;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+  padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.rep-table th:first-child { text-align: left; }
+.rep-table td { padding: 8px 10px; font-size: 13.5px; text-align: right;
+  border-bottom: 1px solid var(--line); }
+.rep-table td:first-child { text-align: left; }
+.rep-cap { font-family: var(--mono); font-size: 9.5px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 8px; padding: 1px 6px; margin-left: 6px; }
+
+/* Print: this is the one view built to leave the screen. Drop the furniture,
+   keep a group and its table together, and spell out the cap marker — a
+   tooltip is worth nothing on paper. */
+@media print {
+  .rail, .pager, .actrow, .filterbar, .btn, .selbar, #toasts, .crumbs { display: none !important; }
+  body, .main { background: #fff; color: #000; }
+  .main { padding: 0; max-width: none; }
+  .rep-group { break-inside: avoid; }
+  .rep-limits { border: 1px solid #999; background: #fff; }
+  .rep-table td, .rep-table th { border-bottom: 1px solid #ccc; }
+  .rep-cap::after { content: " — retrieval reached its limit for this type"; }
+}
+
+/* Reports index + family report. */
+.rep-card { display: block; text-decoration: none; color: var(--ink); }
+.rep-card:hover { border-color: var(--accent); }
+.rep-card h2 { margin-bottom: 4px; }
+.rep-card:hover h2 { color: var(--accent); }
+/* The opening sentence of the family report — the one thing a reader should
+   take away if they read nothing else, so it is set larger than body copy. */
+.rep-span { font-size: 17px; line-height: 1.5; margin: 0 0 20px; color: var(--ink); }
+.rep-bars { background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 14px 18px; }
+.rep-row { cursor: default; }
+.rep-row:hover .eix-label { color: var(--ink); text-decoration: none; }
+@media print {
+  .rep-bars { border: 1px solid #ccc; }
+  .rep-span { font-size: 15px; }
+}
+
+/* The qualifier under "Not yet found" on the Overview's vital card. Quiet, but
+   it has to be readable — it is the sentence that stops the chips below it
+   being read as an absence the archive cannot support. */
+.ovnote { font-size: 12px; line-height: 1.45; color: var(--muted); margin: 2px 0 8px; }
+
+/* Online accounts: services found in the mail. */
+.svc-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+.svc-table th { text-align: right; font-family: var(--mono); font-size: 10px;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+  padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.svc-table th:first-child, .svc-table th:last-child { text-align: left; }
+.svc-table td { padding: 8px 10px; font-size: 13.5px; border-bottom: 1px solid var(--line); }
+.svc-n { text-align: right; font-family: var(--mono); font-size: 12.5px; }
+.svc-link { color: var(--ink); text-decoration: none; }
+.svc-link:hover { color: var(--accent); text-decoration: underline; }
+/* Which list a service came from — quiet, because it is provenance rather than
+   a property of the account. */
+.svc-src { font-family: var(--mono); font-size: 9.5px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 8px; padding: 1px 6px; margin-left: 8px; }
+.svc-note { font-size: 12px; color: var(--muted); }
+
+/* Pipeline report: the explanation row under each figure. It has to read as a
+   continuation of the row above, not a row in its own right, so it loses the
+   rule between them and is indented under the material name. */
+.pipe-table tr.pipe-note td { border-bottom: 1px solid var(--line);
+  padding: 0 10px 10px 10px; font-size: 12.5px; line-height: 1.5;
+  color: var(--muted); text-align: left; }
+.pipe-table tr:not(.pipe-note) td { border-bottom: 0; padding-bottom: 4px; }
+.pipe-list { margin: 6px 0 0; padding-left: 18px; }
+.pipe-list li { font-size: 13.5px; line-height: 1.55; margin-bottom: 8px; }
+
+/* Documents index: the estate branch, then the category branches. */
+.doc-estate { margin: 18px 0; }
+.doc-estate .vstats { margin: 10px 0 4px; }
+.doc-cats { margin-top: 22px; }
+.doc-cats h2 { font-size: 15px; margin: 0 0 2px; }
+/* A category with no sub-taxonomy gets a spacer where the caret would be, so
+   the names still line up — but not a caret, which would promise a level that
+   does not exist. */
+.vcaret-none { color: var(--line); }
+/* `display: flex` beats the [hidden] attribute's display:none, so the branches
+   rendered open. Scope the flex to the not-hidden state. */
+.doc-subs:not([hidden]) { display: flex; flex-wrap: wrap; gap: 6px; }
