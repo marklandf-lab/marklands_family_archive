@@ -242,7 +242,54 @@ adaptive per target.
 
 ---
 
-## 8. Five document categories have no sub-taxonomy at all
+## 8. Nothing can tell a handwritten note from a printed one
+
+**What.** The archive holds 1,221 photographs and screenshots OF documents —
+pictures of paper, browsable only under Document Photos. Some are handwritten
+notes. Nothing in the pipeline can say which.
+
+Four separate signals, and not one of them separates the two:
+
+* **CLIP** covers all 1,221, but its label is literally
+  `"scanned document or handwritten letter"` — a single category that merges the
+  distinction. It cannot split what it was never asked to separate.
+* **llava** (the vision model) ran on only **177 of the 1,221**, and **none** of
+  those 177 descriptions mentions handwriting, cursive or a pen.
+* **OCR never touched them.** Zero of the 1,221 appear in `ocr_index.json`, so
+  there is no text and no `text_kind`.
+* **`text_kind` exists and is the right field** — it is on every document row —
+  but it reads `"printed"` for all 4,643 documents in the index. Either the
+  handwriting detector never fires or it is not wired up. Worth checking on its
+  own account: a case with real handwritten letters would currently report none.
+
+Filenames do not rescue it either: 1,010 of the 1,221 are camera-roll UUIDs, so
+even the crude screenshot-versus-photograph split lands on only about a sixth.
+
+**What it costs.** Handwritten notes are among the most personal things in an
+estate, and they are the least findable — pooled into 1,221 undifferentiated
+thumbnails with no text, no summary and no way to filter.
+
+**The fix.** Cheapest first:
+
+* Run the OCR stage over the scanned images as well as the documents. It already
+  computes `text_kind`; it simply never sees these files.
+* Or split the CLIP label in two, so the classifier is at least asked the
+  question.
+* And check why `text_kind` is uniformly `printed` across the whole document
+  corpus — that looks like a detector that is not running.
+
+While in there: **llava descriptions exist for 177 of these images and are not
+surfaced anywhere.** Another case of the pipeline computing something nothing
+reads (see the pattern note below).
+
+**Check it:**
+```bash
+python3 -c "import json,os;md=os.path.expanduser('~/WyeastCases/813_mf/output/metadata/');ocr=json.load(open(md+'ocr_index.json'));from collections import Counter;print('text_kind across the OCR index:',Counter(e.get('text_kind') for e in ocr))"
+```
+
+---
+
+## 9. Five document categories have no sub-taxonomy at all
 
 **What.** `financial` and `legal` are second-passed into subcategories and their
 documents are delivered into folders. The other five — `creative_writing`,
@@ -271,7 +318,7 @@ curl -s localhost:7766/api/documents | python3 -c "import json,sys; [print('%-26
 
 ---
 
-## 9. Duplicate vital candidates each demand their own decision
+## 10. Duplicate vital candidates each demand their own decision
 
 **What:** the same document saved twice, and several byte-identical notification
 emails, arrive as separate candidates. Each needs its own sign-off, inflating the
@@ -283,7 +330,7 @@ stage does not consult it.
 
 ---
 
-## 10. Ranked conversations carry no link target
+## 11. Ranked conversations carry no link target
 
 **What:** items in the Overview's "Most significant" list have no
 `conversation_id`, so they cannot open their own transcript. The UI points at the
@@ -293,7 +340,7 @@ Messages section by name instead — honest, but a dead end for the reader.
 
 ---
 
-## 11. Two front-end fixes that should go back upstream
+## 12. Two front-end fixes that should go back upstream
 
 Both are merged here and are not upstream. Neither is urgent; both are small.
 
