@@ -83,7 +83,7 @@ from tools._archive_data import (  # noqa: E402
     tokenize, transcript_detail, video_rows, vital_docs_data, vital_doc_item_id,
     near_miss_rows, vital_doc_label, estate_report_data, family_report_data,
     account_services, _email_address, pipeline_report_data,
-    estate_relevance_data,
+    estate_relevance_data, estate_thread_map,
     quarantine_pager_items, vital_pager_items,
     junk_rows, transparency_data, guided_review_data,
     apply_face_overlay, resolve_merge, is_video_frame, SCENE_LABELS,
@@ -601,7 +601,14 @@ def _email_facets(rows, owner=(), merges=None):
             seen_here.add(a)
             people[a] += 1
             names.setdefault(a, _email_display_name(p))
+    estate = Counter()
+    for r in rows:
+        e = r.get("estate")
+        if e:
+            estate[e.get("kind")] += 1
     return {
+        "estate": [{"kind": k, "count": estate[k]}
+                   for k in ("candidate", "near_miss") if estate.get(k)],
         "bands": [{"n": n, "label": lab, "count": bands.get(n, 0)}
                   for n, lab in EMAIL_BANDS if bands.get(n, 0)],
         "categories": [{"name": k, "count": v} for k, v in cats.most_common()],
@@ -615,6 +622,18 @@ def _email_facets(rows, owner=(), merges=None):
         # visible rather than silently reshaping the list.
         "owner_addresses": sorted(owner),
     }
+
+
+def _filter_emails_estate(rows, params):
+    """?estate=candidate|near_miss|any — narrow to the conversations the estate
+    scan touched. 300 of 21,988 on this case, which is exactly why it earns a
+    filter rather than only a marker."""
+    want = _one(params, "estate")
+    if not want:
+        return rows
+    if want == "any":
+        return [r for r in rows if r.get("estate")]
+    return [r for r in rows if (r.get("estate") or {}).get("kind") == want]
 
 
 def _filter_emails_group(rows, params):
@@ -1194,6 +1213,17 @@ class ArchiveCase:
         return {"hits": hits, "total": total, "building": True}
 
     # ── data sections (thumbs/media are served live, so builders get no thumbs) ──
+    def _estate_threads(self):
+        """thread_id -> estate-scan marking, built once per process. ~0.06s, but
+        it is the same answer for every request against a generation."""
+        cached = getattr(self, "_estate_thread_cache", None)
+        if cached is None:
+            cached = estate_thread_map(
+                self.paths, self.decisions,
+                self.section("documents")["vital_docs"], self.role)
+            self._estate_thread_cache = cached
+        return cached
+
     def _email_owner(self, full_rows):
         """The owner-address guess, computed once per process against the full
         thread set. Cached because every Emails request needs it and the scan is
@@ -1494,8 +1524,16 @@ class ArchiveCase:
             # ?band=/?cat=/?year= are the index drill-down, layered the same way.
             full = apply_curation(self.section("emails"), curation, "thread_id")
             merges = (self.decisions or {}).get("correspondent_merges") or {}
+            # Which conversations the estate scan touched. Examiner-only: it is
+            # review state, and a family session has no use for "near miss".
+            estate = self._estate_threads() if self.role == "examiner" else {}
+            if estate:
+                for r in full:
+                    e = estate.get(str(r.get("thread_id") or ""))
+                    r["estate"] = e or None
             rows = _filter_emails_by_participant(full, params, merges)
             rows = _filter_emails_group(rows, params)
+            rows = _filter_emails_estate(rows, params)
             rows = _filter_emails_search(rows, params)
             page = _paginate(rows, offset, limit)
             # Facets come from the FILTERED set, not the page slice: on the index

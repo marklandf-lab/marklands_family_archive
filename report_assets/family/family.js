@@ -324,7 +324,7 @@
      // the reader last had open, so a link into a group is fully addressable.
      "band", "year", "by", "sort",
      // Recordings: which audio kind is being shown. Reports: which report.
-     "kind", "r", "view"].forEach(function (k) {
+     "kind", "r", "view", "estate"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -385,7 +385,7 @@
      // existed, with the consequence this comment describes: choosing a sort and
      // then touching any other control dropped it from the URL, so a reload or a
      // shared link lost it. `by` is the open break-down tab.
-     "band", "year", "by", "sort", "kind", "r", "view",
+     "band", "year", "by", "sort", "kind", "r", "view", "estate",
      "group", "target", "list", "crumb", "from"]
       .forEach(function (k) { if (Q[k]) q.push(k + "=" + encodeURIComponent(Q[k])); });
     return location.pathname + (q.length ? "?" + q.join("&") : "");
@@ -4381,7 +4381,15 @@
       + (EXAMINER ? "<th></th>" : "") + "</tr>";
     rows.forEach(function (r) {
       var tr = el("tr", "clickable");
-      tr.innerHTML = "<td>" + esc(r.subject) + " " + sig(r.significance) +
+      // The estate scan touched 300 of 21,988 conversations. The checklist could
+      // already reach a thread; the thread could not tell you it was on the
+      // checklist. This is that missing direction, said on the row itself.
+      var est = r.estate
+        ? ' <span class="est-chip ' + (r.estate.kind === "candidate" ? "cand" : "near")
+          + '" title="' + esc((r.estate.labels || []).join(", "))
+          + '">' + (r.estate.kind === "candidate" ? "estate candidate" : "near miss")
+          + "</span>" : "";
+      tr.innerHTML = "<td>" + esc(r.subject) + " " + sig(r.significance) + est +
         "</td><td class='preview clamp2'>" + recipients(r.participants) +
         "</td><td class='preview'>" + esc((r.date_last || "").slice(0, 10)) +
         "</td><td>" + num(r.message_count) + "</td>" +
@@ -4425,6 +4433,13 @@
                  q: { cat: c.name }, crumb: emailCatLabel(c.name) };
       }) });
     }
+    if (!Q.estate && (facets.estate || []).length) {
+      dims.push({ key: "estate", label: "Estate", items: facets.estate.map(function (e) {
+        var lab = e.kind === "candidate" ? "Candidate for a vital document"
+                                         : "Weaker match (near miss)";
+        return { label: lab, count: e.count, q: { estate: e.kind }, crumb: lab };
+      }) });
+    }
     dims = dims.filter(function (d) { return d.items.length > 1; });
     if (!dims.length) return;
 
@@ -4463,8 +4478,8 @@
   // replacing (picking a year inside "Major life events" must keep the band).
   function mergeQ(extra) {
     var out = { page: "emails" };
-    ["band", "cat", "year", "participant", "q", "date_from", "date_to", "sort"]
-      .forEach(function (k) { if (Q[k]) out[k] = Q[k]; });
+    ["band", "cat", "year", "participant", "q", "date_from", "date_to", "sort",
+     "estate"].forEach(function (k) { if (Q[k]) out[k] = Q[k]; });
     Object.keys(extra || {}).forEach(function (k) { out[k] = extra[k]; });
     return out;
   }
@@ -4491,6 +4506,10 @@
         var who = ((facets || {}).correspondents || []).filter(function (c) {
           return c.address === active.participant; })[0];
         parts.push("with " + ((who && who.name) || active.participant));
+      }
+      if (Q.estate) {
+        parts.push(Q.estate === "candidate" ? "estate candidates"
+                                            : "estate near misses");
       }
       return parts.length ? parts.join(" · ") : "All emails";
     }
@@ -4529,6 +4548,7 @@
         ["band", "cat", "year", "participant"].forEach(function (k) {
           if (active[k]) p[k] = active[k];
         });
+        if (Q.estate) p.estate = Q.estate;
         if (search.value) p.q = search.value;
         if (dFrom.value) p.date_from = dFrom.value;
         if (dTo.value) p.date_to = dTo.value;
@@ -4579,7 +4599,7 @@
       cat: Q.cat || "", year: Q.year || "", participant: Q.participant || "",
     };
     var narrowed = !!(active.band || active.cat || active.year || active.participant
-                      || Q.q || Q.date_from || Q.date_to || Q.sort);
+                      || Q.q || Q.date_from || Q.date_to || Q.sort || Q.estate);
     if (narrowed) return emailGroup(main, data, active);
     return emailIndex(main, data);
   };

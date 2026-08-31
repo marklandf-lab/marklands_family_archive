@@ -5062,3 +5062,25 @@ def test_an_intact_filename_is_still_preferred(tmp_path):
     case.load()
     d = case.conversation_section(CONV_ID)
     assert [m["direction"] for m in d["messages"]] == ["sent", "received"]
+
+
+def test_email_estate_filter_and_facet():
+    rows = [{"thread_id": "a", "estate": {"kind": "candidate", "labels": ["Will"]}},
+            {"thread_id": "b", "estate": {"kind": "near_miss", "labels": ["Deed"]}},
+            {"thread_id": "c", "estate": None},
+            {"thread_id": "d"}]
+    ids = lambda rs: sorted(r["thread_id"] for r in rs)
+    assert ids(fa._filter_emails_estate(rows, {"estate": "candidate"})) == ["a"]
+    assert ids(fa._filter_emails_estate(rows, {"estate": "near_miss"})) == ["b"]
+    assert ids(fa._filter_emails_estate(rows, {"estate": "any"})) == ["a", "b"]
+    # no filter leaves the set alone rather than emptying it
+    assert ids(fa._filter_emails_estate(rows, {})) == ["a", "b", "c", "d"]
+    f = fa._email_facets(rows)
+    assert f["estate"] == [{"kind": "candidate", "count": 1},
+                           {"kind": "near_miss", "count": 1}]
+
+
+def test_email_facets_omit_estate_when_nothing_is_marked():
+    """A family session gets no estate marking at all, so the break-down must not
+    offer an empty dimension."""
+    assert fa._email_facets([{"thread_id": "a"}, {"thread_id": "b"}])["estate"] == []
