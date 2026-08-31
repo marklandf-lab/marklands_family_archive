@@ -58,6 +58,66 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-08-31 (evening) — email categorisation, and where the boundaries are
+
+Everything through **PR #12** is merged. No open PRs, nothing unpushed.
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+**Ask what "polish" means.** It has been requested three times and never
+specified. Do not guess — spacing, wording and table density are all plausible
+and only one of them is what was wanted.
+
+### What shipped this evening
+
+- **Documents and Emails now say what each contains.** They had opposite
+  inclusion rules and neither admitted it: the document list drops all 55,115
+  emails, while the estate checklist ON that page searches them. So an email can
+  be a *Will / testament* candidate on Documents and appear nowhere in the list
+  below it. Both pages now say so.
+- **An email can say it is on the estate checklist.** 300 of 21,988 threads —
+  31 candidates, 269 near misses. Row chip, `?estate=candidate|near_miss|any`,
+  and Estate in the break-down. Examiner-only.
+- **Estate-rescued mail is marked.** 4,759 threads that triage discarded and the
+  estate keywords pulled back. The family index does not contain them, so a
+  reviewer reading one is reading mail that will never reach the family.
+  `?rescued=1`, Audience in the break-down.
+
+### Email cuts NOT built — measured, ready to pick up
+
+Everything below is derivable from data already on the thread rows:
+
+- **`linked_by`** — 1,015 threads were assembled by *guessing*: same subject
+  within a 14-day window, rather than real mail headers (8,720 by headers,
+  12,253 single messages). Those 1,015 may not be real threads. A data-quality
+  cut rather than a browsing one, but it is the field that explains a
+  conversation that looks wrong.
+- **Conversation size** — 16,349 one-to-one against 5,639 group.
+- **Thread length** — 12,253 single messages, 7,924 short (2–5), 1,811 long (6+).
+
+Both of the last two are real but weak: they say little about what a thread *is*.
+
+**Not available without pipeline work:** attachments. Thread rows carry no
+attachment field at all — only 41 of 21,988 records mention one anywhere — so
+"emails with attachments" cannot be built here.
+
+### Still open
+
+- **Polish.** Ask.
+- The **27-type checklist** sits at `/documents?view=vital`, one click in from the
+  Documents index. Put it back on the landing page if it grates in use.
+- A few **Document Photos thumbnails** fail to render and fall back to the
+  filename, mostly `.heic` and `.png`. Pre-existing; not investigated.
+- **BACKEND.md** is the pipeline list, current through today. A copy for the
+  upstream maintainer is in the shared Google Drive folder — ask the user for the
+  link, it changes on every edit.
+
+---
+
 ## 🎯 2026-08-31 — Reports, Documents index, audio kinds, accounts, Messages, and the sign-offs cleared
 
 **Everything is merged.** PRs #5, #6, #7 and #8 are all in `main`. No open PRs, no
