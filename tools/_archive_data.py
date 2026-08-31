@@ -1577,6 +1577,75 @@ def family_report_data(*, counts, scene_counts, audio_rows_, document_index,
     }
 
 
+def estate_relevance_data(vital_docs, paths, summary, decisions=None):
+    """How much of the material the estate scan actually flagged, split by where
+    it came from.
+
+    Two numbers per row and both are needed. DECISIONS is the review workload:
+    one document can be a candidate for several document types and each pairing
+    needs its own answer. DOCUMENTS is how many distinct things there really are.
+    Reporting only the first overstates the corpus; only the second understates
+    the work. On 813_mf that is 1,147 near-miss decisions over 755 documents.
+
+    Email vs document is decided by the same test the checklist uses — presence
+    in the browsable document classifications — rather than by resolving each
+    item's thread, which is the expensive half of near_miss_rows and tells us
+    nothing extra here.
+
+    Candidates are read off the ALREADY-BUILT vital_docs payload rather than the
+    confirmed file, because that payload has the examiner's decisions folded in.
+    Counting the raw file instead reports 223 where the screen shows 183 — the
+    difference being documents somebody has since dismissed — and a report that
+    disagrees with the screen it describes is worse than no report.
+    """
+    md = paths.metadata_dir
+    confirmed = load_json(md / "vital_doc_confirmed.json", None)
+    candidates = load_json(md / "vital_doc_candidates.json", None)
+    if not (vital_docs or {}).get("available") and confirmed is None and candidates is None:
+        return {"available": False}
+    confirmed = confirmed if isinstance(confirmed, list) else []
+    candidates = candidates if isinstance(candidates, dict) else {}
+
+    browsable = set()
+    for d in (summary or {}).get("document_classifications", []) or []:
+        if (d.get("source") or "").lower() == "email":
+            continue
+        f = d.get("file")
+        if f:
+            browsable.add(f)
+
+    def tally(pairs):
+        """pairs: iterable of (target, path)."""
+        rows = docs = 0
+        seen, seen_mail = set(), set()
+        mail_rows = 0
+        for _t, path in pairs:
+            if not path:
+                continue
+            rows += 1
+            seen.add(path)
+            if path not in browsable:
+                mail_rows += 1
+                seen_mail.add(path)
+            else:
+                docs += 1
+        return {"decisions": rows, "documents": len(seen),
+                "from_mail_decisions": mail_rows, "from_mail_documents": len(seen_mail)}
+
+    cand_pairs = [(t.get("target"), i.get("path"))
+                  for t in (vital_docs or {}).get("targets", []) or []
+                  for i in (t.get("items") or [])]
+    near_pairs = []
+    for target in candidates:
+        for hit in _near_miss_hits(candidates, confirmed, decisions, target):
+            near_pairs.append((target, hit.get("path") if isinstance(hit, dict) else hit))
+
+    return {"available": True,
+            "candidates": tally(cand_pairs),
+            "near_misses": tally(near_pairs),
+            "per_target_k": (vital_docs or {}).get("per_target_k")}
+
+
 # ── pipeline report: what was examined, and what reached the archive ─────────
 
 def _pct(part, whole):
@@ -1645,8 +1714,8 @@ def _elapsed_words(first, last):
     return "%d minute%s" % (mins, "" if mins == 1 else "s")
 
 
-def pipeline_report_data(*, summaries, counts, sizes=None, case_id=None,
-                         generated_at=None):
+def pipeline_report_data(*, summaries, counts, sizes=None, relevance=None,
+                         case_id=None, generated_at=None):
     """What the pipeline went through to produce this archive.
 
     A different question again from the other two reports: not "do we hold the
@@ -1768,6 +1837,31 @@ def pipeline_report_data(*, summaries, counts, sizes=None, case_id=None,
         },
         "run": {"first": first, "last": last, "elapsed": _elapsed_words(first, last),
                 "stages": stages},
+        # How much of the surfaced material the estate scan actually flagged.
+        # Shares are taken against KEPT MESSAGES, not conversations: these counts
+        # are individual emails, and a conversation is a group of them, so the
+        # conversation total is the wrong denominator by a unit.
+        "estate": _estate_reach(relevance, mail_kept, mail_found),
+    }
+
+
+def _estate_reach(relevance, mail_kept, mail_examined):
+    """The estate-scan funnel, ready to render, or None when the scan never ran."""
+    if not (relevance or {}).get("available"):
+        return None
+    cand = relevance.get("candidates") or {}
+    near = relevance.get("near_misses") or {}
+    return {
+        "candidates": cand,
+        "near_misses": near,
+        "mail_denominator": mail_kept or mail_examined or 0,
+        "mail_denominator_label": "messages kept as worth reading"
+                                  if mail_kept else "messages examined",
+        "candidate_mail_share": _pct(cand.get("from_mail_documents") or 0,
+                                     mail_kept or mail_examined),
+        "near_mail_share": _pct(near.get("from_mail_documents") or 0,
+                                mail_kept or mail_examined),
+        "per_target_k": relevance.get("per_target_k"),
     }
 
 

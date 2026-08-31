@@ -83,6 +83,7 @@ from tools._archive_data import (  # noqa: E402
     tokenize, transcript_detail, video_rows, vital_docs_data, vital_doc_item_id,
     near_miss_rows, vital_doc_label, estate_report_data, family_report_data,
     account_services, _email_address, pipeline_report_data,
+    estate_relevance_data,
     quarantine_pager_items, vital_pager_items,
     junk_rows, transparency_data, guided_review_data,
     apply_face_overlay, resolve_merge, is_video_frame, SCENE_LABELS,
@@ -1444,6 +1445,9 @@ class ArchiveCase:
                     summaries=self._stage_summaries(),
                     counts=(self.section("overview").get("counts") or {}),
                     sizes=self._output_sizes(),
+                    relevance=estate_relevance_data(
+                        self.section("documents")["vital_docs"],
+                        self.paths, self.summary, self.decisions),
                     case_id=self.paths.case_id, generated_at=when)
             return self.section("reports")
         if name == "overview":

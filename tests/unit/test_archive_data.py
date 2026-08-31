@@ -2991,3 +2991,43 @@ def test_pipeline_report_reading_figures():
     assert rep["reading"] == {"documents_read": 55, "text_recovered": 40,
                               "audio_hours": 2.0}
     assert rep["expansion"]["files_added"] == 300
+
+
+def test_pipeline_report_estate_reach_uses_messages_not_conversations():
+    """These counts are individual emails; a conversation is a group of them, so
+    the conversation total is the wrong denominator by a unit."""
+    rel = {"available": True, "per_target_k": 25,
+           "candidates": {"decisions": 10, "documents": 8,
+                          "from_mail_decisions": 4, "from_mail_documents": 3},
+           "near_misses": {"decisions": 100, "documents": 60,
+                           "from_mail_decisions": 40, "from_mail_documents": 30}}
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS,
+                                  relevance=rel)
+    est = rep["estate"]
+    assert est["mail_denominator"] == 600, "kept messages, not the 250 conversations"
+    assert est["mail_denominator_label"] == "messages kept as worth reading"
+    assert est["candidate_mail_share"] == 0.5   # 3 of 600
+    assert est["near_mail_share"] == 5.0        # 30 of 600
+
+
+def test_pipeline_report_estate_reach_absent_when_the_scan_never_ran():
+    rep = ad.pipeline_report_data(summaries=_pipe_summaries(), counts=_PIPE_COUNTS,
+                                  relevance={"available": False})
+    assert rep["estate"] is None
+    assert ad.pipeline_report_data(summaries={}, counts={})["estate"] is None
+
+
+def test_estate_relevance_counts_decisions_and_documents_apart(tmp_path):
+    """One document can be a candidate for several types. Reporting only the
+    pairings overstates the corpus; only the documents understates the work."""
+    paths, summary = _vital_case(tmp_path)
+    vd = {"available": True, "per_target_k": 25, "targets": [
+        {"target": "will_testament", "items": [{"path": "/d/will.pdf"},
+                                               {"path": "/m/deed.eml"}]},
+        {"target": "deed_title", "items": [{"path": "/d/will.pdf"}]},
+    ]}
+    rel = ad.estate_relevance_data(vd, paths, summary, {})
+    c = rel["candidates"]
+    assert (c["decisions"], c["documents"]) == (3, 2)
+    # the .eml is not a browsable document, so it counts as mail
+    assert (c["from_mail_decisions"], c["from_mail_documents"]) == (1, 1)

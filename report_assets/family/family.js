@@ -4895,6 +4895,49 @@
     work.appendChild(wl);
     main.appendChild(work);
 
+    // How much of all that mattered to the estate. This is the answer to "you
+    // surfaced 21,988 conversations — so what?", and it is a startlingly small
+    // number, which is the point of showing it.
+    var est = d.estate;
+    if (est) {
+      var esec = el("section", "rep-group");
+      esec.appendChild(el("h2", null, "How much of it mattered to the estate"));
+      var et = el("table", "rep-table");
+      et.innerHTML = "<tr><th>&nbsp;</th><th>Decisions</th><th>Documents</th>"
+        + "<th>Of those, emails</th></tr>";
+      [["Candidates for a vital document", est.candidates],
+       ["Weaker matches (near misses)", est.near_misses]].forEach(function (pair) {
+        var r = pair[1] || {};
+        var tr = el("tr");
+        tr.innerHTML = "<td>" + esc(pair[0]) + "</td><td>" + num(r.decisions)
+          + "</td><td>" + num(r.documents) + "</td><td>"
+          + num(r.from_mail_documents) + "</td>";
+        et.appendChild(tr);
+      });
+      esec.appendChild(et);
+      // Two units in one table, so both get named rather than left to be
+      // inferred: one document can be a candidate for several types and each
+      // pairing is its own decision.
+      esec.appendChild(el("p", "rep-note",
+        "A document can be a candidate for more than one type, and each pairing "
+        + "needs its own answer — so the decisions outnumber the documents. "
+        + "Only " + num((est.candidates || {}).from_mail_documents)
+        + " emails became candidates and "
+        + num((est.near_misses || {}).from_mail_documents)
+        + " more were weaker matches: "
+        + (est.candidate_mail_share == null ? "—"
+           : esc(est.candidate_mail_share + "%")) + " and "
+        + (est.near_mail_share == null ? "—" : esc(est.near_mail_share + "%"))
+        + " of the " + num(est.mail_denominator) + " "
+        + esc(est.mail_denominator_label) + ". The share is taken against "
+        + "messages rather than conversations, because these counts are "
+        + "individual emails and a conversation is a group of them."
+        + (est.per_target_k
+           ? " Retrieval stopped at " + num(est.per_target_k)
+             + " candidates per document type, so both figures are a floor." : "")));
+      main.appendChild(esec);
+    }
+
     var ssec = el("section", "rep-group");
     ssec.appendChild(el("h2", null, "Size on disk"));
     ssec.appendChild(el("p", "rep-note",
