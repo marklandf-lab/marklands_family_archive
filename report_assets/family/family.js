@@ -3984,9 +3984,17 @@
 
     var csec = el("section", "doc-cats");
     csec.appendChild(el("h2", null, "By category"));
+    // The two panels on this page have OPPOSITE inclusion rules and nothing said
+    // so. The classifier tagged 59,758 items — 55,115 of them emails — and this
+    // list drops every one, or the page would be 92% email. The estate checklist
+    // above does not drop them, because a will written in an email is still the
+    // will. Both choices are right; the silence between them is what confuses.
     csec.appendChild(el("p", "eix-note",
-      "How the pipeline filed each document. Where it also sorted a category "
-      + "into subcategories, they open here."));
+      "How the pipeline filed each document. Emails are not here — they have "
+      + "their own section, and including them would leave this page almost "
+      + "entirely email. The estate checklist above does search them, so a "
+      + "conversation can be a candidate for a vital document without ever "
+      + "appearing in this list."));
     index.forEach(function (c) { docCatRow(csec, c); });
     main.appendChild(csec);
   }
@@ -4304,6 +4312,12 @@
     head(main, "Emails", "Emails",
       num(total) + " conversations. Pick a way in — every count below is the whole "
       + "archive, not a page of it.");
+    // Said from this side too, because the boundary is invisible from either one.
+    main.appendChild(el("p", "eix-note",
+      "This is the mail. Files that arrived as documents are in Documents, and "
+      + "an email is never listed there — but the estate checklist on that page "
+      + "does search this mail, so a conversation here can also be a candidate "
+      + "for a vital document."));
 
     var wrap = el("div", "eix-cols"); main.appendChild(wrap);
     wrap.appendChild(emailIndexPanel(
