@@ -219,7 +219,12 @@ PAGES = [
     ("timeline", "Timeline", "heirloom"),
     ("places", "Places", "heirloom"),
     ("documents", "Documents", "heirloom"),
-    ("correspondence", "Correspondence", "heirloom"),
+    # Renamed from "Correspondence". The section's own content is 1,221
+    # photographs and screenshots OF documents — pictures of paper from the photo
+    # pipeline, which Photos excludes for being documents and Documents excludes
+    # for being photographs. Naming it after the letters it used to duplicate hid
+    # the only thing it uniquely holds.
+    ("correspondence", "Document Photos", "heirloom"),
     ("emails", "Emails", "heirloom"),
     ("correspondents", "Correspondents", "heirloom"),
     ("messages", "Messages", "heirloom"),

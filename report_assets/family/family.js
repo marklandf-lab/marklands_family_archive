@@ -4058,74 +4058,70 @@
     return documentsIndex(main, data);
   };
 
+  // ── Document photos (was "Correspondence") ──
+  // The old section stapled two unrelated things together and named itself after
+  // the smaller one. Its "typed" list was an EXACT duplicate of Documents →
+  // Personal correspondence — the same 111 files, byte for byte — while its real
+  // content was 1,221 photographs and screenshots OF documents: pictures of
+  // paper, produced by the photo pipeline, carrying no extracted text.
+  //
+  // Those images are the reason this page has to exist. They are excluded from
+  // Photos for being documents ("photo universe: … excluded 1,221 scanned
+  // documents") and absent from Documents for being photographs, so this is the
+  // only place in the archive they can be seen at all. The duplicated letters
+  // now link to where they are actually filed instead of being listed twice.
   P.correspondence = function (main, d) {
     var typed = d.typed || [], hand = d.handwritten || [];
-    var scanned = d.scanned || { rows: [], total: 0 };   // paginated envelope (F-3)
+    var scanned = d.scanned || { rows: [], total: 0 };
     var scannedTotal = scanned.total || 0;
-    var controls = head(main, "Correspondence", "Correspondence",
-      typed.length + " typed · " + hand.length + " handwritten · " + num(scannedTotal) + " scanned.");
-    // Modality dropdown in the sticky controls (#10): shows/hides the groups.
-    var opts = [["typed", "Typed", typed.length], ["handwritten", "Handwritten", hand.length],
-                ["scanned", "Scanned letters & documents", scannedTotal]].filter(function (o) { return o[2]; });
-    var sel = el("select");
-    sel.appendChild(new Option("All", ""));
-    opts.forEach(function (o) { sel.appendChild(new Option(o[1] + " (" + num(o[2]) + ")", o[0])); });
-    sel.value = Q.modality || (opts.length ? opts[0][0] : "");  // restore, else first non-empty
-    controls.appendChild(el("span", "flabel", "View")); controls.appendChild(sel);
+
+    var controls = head(main, "Document Photos", "Document photos",
+      num(scannedTotal) + " photographs and screenshots of documents and letters.");
+    main.appendChild(el("p", "eix-note",
+      "Pictures of paper, rather than files the archive could read. They come "
+      + "from the photographs rather than the documents, so they carry no "
+      + "extracted text and no summary — and because they are set aside from "
+      + "Photos for being documents, and absent from Documents for being "
+      + "photographs, this page is the only place they appear."));
+
+    // The letters that used to be listed here are filed as documents. Point at
+    // them rather than printing the same rows a second time under a second name.
+    if (typed.length || hand.length) {
+      var note = el("p", "eix-note");
+      note.appendChild(document.createTextNode(
+        num(typed.length + hand.length) + " written letters and cards are filed "
+        + "with the documents, because that is what they are. "));
+      var a_ = el("a", null, "Open them under Documents →");
+      a_.href = urlFor({ page: "documents", cat: "personal_correspondence" },
+                       { label: "Personal correspondence" });
+      note.appendChild(a_);
+      main.appendChild(note);
+    }
+
+    if (!scannedTotal) {
+      main.appendChild(el("p", "notice", "No photographed documents in this archive."));
+      return;
+    }
 
     var holder = el("div"); main.appendChild(holder);
-    // Each group builds ONCE into its own section; the modality selector toggles
-    // visibility (so the scanned Load-more state survives a modality switch).
-    var secTyped = null, secHand = null, secScan = null;
-    if (typed.length) {
-      secTyped = el("div", "corr-sec"); secTyped.appendChild(el("h2", null, "Typed (" + num(typed.length) + ")"));
-      fileTable(secTyped, typed); holder.appendChild(secTyped);
-    }
-    if (hand.length) {
-      secHand = el("div", "corr-sec"); secHand.appendChild(el("h2", null, "Handwritten (" + num(hand.length) + ")"));
-      fileTable(secHand, hand); holder.appendChild(secHand);
-    }
-    if (scannedTotal) {
-      secScan = el("div", "corr-sec"); secScan.appendChild(el("h2", null, "Scanned letters & documents (" + num(scannedTotal) + ")"));
-      // #19: drag-select over the scanned grid, same infra as the Photos page
-      // (marqueeSelect + the shared selbar batch banner) — previously an
-      // examiner could only act one scanned image at a time.
-      var scanCtrls = el("div", "controls"); secScan.appendChild(scanCtrls);
-      var scanGrid = el("div"); secScan.appendChild(scanGrid);
-      if (EXAMINER) marqueeSelect(scanCtrls, scanGrid, ".card", selPick);
-      // correspondence's Load-more refetches the full payload; the paginated rows
-      // live under `.scanned`, so the pager unwraps that sub-envelope.
-      var scanCtrl = null;
-      var pg = pager("/api/correspondence", {
-        unwrap: function (resp) { return resp.scanned || resp; },
-        // Reuse one virtualized grid across Load-more pages: extend the set in place
-        // instead of tearing down and rebuilding (keeps scroll, F-4/F-8).
-        render: function (all) {
-          if (scanCtrl) scanCtrl.setRows(all); else scanCtrl = photoGrid(scanGrid, all);
-        },
-      });
-      secScan.appendChild(pg.footer);
-      pg.seed(d);   // d is the full correspondence payload; unwrap picks .scanned
-      holder.appendChild(secScan);
-    }
-    function applyModality() {
-      var pick = sel.value;
-      [[secTyped, "typed"], [secHand, "handwritten"], [secScan, "scanned"]].forEach(function (pair) {
-        if (pair[0]) pair[0].style.display = (!pick || pick === pair[1]) ? "" : "none";
-      });
-      // The scanned grid may have been built while hidden (0-width) if another
-      // modality was active — re-measure/re-window now that it's visible.
-      if (secScan && secScan.style.display !== "none" && scanCtrl) scanCtrl.refresh();
-    }
-    sel.onchange = function () { setQ({ modality: sel.value }); applyModality(); };
-    applyModality();
-    if (!typed.length && !hand.length && !scannedTotal) holder.appendChild(el("p", "notice", "No correspondence in this case."));
+    var sec = el("div", "corr-sec"); holder.appendChild(sec);
+    var scanCtrls = el("div", "controls"); sec.appendChild(scanCtrls);
+    var scanGrid = el("div"); sec.appendChild(scanGrid);
+    if (EXAMINER) marqueeSelect(scanCtrls, scanGrid, ".card", selPick);
+    // The scanned images live under `.scanned` in the payload, so the pager
+    // unwraps that sub-envelope. photoGrid is stateful — build once, then feed
+    // it rows — so a Load-more does not rebuild the grid under the reader.
+    var scanCtrl = null;
+    var pg = pager("/api/correspondence", {
+      unwrap: function (resp) { return resp.scanned || resp; },
+      render: function (all) {
+        if (scanCtrl) scanCtrl.setRows(all); else scanCtrl = photoGrid(scanGrid, all);
+      },
+    });
+    sec.appendChild(pg.footer);
+    pg.seed(d);   // the full payload; unwrap picks .scanned out of it
   };
 
-  // Examiner toggle: demote a thread out of the top of the significance sort (it
-  // drops to the bottom band, stays visible) or restore it. Single-item → no
-  // confirm; reversible from History. The server verb toggles, so it's safe even
-  // if the row's demoted flag is briefly stale.
   function emailDemoteBtn(r) {
     var b = el("button", "btn small" + (r.demoted ? " primary" : ""), r.demoted ? "Restore" : "Demote");
     b.title = r.demoted ? "Restore to its ranked position" : "Remove from top of the sort";
