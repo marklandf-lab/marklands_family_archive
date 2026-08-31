@@ -67,39 +67,67 @@ python3 -c "import os;d=os.path.expanduser('~/WyeastCases/813_mf/output/metadata
 
 ---
 
-## 3. Audio classification is unreliable, and this corpus is why
+## 3. The audio classifier ignores an acoustic signal the pipeline already has
 
-**What.** Every recording carries a classifier category. Measured 31 Aug 2026:
-of the 47 recordings that exist as the same audio in two file formats, **17
-(36%) got a different category for each copy**; and **all 26 recordings
-classified as "voicemail" are, on inspection, songs.**
+_Corrected 31 Aug 2026. An earlier version of this item said the missing signal
+was acoustic. It is not missing — it was computed and never consulted._
 
-**Why it is hard.** Much of this audio is *practice recordings* — takes of songs
-with a lot of banter before, during and after. A transcript of one reads like
-people talking, because people are talking. A classifier reasoning from
-transcript text alone cannot tell a rehearsal from a conversation, and no amount
-of prompt tuning will fix that. Treat it as a corpus shape the pipeline has not
-met before, not a regression.
+**What.** Each recording's category comes from `llama3.1:8b` reading the
+transcript. Two measurements: of the 47 recordings that exist as the same audio
+in two file formats, **17 (36%) got a different category for each copy**; and
+**all 26 recordings filed as "voicemail" are, on inspection, songs.**
 
-**What it breaks.** The Recordings section groups by this category, so the
-grouping inherits the error. A "Voicemail" group promises someone's actual
-voice — often the voice of the person who died — and holding songs instead is
-worse than no grouping. Separately, `non_speech` is not a content judgment: its
-members are exactly the set with no transcript, so it reports a transcription
-outcome while sitting among content types.
+**Why the transcript cannot settle it.** Much of this audio is *practice
+recordings* — takes of songs with a lot of banter before, during and after. A
+transcript of one reads like people talking, because people are talking. No
+amount of prompt tuning separates a rehearsal from a conversation on text alone.
 
-**The fix.** The missing signal is acoustic, not textual — music detection,
-harmonicity, beat regularity would settle most of it before the transcript is
-consulted. Two cheap wins needing no new model: classify once per *recording*
-rather than per file so two encodings cannot disagree; and make "nothing was
-transcribed" a flag rather than a category.
+**The signal already exists.** The `audio_events` stage runs `panns-cnn14` over
+every recording and writes per-file labels to
+`output/metadata/audio_events_index.json` — 1,051 of 1,051 have them on this
+case. **All 26 of the mislabelled voicemails carry "Music" as their top acoustic
+label, scoring 0.76 to 0.98.** The pipeline knew. Nothing asked it.
 
-**Check it:**
+On a crude comparison of those stored labels (best music-ish score against
+Speech), **456 recordings the LLM filed as speech carry music-dominant audio** —
+including 339 of 408 voice memos and 87 of 121 personal recordings. That crude
+rule is not being proposed as the rule; the point is that two signals disagree
+on a large fraction of the collection and only one of them is read.
+
+**The fix.** Have the audio classification consult
+`audio_events_index.json`. No new model, no new stage, no re-encoding — the
+compute is already spent and the answers are already on disk. How to combine
+them is yours to design; a floor where a strong music label vetoes a speech
+category would fix the visible damage.
+
+Still worth doing alongside it:
+
+* Classify once per *recording* rather than per file, so two encodings cannot
+  disagree with each other.
+* Make "nothing was transcribed" a flag rather than a category. `non_speech` is
+  exactly the set with no transcript — it reports a transcription outcome while
+  sitting among content types, and holds 173 acoustically music-dominant files.
+
+**Check it.** The two files record different path roots (the case was
+relocated), so this joins them on filename; a handful of recordings share a
+basename, which moves the totals by one or two. Enough to see the shape, not to
+quote to the decimal:
 ```bash
-curl -s localhost:7766/api/recordings | python3 -c "import json,sys,re; from collections import defaultdict; rows=json.load(sys.stdin); g=defaultdict(set); [g[re.sub(r'\.[^.]+$','',r['name']).lower()].add(r['category']) for r in rows]; print('same audio, two formats, two answers:', len([k for k,v in g.items() if len(v)>1]))"
+python3 - <<'PY'
+import json,os
+from collections import Counter,defaultdict
+md=os.path.expanduser('~/WyeastCases/813_mf/output/metadata/')
+ev={os.path.basename(r['file']):{l['label']:l['score'] for l in r.get('top_labels') or []}
+    for r in json.load(open(md+'audio_events_index.json'))}
+tab=defaultdict(Counter)
+for a in json.load(open(md+'case_summary.json'))['audio_classifications']:
+    d=ev.get(os.path.basename(a.get('file') or ''))
+    if not d: continue
+    m=max([d.get(k,0) for k in ('Music','Singing','Musical instrument','Guitar')])
+    tab[a.get('category')]['music' if m>d.get('Speech',0) else 'speech']+=1
+for c,n in tab.items(): print(c, dict(n))
+PY
 ```
-
----
 
 ## 4. The pipeline never worked out whose mailbox it is
 
