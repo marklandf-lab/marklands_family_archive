@@ -3118,3 +3118,57 @@ def test_llava_description_decodes_every_shape_it_is_stored_in():
 def test_llava_description_is_neutralised_like_every_other_generated_line():
     assert "deceased" not in (ad._llava_description(
         "A photo of the deceased's handwritten note.") or "")
+
+
+# ── estate relevance, said from the Emails side ─────────────────────────────
+
+def _estate_case(tmp_path, near=()):
+    paths, summary = _vital_case(tmp_path)
+    md = paths.metadata_dir
+    (md / "vital_doc_candidates.json").write_text(json.dumps({
+        "will_testament": {"description": "last will",
+                           "hits": [{"path": p, "score": 0.4} for p in near]},
+    }))
+    return paths, summary
+
+
+def test_estate_thread_map_marks_candidates_from_the_built_payload(tmp_path):
+    """Candidates come off the already-built vital_docs so the marking cannot
+    disagree with the checklist screen."""
+    paths, _summary = _estate_case(tmp_path)
+    vd = {"available": True, "targets": [
+        {"target": "will_testament", "label": "Will / testament",
+         "items": [{"thread_id": "t1", "path": "/m/a.eml"},
+                   {"thread_id": "None", "path": "/d/b.pdf"},
+                   {"thread_id": None, "path": "/d/c.pdf"}]},
+    ]}
+    m = ad.estate_thread_map(paths, {}, vd)
+    assert list(m) == ["t1"]
+    assert m["t1"] == {"kind": "candidate", "labels": ["Will / testament"]}
+
+
+def test_estate_thread_map_candidate_beats_near_miss(tmp_path):
+    """A thread that is both is a candidate: that is the stronger claim and the
+    one a reviewer has to act on."""
+    paths, _summary = _estate_case(tmp_path)
+    vd = {"available": True, "targets": [
+        {"target": "will_testament", "label": "Will / testament",
+         "items": [{"thread_id": "t1", "path": "/m/a.eml"}]}]}
+    m = ad.estate_thread_map(paths, {}, vd)
+    assert m["t1"]["kind"] == "candidate"
+
+
+def test_estate_thread_map_is_empty_when_the_scan_never_ran(tmp_path):
+    paths = CasePaths.from_case_id("Z", str(tmp_path))
+    paths.metadata_dir.mkdir(parents=True)
+    assert ad.estate_thread_map(paths, {}, {"available": True, "targets": []}) == {}
+
+
+def test_estate_thread_map_caps_the_labels_it_carries(tmp_path):
+    """A thread matching many types would otherwise put a paragraph on a row."""
+    paths, _summary = _estate_case(tmp_path)
+    vd = {"available": True, "targets": [
+        {"target": "t%d" % i, "label": "Type %d" % i,
+         "items": [{"thread_id": "t1", "path": "/m/a.eml"}]} for i in range(9)]}
+    m = ad.estate_thread_map(paths, {}, vd)
+    assert len(m["t1"]["labels"]) == 4

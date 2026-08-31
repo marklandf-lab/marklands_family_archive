@@ -1347,6 +1347,70 @@ def _clean_recording_name(name):
     return stripped or name
 
 
+def estate_thread_map(paths, decisions=None, vital_docs=None, role="examiner"):
+    """thread_id -> {kind, labels}: which email conversations the estate scan
+    touched, and as what.
+
+    The checklist can already reach a thread; a thread could not tell you it was
+    on the checklist. This closes that direction. On 813_mf it marks 300 of
+    21,988 conversations — 31 candidates and 283 weaker matches — which is the
+    thinnest and most valuable cut the Emails page has.
+
+    Resolution is done in ONE pass over every near-miss path rather than per
+    target. Calling near_miss_rows for each of the 27 types re-resolves the whole
+    conversation index 27 times and takes ~5 seconds; collecting the paths first
+    and resolving them once takes ~0.07. Same answer, and cheap enough to build
+    on demand rather than cache and go stale.
+
+    `kind` is "candidate" when the thread holds a confirmed/promoted checklist
+    item, and "near_miss" otherwise. A thread that is both is a candidate — the
+    stronger claim wins, because that is the one a reviewer must act on.
+    """
+    md = paths.metadata_dir
+    confirmed = load_json(md / "vital_doc_confirmed.json", None)
+    candidates = load_json(md / "vital_doc_candidates.json", None)
+    if confirmed is None and candidates is None:
+        return {}
+    confirmed = confirmed if isinstance(confirmed, list) else []
+    candidates = candidates if isinstance(candidates, dict) else {}
+
+    out = {}
+
+    def mark(tid, kind, label):
+        if not tid:
+            return
+        cur = out.setdefault(tid, {"kind": kind, "labels": []})
+        if kind == "candidate":
+            cur["kind"] = "candidate"
+        if label and label not in cur["labels"]:
+            cur["labels"].append(label)
+
+    # Candidates come off the already-built payload, so the examiner's decisions
+    # are folded in and this cannot disagree with the checklist screen.
+    for t in (vital_docs or {}).get("targets", []) or []:
+        for i in (t.get("items") or []):
+            tid = i.get("thread_id")
+            if tid and str(tid) != "None":
+                mark(str(tid), "candidate", t.get("label"))
+
+    near_paths = {}
+    for target in candidates:
+        for hit in _near_miss_hits(candidates, confirmed, decisions, target):
+            path = hit.get("path") if isinstance(hit, dict) else hit
+            if path:
+                near_paths.setdefault(path, []).append(target)
+    if near_paths:
+        links = _vital_thread_links(md, role, set(near_paths))
+        for path, link in links.items():
+            tid = (link or {}).get("thread_id")
+            for target in near_paths.get(path, []):
+                mark(str(tid) if tid else None, "near_miss", vital_doc_label(target))
+
+    for v in out.values():
+        v["labels"] = sorted(v["labels"])[:4]
+    return out
+
+
 # ── estate document report (attorney-facing) ─────────────────────────────────
 
 def estate_report_data(vital_docs, case_id=None, generated_at=None):
