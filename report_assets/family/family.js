@@ -324,7 +324,7 @@
      // the reader last had open, so a link into a group is fully addressable.
      "band", "year", "by", "sort",
      // Recordings: which audio kind is being shown. Reports: which report.
-     "kind", "r", "view", "estate"].forEach(function (k) {
+     "kind", "r", "view", "estate", "rescued", "rescued"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -4384,12 +4384,18 @@
       // The estate scan touched 300 of 21,988 conversations. The checklist could
       // already reach a thread; the thread could not tell you it was on the
       // checklist. This is that missing direction, said on the row itself.
+      // Mail the family will never see. A distinct claim from the estate marker
+      // — this one is about audience, not relevance — so a distinct chip.
+      var resc = r.rescued
+        ? ' <span class="est-chip resc" title="Triage had discarded this as bulk;'
+          + ' it was pulled back because it mentions the estate. The family index'
+          + ' does not contain it.">family will not see</span>' : "";
       var est = r.estate
         ? ' <span class="est-chip ' + (r.estate.kind === "candidate" ? "cand" : "near")
           + '" title="' + esc((r.estate.labels || []).join(", "))
           + '">' + (r.estate.kind === "candidate" ? "estate candidate" : "near miss")
           + "</span>" : "";
-      tr.innerHTML = "<td>" + esc(r.subject) + " " + sig(r.significance) + est +
+      tr.innerHTML = "<td>" + esc(r.subject) + " " + sig(r.significance) + est + resc +
         "</td><td class='preview clamp2'>" + recipients(r.participants) +
         "</td><td class='preview'>" + esc((r.date_last || "").slice(0, 10)) +
         "</td><td>" + num(r.message_count) + "</td>" +
@@ -4432,6 +4438,11 @@
         return { label: emailCatLabel(c.name), count: c.count,
                  q: { cat: c.name }, crumb: emailCatLabel(c.name) };
       }) });
+    }
+    if (!Q.rescued && facets.rescued) {
+      dims.push({ key: "rescued", label: "Audience", items: [
+        { label: "Rescued — the family will not see these", count: facets.rescued,
+          q: { rescued: "1" }, crumb: "Estate-rescued" }] });
     }
     if (!Q.estate && (facets.estate || []).length) {
       dims.push({ key: "estate", label: "Estate", items: facets.estate.map(function (e) {
@@ -4479,7 +4490,7 @@
   function mergeQ(extra) {
     var out = { page: "emails" };
     ["band", "cat", "year", "participant", "q", "date_from", "date_to", "sort",
-     "estate"].forEach(function (k) { if (Q[k]) out[k] = Q[k]; });
+     "estate", "rescued"].forEach(function (k) { if (Q[k]) out[k] = Q[k]; });
     Object.keys(extra || {}).forEach(function (k) { out[k] = extra[k]; });
     return out;
   }
@@ -4511,6 +4522,7 @@
         parts.push(Q.estate === "candidate" ? "estate candidates"
                                             : "estate near misses");
       }
+      if (Q.rescued) parts.push("estate-rescued");
       return parts.length ? parts.join(" · ") : "All emails";
     }
     var title = titleFrom(data.facets);
@@ -4549,6 +4561,7 @@
           if (active[k]) p[k] = active[k];
         });
         if (Q.estate) p.estate = Q.estate;
+        if (Q.rescued) p.rescued = Q.rescued;
         if (search.value) p.q = search.value;
         if (dFrom.value) p.date_from = dFrom.value;
         if (dTo.value) p.date_to = dTo.value;
@@ -4599,7 +4612,7 @@
       cat: Q.cat || "", year: Q.year || "", participant: Q.participant || "",
     };
     var narrowed = !!(active.band || active.cat || active.year || active.participant
-                      || Q.q || Q.date_from || Q.date_to || Q.sort || Q.estate);
+                      || Q.q || Q.date_from || Q.date_to || Q.sort || Q.estate || Q.rescued);
     if (narrowed) return emailGroup(main, data, active);
     return emailIndex(main, data);
   };
