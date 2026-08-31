@@ -324,7 +324,7 @@
      // the reader last had open, so a link into a group is fully addressable.
      "band", "year", "by", "sort",
      // Recordings: which audio kind is being shown. Reports: which report.
-     "kind", "r"].forEach(function (k) {
+     "kind", "r", "view"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -385,7 +385,7 @@
      // existed, with the consequence this comment describes: choosing a sort and
      // then touching any other control dropped it from the URL, so a reload or a
      // shared link lost it. `by` is the open break-down tab.
-     "band", "year", "by", "sort", "kind", "r",
+     "band", "year", "by", "sort", "kind", "r", "view",
      "group", "target", "list", "crumb", "from"]
       .forEach(function (k) { if (Q[k]) q.push(k + "=" + encodeURIComponent(Q[k])); });
     return location.pathname + (q.length ? "?" + q.join("&") : "");
@@ -3806,61 +3806,182 @@
     main.appendChild(panel);
   }
 
-  P.documents = function (main, data) {
-    var index = data.index || [];
-    var controls = head(main, "Documents", "Documents", num(data.total || 0) + " documents.");
-    // The lead used to be written once, from the seed payload, and never touched
-    // again — so filtering to medical (86) left the heading claiming 4,643. The
-    // pager knows the filtered total; let it say so.
-    var leadEl = main.querySelector(".pagehead .lead");
-    function setLead(total, cat, sub) {
-      if (!leadEl) return;
-      var what = pretty(sub || cat || "");
-      leadEl.textContent = num(total || 0) + (what ? " " + what : "") + " document"
-        + (total === 1 ? "" : "s") + (what ? "" : ".");
+  // ── Documents: an index of what is in here, then one branch at a time ──
+  // The page used to open on the vital checklist with a category dropdown under
+  // it. The dropdown worked, but a filter in a <select> is not a place anybody
+  // browses: the D&D character sheets under creative writing were reachable and
+  // effectively invisible. And the sub-taxonomy the pipeline had already built
+  // for `legal` was thrown away by the row builder, so a thousand documents that
+  // ARE sorted into will / deed / power-of-attorney folders looked unsorted.
+  //
+  // Same shape as Emails now: an index of branches with true counts, then a
+  // filtered list. The estate checklist is the first branch, because that is
+  // what the archive is for, but it is a branch rather than the whole page.
+
+  var DOC_CAT_LABELS = {
+    financial: "Financial", legal: "Legal", medical: "Medical",
+    recipe: "Recipes", creative_writing: "Creative writing",
+    personal_correspondence: "Personal correspondence",
+    miscellaneous: "Miscellaneous", account_credentials: "Account credentials",
+  };
+  function docCatLabel(c) { return DOC_CAT_LABELS[c] || pretty(c); }
+
+  // One expandable category branch: the name, its count, and its subcategories
+  // where the pipeline actually filed some. A category with no sub-taxonomy has
+  // no caret — offering one that opens onto a single row is a lie about depth.
+  function docCatRow(container, c) {
+    var subs = c.subcategories || [];
+    var sec = el("section", "rec-sec");
+    var head_ = el("div", "rec-sechead");
+    if (subs.length) {
+      var caret = el("span", "vcaret", "▸");
+      head_.appendChild(caret);
+    } else {
+      head_.appendChild(el("span", "vcaret vcaret-none", "·"));
     }
-    vitalDocsPanel(main, data.vital_docs);  // G-2 checklist at the top of Documents
-    // Category dropdown + (financial) sub-category dropdown in the sticky controls (#9).
-    // Both are SERVER filters now (applied before the page slice) so a category's
-    // tail is reachable via Load-more; the index (from ALL rows) drives the counts.
-    var selCat = el("select"); selCat.appendChild(new Option("All categories", ""));
-    index.forEach(function (c) { selCat.appendChild(new Option(pretty(c.category) + " (" + c.count + ")", c.category)); });
-    var fin = (index.filter(function (c) { return c.category === "financial"; })[0] || {}).subcategories || [];
-    var selSub = el("select"); selSub.style.display = "none";
-    (function fillSub() {
-      selSub.innerHTML = ""; selSub.appendChild(new Option("All sub-categories", ""));
-      fin.forEach(function (s) { selSub.appendChild(new Option(pretty(s.name) + " (" + s.count + ")", s.name)); });
-    })();
-    if (Q.cat) selCat.value = Q.cat;
-    if (Q.subcat) selSub.value = Q.subcat;
+    head_.appendChild(el("span", "rec-seclabel", esc(docCatLabel(c.category))));
+    head_.appendChild(el("span", "rec-secn", num(c.count)));
+    var open = el("a", "rec-seconly", "Open all " + num(c.count) + " →");
+    open.href = urlFor({ page: "documents", cat: c.category },
+                       { label: docCatLabel(c.category) });
+    open.onclick = function (e) { e.stopPropagation(); };
+    head_.appendChild(open);
+    sec.appendChild(head_);
+
+    if (subs.length) {
+      var body = el("div", "rec-secbody doc-subs");
+      body.hidden = true;
+      subs.forEach(function (sub) {
+        var a = el("a", "ebd-chip");
+        a.href = urlFor({ page: "documents", cat: c.category, subcat: sub.name },
+                        { label: docCatLabel(c.category) + " · " + pretty(sub.name) });
+        a.appendChild(el("span", "ebd-chip-l", esc(pretty(sub.name))));
+        a.appendChild(el("span", "ebd-chip-n", num(sub.count)));
+        body.appendChild(a);
+      });
+      head_.onclick = function () {
+        body.hidden = !body.hidden;
+        caret.textContent = body.hidden ? "▸" : "▾";
+        head_.classList.toggle("open", !body.hidden);
+        head_.setAttribute("aria-expanded", String(!body.hidden));
+      };
+      keyable(head_, "button", docCatLabel(c.category));
+      head_.setAttribute("aria-expanded", "false");
+      sec.appendChild(body);
+    }
+    container.appendChild(sec);
+  }
+
+  function documentsIndex(main, data) {
+    var index = data.index || [];
+    head(main, "Documents", "Documents",
+      num(data.total || 0) + " documents. Every count below is the whole "
+      + "collection, not a page of it.");
+
+    // The estate branch first — a summary and a way in, not the whole checklist.
+    var vd = data.vital_docs;
+    if (vd && vd.available) {
+      var st = vitalStats((vd.targets || []).slice());
+      var vsec = el("section", "eix-panel doc-estate");
+      vsec.appendChild(el("h2", null, "Estate documents"));
+      vsec.appendChild(el("p", "eix-note",
+        num(st.types) + " document types an estate needs, searched across every "
+        + "document and email in the archive."));
+      var bar = el("div", "vstats");
+      vitalStat(bar, st.found, "types have a candidate");
+      if (EXAMINER) {
+        vitalStat(bar, st.signed, "signed off");
+        vitalStat(bar, st.undecided, "candidates undecided", st.undecided > 0);
+        vitalStat(bar, st.near, "near-misses unreviewed", st.near > 0);
+      }
+      vsec.appendChild(bar);
+      var go_ = el("a", "eix-more", "Work the checklist, type by type →");
+      go_.href = urlFor({ page: "documents", view: "vital" },
+                        { label: "Vital documents" });
+      vsec.appendChild(go_);
+      main.appendChild(vsec);
+    }
+
+    var csec = el("section", "doc-cats");
+    csec.appendChild(el("h2", null, "By category"));
+    csec.appendChild(el("p", "eix-note",
+      "How the pipeline filed each document. Where it also sorted a category "
+      + "into subcategories, they open here."));
+    index.forEach(function (c) { docCatRow(csec, c); });
+    main.appendChild(csec);
+  }
+
+  // One category (optionally one subcategory): the documents, with the sibling
+  // subcategories offered as a break-down so a reader can move sideways without
+  // going back to the index.
+  function documentsCategory(main, data, cat, subcat) {
+    var index = data.index || [];
+    var entry = index.filter(function (c) { return c.category === cat; })[0] || {};
+    var subs = entry.subcategories || [];
+    var title = docCatLabel(cat) + (subcat ? " · " + pretty(subcat) : "");
+    setCrumb(Q.crumb || title);
+    // Seed the lead from the index we already have rather than an empty string:
+    // head() only creates the .lead element when there is something to put in
+    // it, so passing "" left nothing for the pager to write into afterwards.
+    var seedCount = subcat
+      ? ((subs.filter(function (x) { return x.name === subcat; })[0] || {}).count || 0)
+      : (entry.count || 0);
+    var controls = head(main, "Documents", title,
+      num(seedCount) + " document" + (seedCount === 1 ? "" : "s") + ".");
+    var back = el("button", "btn chip", "← All documents");
+    back.onclick = function () { go({ page: "documents" }); };
+    controls.appendChild(back);
     var expBtn = el("button", "btn", "Export filtered");
-    controls.appendChild(el("span", "flabel", "Category")); controls.appendChild(selCat);
-    controls.appendChild(selSub); controls.appendChild(expBtn);
+    controls.appendChild(expBtn);
+
+    if (subs.length) {
+      var strip = el("div", "ebd"); main.appendChild(strip);
+      var chips = el("div", "ebd-body"); strip.appendChild(chips);
+      function chip(name, label, n) {
+        var a = el("a", "ebd-chip" + (subcat === name ? " on" : ""));
+        a.href = urlFor(name ? { page: "documents", cat: cat, subcat: name }
+                             : { page: "documents", cat: cat },
+                        { label: docCatLabel(cat) + (name ? " · " + pretty(name) : "") });
+        a.appendChild(el("span", "ebd-chip-l", esc(label)));
+        a.appendChild(el("span", "ebd-chip-n", num(n)));
+        chips.appendChild(a);
+      }
+      chip("", "All " + docCatLabel(cat).toLowerCase(), entry.count || 0);
+      subs.forEach(function (s) { chip(s.name, pretty(s.name), s.count); });
+    }
 
     var holder = el("div"); main.appendChild(holder);
     var pg = pager("/api/documents", {
-      getParams: function () { return { cat: selCat.value, subcat: selSub.value }; },
+      getParams: function () { return { cat: cat, subcat: subcat || "" }; },
       render: function (all, total) {
         holder.innerHTML = "";
         fileTable(holder, all);
-        setLead(total, selCat.value, selSub.value);
+        var leadEl = main.querySelector(".pagehead-title .lead");
+        if (leadEl) leadEl.textContent = num(total || 0) + " document"
+          + (total === 1 ? "" : "s") + ".";
       },
     });
     main.appendChild(pg.footer);
-    selCat.onchange = function () {
-      selSub.value = ""; selSub.style.display = (selCat.value === "financial" && fin.length) ? "" : "none";
-      setQ({ cat: selCat.value, subcat: "" }); pg.load(true);
-    };
-    selSub.onchange = function () { setQ({ subcat: selSub.value }); pg.load(true); };
     expBtn.onclick = function () {
-      var cat = selCat.value;
-      if (!cat) return doVerb("/api/export", { items: pg.rows.map(function (r) { return r.file; }) }, "Exported documents");
-      var key = (cat === "financial" && selSub.value) ? cat + ":" + selSub.value : cat;
-      exportCollection("category", key, pretty(selSub.value || cat));
+      var key = subcat ? cat + ":" + subcat : cat;
+      exportCollection("category", key, pretty(subcat || cat));
     };
-    // Seed from page 1; re-fetch with the category filter if one is deep-linked.
-    selSub.style.display = (selCat.value === "financial" && fin.length) ? "" : "none";
-    if (selCat.value) pg.load(true); else pg.seed(data);
+    pg.load(true);
+  }
+
+  P.documents = function (main, data) {
+    // The 27-type checklist, on its own page now rather than above every browse.
+    if (Q.view === "vital") {
+      setCrumb(Q.crumb || "Vital documents");
+      var ctrls = head(main, "Documents", "Vital documents", "");
+      var back = el("button", "btn chip", "← All documents");
+      back.onclick = function () { go({ page: "documents" }); };
+      ctrls.appendChild(back);
+      vitalDocsPanel(main, data.vital_docs);
+      return;
+    }
+    if (Q.cat) return documentsCategory(main, data, Q.cat, Q.subcat || "");
+    return documentsIndex(main, data);
   };
 
   P.correspondence = function (main, d) {

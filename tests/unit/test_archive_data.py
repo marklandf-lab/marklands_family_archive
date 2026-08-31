@@ -3031,3 +3031,69 @@ def test_estate_relevance_counts_decisions_and_documents_apart(tmp_path):
     assert (c["decisions"], c["documents"]) == (3, 2)
     # the .eml is not a browsable document, so it counts as mail
     assert (c["from_mail_decisions"], c["from_mail_documents"]) == (1, 1)
+
+
+# ── document subcategories the pipeline built and the row builder discarded ──
+
+def test_subcategory_from_path_reads_the_delivery_folder():
+    p = "/c/813_mf/output/documents/legal/will_testament/Some Will.docx"
+    assert ad.subcategory_from_path(p, "legal") == "will_testament"
+    # sitting directly in its category folder is not a subcategory
+    assert ad.subcategory_from_path("/c/output/documents/legal/Loose.pdf", "legal") is None
+    # the lookup is category-scoped: a legal path yields nothing for financial
+    assert ad.subcategory_from_path(p, "financial") is None
+    assert ad.subcategory_from_path("", "legal") is None
+    assert ad.subcategory_from_path(p, None) is None
+
+
+def _doc_summary(rows):
+    return {"document_classifications": rows}
+
+
+def test_document_rows_recover_a_subcategory_the_pipeline_left_blank():
+    """`legal` gained a sub-taxonomy and its documents ARE sorted into folders,
+    but every legal row arrives with subcategory None — 1,019 of 1,027 on the
+    real case. The delivered path is where that answer survives."""
+    rows = ad.document_rows(_doc_summary([
+        {"file": "/o/documents/legal/deed_title/Deed.pdf", "filename": "Deed.pdf",
+         "category": "legal", "source": "document"},
+        {"file": "/o/documents/financial/taxes/1040.pdf", "filename": "1040.pdf",
+         "category": "financial", "subcategory": "taxes", "source": "document"},
+        {"file": "/o/documents/recipe/Soup.pdf", "filename": "Soup.pdf",
+         "category": "recipe", "source": "document"},
+    ]), {}, "examiner")
+    by = {r["file"]: r for r in rows}
+    assert by["/o/documents/legal/deed_title/Deed.pdf"]["subcategory"] == "deed_title"
+    # the pipeline's own value is untouched where it exists
+    assert by["/o/documents/financial/taxes/1040.pdf"]["subcategory"] == "taxes"
+    # a category with no sub-taxonomy stays unfiled rather than inventing one
+    assert by["/o/documents/recipe/Soup.pdf"]["subcategory"] is None
+
+
+def test_documents_index_sub_counts_add_up_to_the_category():
+    """A category that is partly filed needs a bucket for the remainder, or the
+    subcategory counts quietly fail to sum to the category total."""
+    idx = ad.documents_index([
+        {"category": "legal", "subcategory": "will_testament"},
+        {"category": "legal", "subcategory": "deed_title"},
+        {"category": "legal", "subcategory": None},
+        {"category": "recipe", "subcategory": None},
+    ])
+    legal = [c for c in idx if c["category"] == "legal"][0]
+    assert legal["count"] == 3
+    assert sum(s["count"] for s in legal["subcategories"]) == 3
+    assert {s["name"] for s in legal["subcategories"]} == \
+        {"will_testament", "deed_title", "uncategorized"}
+    # a wholly unfiled category gets no invented level
+    recipe = [c for c in idx if c["category"] == "recipe"][0]
+    assert recipe["subcategories"] == []
+
+
+def test_documents_index_unfiled_bucket_does_not_depend_on_row_order():
+    """Deciding this per row made it depend on which rows came first."""
+    a = ad.documents_index([{"category": "legal", "subcategory": None},
+                            {"category": "legal", "subcategory": "deed_title"}])
+    b = ad.documents_index([{"category": "legal", "subcategory": "deed_title"},
+                            {"category": "legal", "subcategory": None}])
+    assert a == b
+    assert sum(s["count"] for s in a[0]["subcategories"]) == 2

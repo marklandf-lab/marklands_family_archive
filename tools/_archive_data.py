@@ -1264,9 +1264,22 @@ def document_rows(summary, ocr_index, role, *, cap=None, doc_placements=None):
             cat, sub_override = p, _UNSET
         else:
             cat, sub_override = derived, _UNSET
-        subcat = sub_override if sub_override is not _UNSET else d.get("subcategory")
-        if cat != "financial":
-            subcat = None            # subcategory is meaningless outside financial
+        if sub_override is not _UNSET:
+            subcat = sub_override                 # the examiner said so; it wins
+        elif cat == derived:
+            subcat = d.get("subcategory")         # still in its own category
+        else:
+            # §14.2: the examiner has re-categorised this document, so the
+            # pipeline's sub-taxonomy no longer describes it — a receipts
+            # subcategory on a document just moved to `legal` is nonsense.
+            subcat = None
+        if subcat is None:
+            # Not "meaningless outside financial", which is what this used to
+            # assume. The pipeline sub-sorts `legal` too and never fills the
+            # field in; the delivered path is where that answer survives. The
+            # path is category-scoped, so a moved document finds nothing here
+            # and correctly stays unfiled.
+            subcat = subcategory_from_path(f, cat)
         preview = (ocr_by_file.get(f, "") or "").strip().replace("\n", " ")
         rows.append({
             "file": f,
@@ -3824,25 +3837,63 @@ def accounts_data(summary, role):
     }
 
 
+def subcategory_from_path(path, category):
+    """The sub-taxonomy folder a delivered document sits in, or None.
+
+    The pipeline second-passes some categories into subfolders and records the
+    result on the row — but only for `financial`. `legal` gained the same
+    treatment (case_config's `legal_subcategories`) and its documents ARE sorted
+    into will_testament / deed_title / power_of_attorney / court_filing and the
+    rest, while every legal row still arrives with `subcategory: None`. On 813_mf
+    that is 1,019 of 1,027 documents whose filing the archive could show and did
+    not.
+
+    The delivery path carries it — output/documents/<category>/<sub>/<file> — so
+    read it there rather than waiting for the field. A document sitting directly
+    in its category folder has no subcategory, which is the honest answer.
+    """
+    if not path or not category:
+        return None
+    marker = "/documents/" + category + "/"
+    i = path.find(marker)
+    if i < 0:
+        return None
+    rest = path[i + len(marker):]
+    head, sep, _tail = rest.partition("/")
+    return head if sep and head else None
+
+
 def documents_index(rows):
     """Group document rows into a category index for drill-through navigation.
 
     Returns [{category, count, subcategories:[{name,count}]}] sorted by count
-    desc. Sub-categories are only populated for 'financial' (the only category
-    the pipeline second-passes); others carry an empty list.
+    desc. A category is sub-counted when its rows actually carry a subcategory —
+    which now means `legal` as well as `financial`, since the row builder
+    recovers legal's from the delivered path. A category whose documents have no
+    subfolder gets an empty list and browses as a flat list, which is the truth
+    rather than an invented level.
     """
     cats = {}
     for r in rows:
         c = r.get("category") or "miscellaneous"
         cat = cats.setdefault(c, {"category": c, "count": 0, "subs": {}})
         cat["count"] += 1
-        if c == "financial":
-            sub = r.get("subcategory") or "uncategorized"
+        sub = r.get("subcategory")
+        if sub:
             cat["subs"][sub] = cat["subs"].get(sub, 0) + 1
+        else:
+            cat["unfiled"] = cat.get("unfiled", 0) + 1
     out = []
     for c in cats.values():
+        subs = dict(c["subs"])
+        # Only once the whole category has been seen: if ANY of it is filed, the
+        # unfiled remainder needs a bucket, or the sub-counts silently fail to
+        # add up to the category total. Deciding this per row would depend on
+        # which rows happened to come first.
+        if subs and c.get("unfiled"):
+            subs["uncategorized"] = subs.get("uncategorized", 0) + c["unfiled"]
         subs = [{"name": k, "count": v}
-                for k, v in sorted(c["subs"].items(), key=lambda kv: -kv[1])]
+                for k, v in sorted(subs.items(), key=lambda kv: -kv[1])]
         out.append({"category": c["category"], "count": c["count"], "subcategories": subs})
     out.sort(key=lambda c: -c["count"])
     return out

@@ -1171,3 +1171,16 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
 .pipe-table tr:not(.pipe-note) td { border-bottom: 0; padding-bottom: 4px; }
 .pipe-list { margin: 6px 0 0; padding-left: 18px; }
 .pipe-list li { font-size: 13.5px; line-height: 1.55; margin-bottom: 8px; }
+
+/* Documents index: the estate branch, then the category branches. */
+.doc-estate { margin: 18px 0; }
+.doc-estate .vstats { margin: 10px 0 4px; }
+.doc-cats { margin-top: 22px; }
+.doc-cats h2 { font-size: 15px; margin: 0 0 2px; }
+/* A category with no sub-taxonomy gets a spacer where the caret would be, so
+   the names still line up — but not a caret, which would promise a level that
+   does not exist. */
+.vcaret-none { color: var(--line); }
+/* `display: flex` beats the [hidden] attribute's display:none, so the branches
+   rendered open. Scope the flex to the not-hidden state. */
+.doc-subs:not([hidden]) { display: flex; flex-wrap: wrap; gap: 6px; }

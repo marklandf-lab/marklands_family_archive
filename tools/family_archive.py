@@ -467,8 +467,10 @@ def _filter_documents(rows, params):
     if not cat:
         return rows
     out = [r for r in rows if (r.get("category") or "miscellaneous") == cat]
+    # Any category with a sub-taxonomy, not just financial — legal has one too,
+    # recovered from the delivered path by document_rows.
     sub = _one(params, "subcat")
-    if cat == "financial" and sub:
+    if sub:
         out = [r for r in out if (r.get("subcategory") or "uncategorized") == sub]
     return out
 

@@ -193,7 +193,36 @@ adaptive per target.
 
 ---
 
-## 7. Duplicate vital candidates each demand their own decision
+## 7. Five document categories have no sub-taxonomy at all
+
+**What.** `financial` and `legal` are second-passed into subcategories and their
+documents are delivered into folders. The other five — `creative_writing`,
+`medical`, `personal_correspondence`, `recipe`, `miscellaneous` — are not, so
+each browses as one flat list.
+
+**What it costs.** `miscellaneous` is 729 documents with no structure at all,
+which is the same as no filing. `creative_writing` is 176 documents that turn
+out to be almost entirely tabletop role-playing character sheets — a real
+collection, invisible as one, sitting in a bucket named for something else.
+
+**The fix.** A `<category>_subcategories` list in the case config for the
+categories that warrant one, following the pattern `financial_subcategories` and
+`legal_subcategories` already set. Worth looking at what is actually in
+`miscellaneous` first — a 729-document catch-all usually means the top-level
+taxonomy is missing a category, not that those documents are miscellaneous.
+
+The front end deliberately does NOT invent these. It shows the pipeline's own
+filing and nothing more, so a reader sees what the archive decided rather than a
+second opinion layered on top of it.
+
+**Check it:**
+```bash
+curl -s localhost:7766/api/documents | python3 -c "import json,sys; [print('%-26s %5d  subcategories: %d' % (c['category'], c['count'], len(c['subcategories']))) for c in json.load(sys.stdin)['index']]"
+```
+
+---
+
+## 8. Duplicate vital candidates each demand their own decision
 
 **What:** the same document saved twice, and several byte-identical notification
 emails, arrive as separate candidates. Each needs its own sign-off, inflating the
@@ -205,7 +234,7 @@ stage does not consult it.
 
 ---
 
-## 8. Ranked conversations carry no link target
+## 9. Ranked conversations carry no link target
 
 **What:** items in the Overview's "Most significant" list have no
 `conversation_id`, so they cannot open their own transcript. The UI points at the
@@ -215,7 +244,7 @@ Messages section by name instead — honest, but a dead end for the reader.
 
 ---
 
-## 9. Two front-end fixes that should go back upstream
+## 10. Two front-end fixes that should go back upstream
 
 Both are merged here and are not upstream. Neither is urgent; both are small.
 
