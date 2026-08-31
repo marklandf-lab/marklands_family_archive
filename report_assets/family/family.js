@@ -4820,12 +4820,41 @@
       byKind[active].forEach(function (r) { wrap.appendChild(recordingCard(r)); });
       return;
     }
-    // Unfiltered: every kind under its own heading, in order, so the shape of the
-    // collection is readable without picking one first.
+    // Unfiltered, every kind is a COLLAPSED section: six lines you can take in at
+    // once, rather than six headings separated by four hundred audio players. The
+    // headings alone were an improvement on a flat list and still left the second
+    // section a long scroll below the first. Rows are built on first expand, so
+    // the page does not pay for 1,051 <audio> elements nobody opened.
     kinds.forEach(function (k) {
-      var h = el("h2", "rec-kind", labelFor(k) + " (" + num(byKind[k].length) + ")");
-      wrap.appendChild(h);
-      byKind[k].forEach(function (r) { wrap.appendChild(recordingCard(r)); });
+      var sec = el("section", "rec-sec");
+      var head_ = el("div", "rec-sechead");
+      var caret = el("span", "vcaret", "▸");
+      head_.appendChild(caret);
+      head_.appendChild(el("span", "rec-seclabel", esc(labelFor(k))));
+      head_.appendChild(el("span", "rec-secn", num(byKind[k].length)));
+      var only = el("a", "rec-seconly", "Show only these");
+      only.href = urlFor({ page: "recordings", kind: k }, { label: labelFor(k) });
+      only.onclick = function (e) { e.stopPropagation(); };
+      head_.appendChild(only);
+      var body = el("div", "rec-secbody");
+      body.hidden = true;
+      var built = false;
+      function setOpen(on) {
+        body.hidden = !on;
+        caret.textContent = on ? "▾" : "▸";
+        head_.setAttribute("aria-expanded", String(on));
+        head_.classList.toggle("open", on);
+        if (on && !built) {
+          built = true;
+          byKind[k].forEach(function (r) { body.appendChild(recordingCard(r)); });
+        }
+      }
+      head_.onclick = function () { setOpen(body.hidden); };
+      keyable(head_, "button", labelFor(k));
+      head_.setAttribute("aria-expanded", "false");
+      sec.appendChild(head_);
+      sec.appendChild(body);
+      wrap.appendChild(sec);
     });
   };
 

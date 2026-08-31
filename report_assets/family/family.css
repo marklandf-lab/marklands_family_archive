@@ -1066,3 +1066,20 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
    and it sits next to a summary it sometimes contradicts. */
 .rec-cat { font-family: var(--mono); font-size: 10.5px; letter-spacing: .03em;
   color: var(--muted); margin-top: 6px; }
+
+/* Collapsed kind sections. Six rows you can read at a glance; the recordings
+   inside are built on first expand, so an unopened kind costs nothing. */
+.rec-sec + .rec-sec { margin-top: 6px; }
+.rec-sechead { display: flex; align-items: baseline; gap: 10px; cursor: pointer;
+  padding: 12px 14px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 9px; }
+.rec-sechead:hover { border-color: var(--accent); }
+.rec-sechead.open { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.rec-seclabel { font-family: var(--serif, inherit); font-size: 15px; font-weight: 600; }
+.rec-secn { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+/* Pushed to the far end so it reads as a separate act from expanding in place. */
+.rec-seconly { margin-left: auto; font-size: 12.5px; color: var(--accent);
+  text-decoration: none; }
+.rec-seconly:hover { text-decoration: underline; }
+.rec-secbody { border: 1px solid var(--line); border-top: 0;
+  border-radius: 0 0 9px 9px; padding: 4px 12px 12px; }
