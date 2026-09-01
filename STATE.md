@@ -68,9 +68,13 @@ Everything through **PR #12** is merged. No open PRs, nothing unpushed.
 lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
 ```
 
-**Ask what "polish" means.** It has been requested three times and never
-specified. Do not guess — spacing, wording and table density are all plausible
-and only one of them is what was wanted.
+**Polish is explicitly off the list** — it was asked for three times, never
+specified, and the user has since said to drop it. Do not raise it again.
+
+There is no single obvious next task. The candidates, ranked, are in "Still
+open" below; **27 broken thumbnails** is the only outright defect among them and
+is where I would start. Everything else is a judgement call about what is worth
+building, so it is worth asking rather than picking.
 
 ### What shipped this evening
 
@@ -107,11 +111,27 @@ attachment field at all — only 41 of 21,988 records mention one anywhere — s
 
 ### Still open
 
-- **Polish.** Ask.
+- **27 of the 1,221 Document Photos thumbnails 404** (2.2%), measured
+  1 Sep 2026 by requesting every one. All 404 — a missing thumb-cache entry, not
+  a decode failure. Mostly `.jpeg` (21), not the `.heic` I had assumed twice
+  before measuring. The only outright defect on this list. Re-measure before
+  starting:
+  ```bash
+  python3 - <<'PY'
+  import json,urllib.request,urllib.parse
+  rows=json.load(urllib.request.urlopen('http://127.0.0.1:7766/api/correspondence'))['scanned']['rows']
+  bad=[r['name'] for r in rows if not _try(r)] if False else []
+  for r in rows:
+      u='http://127.0.0.1:7766/thumb?src='+urllib.parse.quote(r['id'],safe='')
+      try: urllib.request.urlopen(u,timeout=5).read(1)
+      except Exception: bad.append(r['name'])
+  print(len(bad),'of',len(rows),'thumbnails fail')
+  PY
+  ```
+- **`linked_by`** — 1,015 threads assembled by guesswork rather than mail
+  headers. The best remaining email cut, though a data-quality one.
 - The **27-type checklist** sits at `/documents?view=vital`, one click in from the
   Documents index. Put it back on the landing page if it grates in use.
-- A few **Document Photos thumbnails** fail to render and fall back to the
-  filename, mostly `.heic` and `.png`. Pre-existing; not investigated.
 - **BACKEND.md** is the pipeline list, current through today. A copy for the
   upstream maintainer is in the shared Google Drive folder — ask the user for the
   link, it changes on every edit.
