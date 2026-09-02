@@ -86,10 +86,11 @@ rather than summed.
 
 ### Panel order on the Emails index
 
-Vital document on the left; subject, year and person stacked beside it; significance
-last, below everything. Significance ranks conversations rather than sorting them
-into anything, so it is the least useful way to *start* — it is a filter you reach
-for once you know what you are after.
+Two stacked columns, not a grid of loose panels. **Left:** vital document, then
+significance. **Right:** subject, year, person. Significance ranks conversations
+rather than sorting them into anything, so it is the least useful way to *start* —
+it is a filter you reach for once you know what you are after, which is why it sits
+last in reading order while still keeping company with the other estate-shaped cut.
 
 ### The finding worth acting on
 

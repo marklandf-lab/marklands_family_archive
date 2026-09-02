@@ -4509,6 +4509,9 @@
       + "for a vital document."));
 
     var wrap = el("div", "eix-cols"); main.appendChild(wrap);
+    // Two stacked columns rather than a grid of loose panels: the vital cut and
+    // significance on the left, the three ordinary cuts on the right.
+    var left = el("div", "eix-stack"); wrap.appendChild(left);
 
     // The narrowest cut on the page, and the only one that answers "could this BE
     // the will". The estate scan already recorded which of the 27 types it reached
@@ -4536,7 +4539,7 @@
         "These are emails ABOUT a document, not the document itself. Where one was "
         + "attached, the attachment is filed under Other Documents on its own — "
         + "nothing records which email delivered it."));
-      wrap.appendChild(vp);
+      left.appendChild(vp);
     }
 
     // Subject, year and person stack in one column beside the vital cut, so the
@@ -4584,8 +4587,10 @@
     }
     more.appendChild(pplPanel);
 
-    var last = el("div", "eix-cols"); main.appendChild(last);
-    last.appendChild(emailIndexPanel(
+    // Under the vital cut, in the same column: still the last of the five to be
+    // read, but sitting with the other estate-shaped way in rather than stranded
+    // in a row of its own.
+    left.appendChild(emailIndexPanel(
       "By significance", "How the pipeline ranked each conversation — a ranking "
       + "rather than a subject, so it is the least useful way to start.",
       (f.bands || []).map(function (b) {
