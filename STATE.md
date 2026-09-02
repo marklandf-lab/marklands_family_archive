@@ -84,6 +84,17 @@ The queue's own reassign modal had the same ambiguity in its "Apply to" select
 other categories — a pager item does not carry the document's full match list —
 so it names the one it can.
 
+### The dialog only appears when the answer changes something
+
+"All of them" differs from "just this one" ONLY for categories that are neither
+the one being moved out of nor the one being moved into. Every multi-category
+document on 813_mf is in exactly two — and all 16 are the same pair (Buy-sell
+agreement + Business operating agreement) — so moving between those two, which is
+the obvious thing to do with them, now asks nothing at all and simply moves it.
+Before, it asked a question whose two answers had the same result and whose text
+contradicted itself ("becomes Business operating agreement … stops being a
+candidate under Business operating agreement").
+
 ### The semantics, since they are not guessable from the UI
 
 A vital match is per **(document, type)** pair. One file can be a candidate under

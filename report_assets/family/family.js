@@ -675,28 +675,29 @@
   //            others: [labels the same document is also a candidate under] }.
   // CSP-safe (addEventListener/.onclick, no inline handlers); text via esc().
   function pickScope(info, cb) {
-    var others = info.others || [];
-    var n = others.length + 1;
+    var others = info.others || [];      // categories NEITHER moved out of nor into
+    var n = info.total || (others.length + 1);
     var many = others.length !== 1;
     var back = el("div", "pickmodal-back");
     var box = el("div", "pickmodal pickmodal-wide");
     box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
     box.setAttribute("aria-label", "Reassign scope");
     box.appendChild(el("h3", null,
-      esc("Move it out of " + info.current + ", or out of all " + n + "?")));
+      esc("Move it out of " + info.current + " only, or out of all " + n + "?")));
     box.appendChild(el("p", "pickmodal-note",
-      esc("This document is a candidate under " + info.current + " — the one you are "
-          + "looking at — and also under " + andList(others) + ". Reassigning it to "
-          + info.to + " can move:")));
+      esc("You are moving this document into " + info.to + ". It is also a candidate "
+          + "under " + andList(others) + ", which "
+          + (many ? "are" : "is") + " not affected unless you say so:")));
     var ul = el("ul", "pickmodal-opts");
     ul.appendChild(el("li", null,
       "<b>" + esc("Just " + info.current) + "</b> — "
-      + esc("that one entry becomes " + info.to + ". Its " + andList(others)
-            + (many ? " entries stay exactly as they are." : " entry stays exactly as it is."))));
+      + esc("it moves out of " + info.current + " and into " + info.to + ". Its "
+            + andList(others)
+            + (many ? " entries stay as they are." : " entry stays as it is."))));
     ul.appendChild(el("li", null,
       "<b>" + esc("All " + n) + "</b> — "
-      + esc("every one of them becomes " + info.to + ", so it stops being a candidate "
-            + "under " + andList(others) + " too.")));
+      + esc("every entry moves into " + info.to + ", so it stops being a candidate "
+            + "under " + andList(others) + " as well.")));
     box.appendChild(ul);
     var actions = el("div", "pickmodal-actions");
     // The narrower choice is the default. Enter used to fire the one that rewrote
@@ -3730,12 +3731,18 @@
             doVerb("/api/vital/reassign", { id: it.id, to_target: to, scope: scope }, "Reassigned")
               .then(function (x) { if (x) render(); });
           }
-          // Ask only when there is genuinely somewhere else to affect, and ask it
-          // with the other categories named.
-          var others = cats.filter(function (c) { return c !== t.target; })
-                           .map(function (c) { return vitalTargetLabel(vd, c); });
-          if (others.length) {
-            pickScope({ current: t.label, to: vitalTargetLabel(vd, to), others: others }, send);
+          // Ask only when the answer changes something. "All of them" differs from
+          // "just this one" ONLY for categories that are neither the one being
+          // moved out of nor the one being moved into: if the document's only
+          // other category IS the destination, both choices end in the same
+          // place, and asking produced a dialog that contradicted itself
+          // ("becomes Business operating agreement ... stops being a candidate
+          // under Business operating agreement").
+          var affected = cats.filter(function (c) { return c !== t.target && c !== to; })
+                             .map(function (c) { return vitalTargetLabel(vd, c); });
+          if (affected.length) {
+            pickScope({ current: t.label, to: vitalTargetLabel(vd, to),
+                        others: affected, total: cats.length }, send);
           } else { send("single"); }
         });
       };
