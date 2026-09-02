@@ -399,6 +399,57 @@ PY2
 
 ---
 
+## 14. Email attachments are not recorded, and messages prove it is possible
+
+_Appended, not inserted — see the note on #13._
+
+**What:** nothing anywhere records that an email carried an attachment, or which
+file it was. Not on the conversation rows, not on the individual message records.
+The containers WERE expanded — `expandfiles_summary.json` reports tens of thousands
+of archives found and expanded — and the attachments landed in a **flat**
+`extracted/documents/`, where nothing about the path or the record says where they
+came from.
+
+**Messages already do this.** `message_index.json` carries an `attachments` list of
+real paths on a majority of its conversations, mostly photos. So this is not a new
+capability; it is an existing one that was never done for mail.
+
+**What it breaks:** the archive holds two unlinked records of the same event — an
+email saying "attached is the signed and notarized power of attorney", and, filed
+separately under documents with no connection to it, the signed power of attorney.
+An executor reading the mail cannot reach the document, and an executor reading the
+documents cannot see how it arrived or what was said about it.
+
+It also makes the estate cut on Emails much blunter than it needs to be. Sampling
+the strongest matches by hand: the ones that genuinely mattered all TRANSMITTED a
+document, and the ones that wasted the reader's time were automated notifications
+carrying nothing ("your document is now available, log in to view"). One recorded
+field separates those two groups. Nothing else in the data does — a text heuristic
+over the body was tried and fails both ways, matching notifications and missing a
+real attachment phrased "here is this one back".
+
+**The fix:** record attachments on the email/message record the way message_triage
+already does — the child paths, on the parent. Filename and content type would be
+enough; the extracted path is better.
+
+**How to check it:**
+
+```bash
+# does any email record mention an attachment?
+python3 - <<'PY2'
+import json, os
+md = os.path.expanduser('~/WyeastCases/813_mf/output/metadata/')
+th = json.load(open(md + 'email_threads_index_examiner.json')).get('threads') or []
+print('thread fields:', sorted({k for t in th[:2000] for k in t}))
+mi = json.load(open(md + 'message_index.json'))
+recs = mi if isinstance(mi, list) else (mi.get('messages') or [])
+print('message fields:', sorted({k for r in recs[:2000] for k in r}))
+print('message convos WITH attachments:', sum(1 for r in recs if r.get('attachments')), 'of', len(recs))
+PY2
+```
+
+---
+
 ## How to add to this file
 
 Put the newest item at the top of the numbered list and renumber, or append and

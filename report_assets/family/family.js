@@ -324,7 +324,9 @@
      // the reader last had open, so a link into a group is fully addressable.
      "band", "year", "by", "sort",
      // Recordings: which audio kind is being shown. Reports: which report.
-     "kind", "r", "view", "estate", "rescued", "rescued"].forEach(function (k) {
+     "kind", "r", "view", "estate", "rescued",
+     // Emails narrowed to ONE of the 27 vital document types.
+     "vital"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -4507,6 +4509,36 @@
       + "for a vital document."));
 
     var wrap = el("div", "eix-cols"); main.appendChild(wrap);
+
+    // The narrowest cut on the page, and the only one that answers "could this BE
+    // the will". The estate scan already recorded which of the 27 types it reached
+    // each conversation for; the page has only ever shown that it reached it.
+    //
+    // Worded carefully. These are conversations ABOUT a document, not the document
+    // — a sample of the strongest ones was mail transmitting an agreement, mail
+    // discussing its terms, and automated notifications carrying nothing at all.
+    // And near misses outnumber candidates about nine to one, so the two are named
+    // separately rather than summed into a number that would read as a find count.
+    var vitalRows = f.vital || [];
+    if (vitalRows.length) {
+      var vc = 0, vn = 0;
+      vitalRows.forEach(function (v) { vc += v.candidate || 0; vn += v.near_miss || 0; });
+      var vp = emailIndexPanel(
+        "By vital document",
+        "Which of the estate's " + num(vitalRows.length) + " document types each "
+        + "conversation might be. " + num(vc) + " the checklist holds, "
+        + num(vn) + " weaker matches — each row says which it is.",
+        vitalRows.map(function (v) {
+          return { label: v.label, count: v.count,
+                   dest: { page: "emails", vital: v.label }, crumb: v.label };
+        }));
+      vp.appendChild(el("p", "eix-note",
+        "These are emails ABOUT a document, not the document itself. Where one was "
+        + "attached, the attachment is filed under Other Documents on its own — "
+        + "nothing records which email delivered it."));
+      wrap.appendChild(vp);
+    }
+
     wrap.appendChild(emailIndexPanel(
       "By significance", "How the pipeline ranked each conversation.",
       (f.bands || []).map(function (b) {
@@ -4710,6 +4742,10 @@
                                             : "estate near misses");
       }
       if (Q.rescued) parts.push("estate-rescued");
+      // Named as what it is: mail the checklist reached FOR this type, not mail
+      // that is this type. The panel says the same thing; the heading has to too,
+      // or the list reads as "here are the 13 marriage certificates".
+      if (Q.vital) parts.push("about a " + String(Q.vital).toLowerCase());
       return parts.length ? parts.join(" · ") : "All emails";
     }
     var title = titleFrom(data.facets);
@@ -4749,6 +4785,10 @@
         });
         if (Q.estate) p.estate = Q.estate;
         if (Q.rescued) p.rescued = Q.rescued;
+        // Without this the list fetched with no ?vital and rendered all 21,988
+        // under a heading naming one document type — the right URL and crumb over
+        // the wrong data, which is the worst of the three to notice.
+        if (Q.vital) p.vital = Q.vital;
         if (search.value) p.q = search.value;
         if (dFrom.value) p.date_from = dFrom.value;
         if (dTo.value) p.date_to = dTo.value;
@@ -4799,7 +4839,11 @@
       cat: Q.cat || "", year: Q.year || "", participant: Q.participant || "",
     };
     var narrowed = !!(active.band || active.cat || active.year || active.participant
-                      || Q.q || Q.date_from || Q.date_to || Q.sort || Q.estate || Q.rescued);
+                      || Q.q || Q.date_from || Q.date_to || Q.sort || Q.estate || Q.rescued
+                      // ?vital= narrows to one of the 27 document types. Missing it
+                      // here meant the link filtered the data and then rendered the
+                      // index over it: right URL, right crumb, no list.
+                      || Q.vital);
     if (narrowed) return emailGroup(main, data, active);
     return emailIndex(main, data);
   };
