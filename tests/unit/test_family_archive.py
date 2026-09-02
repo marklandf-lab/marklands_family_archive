@@ -4389,8 +4389,11 @@ def test_sender_kind_splits_people_from_automated():
     rows.append({"thread_id": "t4", "participants": ["Me <me@x.com>", "S <s@x.com>"],
                  "linked_by": "single", "subject": "Re: the thing we discussed"})
     got = fa.sender_kind_map(rows, owner, freq)
-    assert got == {"t1": "person", "t2": "person", "t3": "automated",
-                   "t4": "person"}, "a Re: subject is somebody replying"
+    assert got == {"t1": "contact", "t2": "exchange", "t3": "oneoff",
+                   "t4": "exchange"}, "a Re: subject is somebody replying"
+    # the two-way pairing is derived from the same four, never stored separately
+    assert all(got[t] in fa.SENDER_KINDS for t in got)
+    assert [t for t in got if got[t] in fa.SENDER_PERSON] == ["t1", "t2", "t4"]
 
 
 def test_sender_kind_ignores_the_owner_being_in_the_address_book():
@@ -4400,15 +4403,20 @@ def test_sender_kind_ignores_the_owner_being_in_the_address_book():
     freq = [{"address": "me@x.com", "name_source": "address_book"}]
     rows = [{"thread_id": "t1", "participants": ["Me <me@x.com>", "L <list@bulk.com>"],
              "linked_by": "single"}]
-    assert fa.sender_kind_map(rows, ["me@x.com"], freq) == {"t1": "automated"}
+    assert fa.sender_kind_map(rows, ["me@x.com"], freq) == {"t1": "oneoff"}
 
 
 def test_filter_emails_sender_narrows_and_ignores_junk():
-    rows = [{"thread_id": "t1", "sender": "person"},
-            {"thread_id": "t2", "sender": "automated"}]
-    assert [r["thread_id"] for r in fa._filter_emails_sender(rows, {"sender": "person"})] == ["t1"]
-    assert [r["thread_id"] for r in fa._filter_emails_sender(rows, {"sender": "automated"})] == ["t2"]
-    assert len(fa._filter_emails_sender(rows, {"sender": "wat"})) == 2, "unknown value does not filter"
+    rows = [{"thread_id": "t1", "sender": "contact"},
+            {"thread_id": "t2", "sender": "exchange"},
+            {"thread_id": "t3", "sender": "bulk"},
+            {"thread_id": "t4", "sender": "oneoff"}]
+    pick = lambda v: [r["thread_id"] for r in fa._filter_emails_sender(rows, {"sender": v})]
+    assert pick("contact") == ["t1"] and pick("bulk") == ["t3"]
+    # the pairings select across two buckets each
+    assert pick("person") == ["t1", "t2"]
+    assert pick("automated") == ["t3", "t4"]
+    assert len(fa._filter_emails_sender(rows, {"sender": "wat"})) == 4, "unknown value does not filter"
 
 
 def test_email_facets_break_the_estate_marker_down_by_document_type():

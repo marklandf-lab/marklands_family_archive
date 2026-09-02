@@ -75,14 +75,24 @@ mail from people, Routine is mail from machines.** Re-derive rather than trust
 these, but the shape was ~70% of Everyday from a sender in the address book against
 ~5% of Routine, and ~38% a real reply chain against ~8%.
 
-So the distinction is offered directly — **Who it is from: From a person /
-Automated or bulk** — instead of through a ranking that only correlates with it.
+So the distinction is offered directly — **Who it is from**, in four buckets:
+someone in your contacts · a back-and-forth with a non-contact · a bulk sender ·
+a one-off from a stranger. The first two pair up as "from a person" and the last
+two as "automated or bulk"; the filter accepts all six spellings, and the pairing
+is derived rather than stored, so there is one classification and not two that can
+drift apart.
+
+**And the significance panel finally says what its two big bands hold** — Everyday
+is mostly people writing to each other, Routine is mostly newsletters and bills.
+That was the original question and it deserved an answer on the page, not only a
+new cut beside it.
 
 ### The rule, and its limit
 
-A conversation is **from a person** when the sender is in the address book, OR the
-thread was assembled from real mail headers, OR the subject opens Re:/Fwd:.
-Everything else is automated. **It reports who the sender is to the reader, not
+**Contact** = a participant other than the owner is in the address book.
+**Exchange** = real mail headers, or a subject opening Re:/Fwd:. **Bulk** = a
+sender seen across 5+ conversations who is essentially never replied to.
+**One-off** = none of the above. **It reports who the sender is to the reader, not
 whether a human typed the message** — a newsletter from a contact counts as a
 person, a one-off note from a stranger does not. The panel says so; do not let a
 later edit upgrade the claim.

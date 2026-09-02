@@ -4592,33 +4592,56 @@
     // were actually splitting on: mail from people against mail from machines.
     var snd = f.sender || [];
     if (snd.length) {
-      var sLab = { person: "From a person", automated: "Automated or bulk" };
+      var sLab = {
+        contact:  "Someone in your contacts",
+        exchange: "A back-and-forth with someone not in your contacts",
+        bulk:     "A bulk sender",
+        oneoff:   "A one-off from a stranger",
+      };
+      // Biggest first, like the other panels. The underlying order is
+      // most-human-first, but a bar chart that jumps around reads as an error.
+      var sRows = snd.slice().sort(function (a, b) { return b.count - a.count; });
       var sp = emailIndexPanel(
         "Who it is from",
-        "Whether the conversation involves someone you correspond with.",
-        snd.map(function (x) {
+        "Who the sender is to you — " + num(f.sender_person || 0) + " from someone "
+        + "you correspond with, " + num(f.sender_automated || 0) + " automated or bulk.",
+        sRows.map(function (x) {
           return { label: sLab[x.kind] || x.kind, count: x.count,
                    dest: { page: "emails", sender: x.kind },
                    crumb: sLab[x.kind] || x.kind };
         }));
       sp.appendChild(el("p", "eix-note",
-        "\u201CFrom a person\u201D means the sender is in the address book, or "
-        + "somebody actually replied. It is about who the sender is to you, not "
-        + "whether a human typed the message: a newsletter from someone in your "
-        + "contacts counts as a person, and a one-off note from a stranger does not."));
+        "A contact is in the address book; a back-and-forth is a real reply chain; "
+        + "a bulk sender writes often and is never replied to. This is who the "
+        + "sender is TO YOU, not whether a human typed the message — a newsletter "
+        + "from someone in your contacts counts as a contact, and a one-off note "
+        + "from a stranger does not."));
       left.appendChild(sp);
     }
 
     // Under the vital and sender cuts, in the same column: still the last to be
     // read, but sitting with the other short ways in rather than stranded in a
     // row of its own.
-    left.appendChild(emailIndexPanel(
+    var bandPanel = emailIndexPanel(
       "By significance", "How the pipeline ranked each conversation — a ranking "
       + "rather than a subject, so it is the least useful way to start.",
       (f.bands || []).map(function (b) {
         return { label: b.label, count: b.count,
                  dest: { page: "emails", band: String(b.n) }, crumb: b.label };
-      })));
+      }));
+    // Everyday and Routine hold two thirds of the mail between them and are near
+    // synonyms in English, so the band names never said what separates them. They
+    // separate almost entirely on sender: measured on this case, Everyday is ~90%
+    // correspondence between people and Routine ~91% newsletters and financial
+    // notices, single messages nobody answered. Say it here rather than leaving a
+    // reader to guess, and point at the cut that splits it directly.
+    bandPanel.appendChild(el("p", "eix-note",
+      "Everyday and Routine are two thirds of the mail and the names do not say "
+      + "how they differ. In practice Everyday is mostly people writing to each "
+      + "other — work and personal, often with replies — and Routine is mostly "
+      + "newsletters, bills and notifications, usually one message nobody "
+      + "answered. \u201CWho it is from\u201D above splits on that directly."));
+    left.appendChild(bandPanel);
   }
 
   // A flat thread table. Inside a group the significance bands are either the
@@ -4781,8 +4804,14 @@
       // that is this type. The panel says the same thing; the heading has to too,
       // or the list reads as "here are the 13 marriage certificates".
       if (Q.vital) parts.push("about a " + String(Q.vital).toLowerCase());
-      if (Q.sender) parts.push(Q.sender === "person" ? "from a person"
-                                                     : "automated or bulk");
+      if (Q.sender) {
+        parts.push({ contact: "from someone in your contacts",
+                     exchange: "a back-and-forth with a non-contact",
+                     bulk: "from a bulk sender",
+                     oneoff: "a one-off from a stranger",
+                     person: "from a person",
+                     automated: "automated or bulk" }[Q.sender] || String(Q.sender));
+      }
       return parts.length ? parts.join(" · ") : "All emails";
     }
     var title = titleFrom(data.facets);

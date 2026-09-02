@@ -628,6 +628,7 @@ def _email_facets(rows, owner=(), merges=None):
                 slot[kind] += 1
     rescued_n = sum(1 for r in rows if r.get("rescued"))
     sender = Counter(r.get("sender") for r in rows if r.get("sender"))
+    person_n = sum(sender.get(k, 0) for k in SENDER_PERSON)
     return {
         "estate": [{"kind": k, "count": estate[k]}
                    for k in ("candidate", "near_miss") if estate.get(k)],
@@ -637,8 +638,12 @@ def _email_facets(rows, owner=(), merges=None):
                                        key=lambda kv: (-(kv[1]["candidate"] + kv[1]["near_miss"]),
                                                        kv[0]))],
         "rescued": rescued_n,
+        # Four buckets in checklist order (most human first), plus the two-way
+        # pairing as a summary — one classification, reported two ways.
         "sender": [{"kind": k, "count": sender[k]}
-                   for k in ("person", "automated") if sender.get(k)],
+                   for k in SENDER_KINDS if sender.get(k)],
+        "sender_person": person_n,
+        "sender_automated": sum(sender.values()) - person_n,
         "bands": [{"n": n, "label": lab, "count": bands.get(n, 0)}
                   for n, lab in EMAIL_BANDS if bands.get(n, 0)],
         "categories": [{"name": k, "count": v} for k, v in cats.most_common()],
@@ -667,6 +672,11 @@ def sender_kind_map(rows, owner, correspondent_freq):
     Everyday is from a sender in the address book against 5% of Routine, and 38%
     of Everyday is a real reply chain against 8%. That distinction was doing the
     work and the labels were hiding it, so it is offered directly.
+
+    Four buckets, because the two-way answer threw away a distinction worth
+    keeping: a bulk sender you never reply to is not the same thing as a one-off
+    from a stranger, and the archive can tell them apart. `person` and `automated`
+    are still derivable by pairing them up, and the filter accepts both spellings.
 
     A conversation counts as from a PERSON when ANY of these is true:
       * a participant other than the owner is in the address book,
@@ -700,30 +710,73 @@ def sender_kind_map(rows, owner, correspondent_freq):
         if a:
             known[a] = c
     own = {str(a).lower() for a in (owner or ())}
-    out = {}
-    for r in rows:
-        in_book = False
+
+    def _others(r):
+        out = []
         for p in (r.get("participants") or []):
             a = (_email_address(p) or "").lower()
-            if not a or a in own:
-                continue
-            if (known.get(a) or {}).get("name_source") == "address_book":
-                in_book = True
-                break
-        person = (in_book or r.get("linked_by") == "headers"
-                  or bool(_REPLY_SUBJECT.match(r.get("subject") or "")))
+            if a and a not in own:
+                out.append(a)
+        return out
+
+    def _replied(r):
+        return (r.get("linked_by") == "headers"
+                or bool(_REPLY_SUBJECT.match(r.get("subject") or "")))
+
+    # A BULK sender: seen across several conversations and essentially never
+    # replied to, and not in the address book. Thresholds are deliberately blunt —
+    # they separate a mailing list from a person who wrote twice, and nothing here
+    # is load-bearing enough to deserve tuning.
+    seen = {}
+    for r in rows:
+        rep = _replied(r)
+        for a in set(_others(r)):
+            slot = seen.setdefault(a, [0, 0])
+            slot[0] += 1
+            if rep:
+                slot[1] += 1
+    bulk = {a for a, (n, rep) in seen.items()
+            if n >= BULK_MIN_THREADS and rep / n < BULK_REPLY_RATE
+            and (known.get(a) or {}).get("name_source") != "address_book"}
+
+    out = {}
+    for r in rows:
         tid = r.get("thread_id")
-        if tid:
-            out[str(tid)] = "person" if person else "automated"
+        if not tid:
+            continue
+        o = _others(r)
+        if any((known.get(a) or {}).get("name_source") == "address_book" for a in o):
+            kind = "contact"
+        elif _replied(r):
+            kind = "exchange"
+        elif any(a in bulk for a in o):
+            kind = "bulk"
+        else:
+            kind = "oneoff"
+        out[str(tid)] = kind
     return out
 
 
+# person = someone you correspond with; automated = the rest. Kept as a pairing
+# rather than a fifth stored value so there is one classification, not two that
+# can drift apart.
+SENDER_KINDS = ("contact", "exchange", "bulk", "oneoff")
+SENDER_PERSON = ("contact", "exchange")
+BULK_MIN_THREADS = 5
+BULK_REPLY_RATE = 0.10
+
+
 def _filter_emails_sender(rows, params):
-    """?sender=person|automated — mail from someone you correspond with, or the rest."""
+    """?sender=contact|exchange|bulk|oneoff, or the pairings person|automated."""
     want = _one(params, "sender")
-    if want not in ("person", "automated"):
-        return rows
-    return [r for r in rows if r.get("sender") == want]
+    if want in SENDER_KINDS:
+        return [r for r in rows if r.get("sender") == want]
+    if want == "person":
+        return [r for r in rows if r.get("sender") in SENDER_PERSON]
+    if want == "automated":
+        return [r for r in rows if r.get("sender") in SENDER_KINDS
+                and r.get("sender") not in SENDER_PERSON]
+    return rows
 
 
 def _filter_emails_rescued(rows, params):
