@@ -58,6 +58,61 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 — a correspondent can be hidden, and it reaches every view
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+### What shipped
+
+**Hide** on each row of Correspondents. It asks per person, with both numbers:
+
+- *N conversations that are just theirs* — group threads stay, because they are
+  also somebody else's mail.
+- *All N they appear in* — including the ones involving people you did not hide.
+
+Both are offered because the gap is wide: **only 44% of correspondent-thread
+pairings on this case are one-to-one**, so for a busy contact "all" is roughly
+twice "just theirs" and the difference belongs to other people. Re-derive that
+share before changing the wording.
+
+### It is HIDE, not delete
+
+Nothing is removed from disk or from the pipeline's own indexes. A
+`correspondent_hidden` overlay filters at render, it is audited, and History undoes
+it. **If real deletion is ever asked for it must be a separate, clearly labelled
+verb — do not quietly widen this one.**
+
+### Why it filters where it does
+
+Applied to the **thread index at load**, not inside a builder. Ten places read that
+index: the Emails list and facets, the overview count, thread detail, the
+vital-document candidates, the estate marks, correspondents. A filter in
+`email_rows` would have covered the list and the count and quietly left the person
+in the rest. `build_fts` applies the same set, or hidden mail stays findable by
+search after leaving every list.
+
+The resolved thread ids are stored **when hiding**, not recomputed from the
+address: the filter becomes a set lookup, it needs no owner guess at load, and the
+audit entry records exactly which conversations went.
+
+### Two traps found on the way
+
+- **The owner guess refuses to fire below 25 threads** (`_email_owner_addresses`,
+  by design). "Just theirs" is defined as "everyone except the owner", so on a
+  small case it silently matched nothing and the verb reported "no conversations".
+  There is a fallback now: a two-party thread is one-to-one whoever the other
+  party is.
+- **The owner's own addresses sit in the Correspondents list** with a large
+  message count and zero conversations, since they are excluded when conversations
+  are counted. Hide is not offered on those rows — the button would promise
+  nothing and the verb would refuse it.
+
+---
+
 ## 🎯 2026-09-02 — Correspondents is a sortable list, not a wall of cards
 
 ### ▶ Next action

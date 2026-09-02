@@ -222,7 +222,17 @@ def iter_rows(paths, role, cfg, *, progress=None):
     # estate-rescued mail, so the family's FTS database cannot return a hit on a
     # marketing body even though the raw index it joins against still holds one.
     phase("emails")
-    threads = (load_thread_index(md, role) or {}).get("threads", []) or []
+    # A hidden correspondent's conversations must not remain findable by search
+    # after they have left every list — that is the difference between hidden and
+    # hidden-from-the-places-you-happened-to-look. The decisions sidecar carries
+    # the resolved thread ids; the server applies the same set at load.
+    _hidden = set()
+    for _rec in ((load_json(md / "family_decisions.json", {}) or {})
+                 .get("correspondent_hidden") or {}).values():
+        if isinstance(_rec, dict):
+            _hidden.update(str(t) for t in (_rec.get("threads") or ()))
+    threads = [t for t in ((load_thread_index(md, role) or {}).get("threads", []) or [])
+               if str(t.get("thread_id")) not in _hidden]
     if threads:
         # Read the ~120 MB email_index ONCE, keyed by file, keeping only the body
         # (email_by_file discipline — drop the rest so peak RSS stays bounded).

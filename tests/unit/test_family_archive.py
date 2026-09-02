@@ -4350,6 +4350,73 @@ def _ethread(tid, kind=None, labels=None, sig=3):
     return r
 
 
+def _hide_case(tmp_path):
+    """A case with three conversations: one one-to-one with X, one group with X
+    and Y, and one that has nothing to do with X."""
+    case, paths = setup_case(tmp_path)
+    _tbe._write(paths.metadata_dir / "email_threads_index_examiner.json", {"threads": [
+        {"thread_id": "solo1", "subject": "just us", "significance": 3,
+         "participants": ["Me <me@x.com>", "X <x@x.com>"], "message_count": 2},
+        {"thread_id": "grp1", "subject": "several of us", "significance": 3,
+         "participants": ["Me <me@x.com>", "X <x@x.com>", "Y <y@x.com>"], "message_count": 3},
+        {"thread_id": "other", "subject": "nothing to do with x", "significance": 3,
+         "participants": ["Me <me@x.com>", "Y <y@x.com>"], "message_count": 2},
+    ]})
+    case.load()
+    return case, paths
+
+
+def _thread_ids(case):
+    return {t["thread_id"] for t in (case.email_threads or {}).get("threads", [])}
+
+
+def test_hide_correspondent_solo_leaves_other_peoples_mail_alone(tmp_path):
+    """Scope is the whole question: only 44% of correspondent-thread pairings on
+    the real case are one-to-one, so "hide their mail" either takes ~half as much
+    again or takes conversations belonging to people who were not hidden."""
+    case, paths = _hide_case(tmp_path)
+    res = fa.verb_hide_correspondent(case, {"address": "x@x.com", "scope": "solo"})
+    assert res["ok"] and res["hidden"] == 1
+    assert _thread_ids(case) == {"grp1", "other"}, "the group thread is also Y's mail"
+    fa.verb_undo(case, {"undo_token": res["undo_token"]})
+    case.load()
+    assert _thread_ids(case) == {"solo1", "grp1", "other"}
+
+
+def test_hide_correspondent_all_takes_the_group_threads_too(tmp_path):
+    case, paths = _hide_case(tmp_path)
+    res = fa.verb_hide_correspondent(case, {"address": "x@x.com", "scope": "all"})
+    assert res["hidden"] == 2
+    assert _thread_ids(case) == {"other"}
+
+
+def test_hide_correspondent_reaches_every_view_not_just_the_list(tmp_path):
+    """The filter is applied to the thread index at load, so everything built from
+    it agrees. A filter inside email_rows would have hidden the conversation from
+    the Emails list and left it in search, thread detail and the vital candidates.
+    """
+    case, paths = _hide_case(tmp_path)
+    fa.verb_hide_correspondent(case, {"address": "x@x.com", "scope": "all"})
+    assert "solo1" not in _thread_ids(case)
+    # every consumer reads the same filtered index
+    rows = _ad.email_rows(case.email_threads, decisions=case.decisions)
+    assert {r["thread_id"] for r in rows} == {"other"}
+    corr = _ad.correspondents_data(case.correspondent_freq, case.email_threads,
+                                   None, "examiner", decisions=case.decisions,
+                                   owner=["me@x.com"])
+    assert all(c["address"].lower() != "x@x.com" or c["threads_total"] == 0
+               for c in corr), "a hidden correspondent has no visible conversations"
+
+
+def test_hide_correspondent_is_examiner_only_and_refuses_a_stranger(tmp_path):
+    case, paths = _hide_case(tmp_path)
+    with pytest.raises(fa.VerbError):
+        fa.verb_hide_correspondent(case, {"address": "nobody@x.com", "scope": "all"})
+    fam, _ = setup_case(tmp_path / "fam", role="family")
+    with pytest.raises(fa.VerbError):
+        fa.verb_hide_correspondent(fam, {"address": "x@x.com", "scope": "all"})
+
+
 def test_email_rows_carry_linked_by_for_the_sender_rule():
     """A projection that drops a field a rule depends on fails silently.
 

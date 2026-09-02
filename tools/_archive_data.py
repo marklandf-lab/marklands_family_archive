@@ -4252,8 +4252,32 @@ def correspondent_duplicate_candidates(correspondent_freq, decisions=None):
     return candidates
 
 
+def _correspondent_thread_counts(threads_index, owner=()):
+    """address -> [conversations, of which one-to-one].
+
+    One pass over the thread index rather than one per address: per-address is
+    1,384 x 21,988 and this is 34,657 participations. "One-to-one" means the owner
+    and this address and nobody else.
+    """
+    own = {str(a).strip().lower() for a in (owner or ()) if a}
+    out = {}
+    for t in (threads_index or {}).get("threads", []) or []:
+        others = set()
+        for p in (t.get("participants") or []):
+            a = (_email_address(p) or "").strip().lower()
+            if a and a not in own:
+                others.add(a)
+        solo = len(others) == 1
+        for a in others:
+            slot = out.setdefault(a, [0, 0])
+            slot[0] += 1
+            if solo:
+                slot[1] += 1
+    return out
+
+
 def correspondents_data(correspondent_freq, threads_index=None, conversation_index=None,
-                        role="family", decisions=None):
+                        role="family", decisions=None, owner=()):
     """Ranked correspondent cards for the Correspondents page (G-6).
 
     Source is the caller's ALREADY ROLE-SCOPED correspondent frequency file — a
@@ -4269,9 +4293,13 @@ def correspondents_data(correspondent_freq, threads_index=None, conversation_ind
     file is therefore built from family-visible mail only (see
     wyeast.core.audience.correspondent_path); the examiner's is the union.
 
-    `threads_index` / `conversation_index` are accepted for signature/spec parity
-    (the click-through filters the Emails list server-side by participant — see the
-    `?participant=` filter — so the card itself needs only the freq file).
+    `threads_index` is walked once for the THREAD counts the hide control needs.
+    They are a different grain from `total`, which counts messages: hiding is
+    decided per conversation, and "2,470 conversations" is a number a reader can
+    act on where "17,058 messages" is not. `threads_solo` counts the conversations
+    where this address is the ONLY participant besides the owner — hiding those
+    takes nothing from anybody else, which is why the two are offered separately.
+    `conversation_index` is accepted for signature parity.
 
     We do NOT do fuzzy identity merging here on our own initiative — an
     examiner-confirmed correspondent_merges {loser_addr: winner_addr} overlay
@@ -4281,6 +4309,7 @@ def correspondents_data(correspondent_freq, threads_index=None, conversation_ind
     correspondent_frequency.json itself — a display-time fold only.
     """
     merges = (decisions or {}).get("correspondent_merges") or {}
+    thread_counts = _correspondent_thread_counts(threads_index, owner)
     by_addr = {}
     for c in correspondent_freq or []:
         addr = (c.get("address") or "").strip()
@@ -4299,6 +4328,7 @@ def correspondents_data(correspondent_freq, threads_index=None, conversation_ind
             "first_seen": None, "last_seen": None,
             "subject_diversity": winner_c.get("subject_diversity"),
             "merged_addresses": [],
+            "threads_total": 0, "threads_solo": 0,
         })
         sent = c.get("sent_count") or 0
         received = c.get("received_count") or 0
@@ -4309,6 +4339,10 @@ def correspondents_data(correspondent_freq, threads_index=None, conversation_ind
         acc["received"] += received
         acc["total"] += total
         acc["bidirectional"] = acc["bidirectional"] or bool(c.get("bidirectional"))
+        tc = thread_counts.get(addr_lower)
+        if tc:
+            acc["threads_total"] += tc[0]
+            acc["threads_solo"] += tc[1]
         fs, ls = c.get("first_seen"), c.get("last_seen")
         if fs and (acc["first_seen"] is None or fs < acc["first_seen"]):
             acc["first_seen"] = fs
@@ -4333,6 +4367,8 @@ def correspondents_data(correspondent_freq, threads_index=None, conversation_ind
             "years_span": _years_span(acc["first_seen"], acc["last_seen"]),
             "subject_diversity": acc["subject_diversity"],
             "merged_addresses": sorted(acc["merged_addresses"]),
+            "threads_total": acc["threads_total"],
+            "threads_solo": acc["threads_solo"],
         })
     rows.sort(key=lambda r: (-(r.get("total") or 0), r.get("name") or ""))
     return rows
