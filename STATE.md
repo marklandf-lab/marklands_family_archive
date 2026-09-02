@@ -82,6 +82,15 @@ two as "automated or bulk"; the filter accepts all six spellings, and the pairin
 is derived rather than stored, so there is one classification and not two that can
 drift apart.
 
+**Band 1 is now named "Newsletters, bills, etc." rather than "Routine"** — named
+for what it holds instead of where it ranks. Measured, it is ~91% newsletters and
+financial notices, 86% of them a single message nobody answered. Descriptive, not
+definitional: it is still a significance score and about one in ten of it is
+something else. **The six band labels are defined TWICE** — `EMAIL_BANDS` in
+`tools/family_archive.py` and a `BANDS` array in `family.js` for the grouped thread
+table. Rename in one and the other keeps the old name; both carry a comment saying
+so now.
+
 **And the significance panel finally says what its two big bands hold** — Everyday
 is mostly people writing to each other, Routine is mostly newsletters and bills.
 That was the original question and it deserved an answer on the page, not only a

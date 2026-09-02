@@ -510,7 +510,13 @@ def _filter_correspondents(rows, params):
 # are the SERVER's because the counts are: shipping the pair together is what
 # stops a heading from disagreeing with the number beside it.
 EMAIL_BANDS = [(5, "Major life events"), (4, "Emotionally resonant"), (3, "Personal"),
-               (2, "Everyday"), (1, "Routine"), (0, "Unranked")]
+               # Band 1 is named for what it HOLDS, not where it ranks. "Routine"
+               # and "Everyday" were near-synonyms that told a reader nothing, and
+               # measured, band 1 is ~91% newsletters and financial notices, 86% of
+               # them a single message nobody answered. Descriptive rather than
+               # definitional: the band is still a significance score, and roughly
+               # one in ten of it is something else.
+               (2, "Everyday"), (1, "Newsletters, bills, etc."), (0, "Unranked")]
 
 _ADDR_RE = re.compile(r"<([^>]+)>")
 
@@ -666,10 +672,10 @@ _REPLY_SUBJECT = re.compile(r"\s*(re|fwd?|aw|antw)\s*:", re.I)
 def sender_kind_map(rows, owner, correspondent_freq):
     """thread_id -> "person" | "automated".
 
-    The two significance bands that hold most of the mail — Everyday and Routine —
+    The two significance bands that hold most of the mail — Everyday and band 1 —
     are near-synonyms in English and told a reader nothing, while in practice they
     split almost cleanly into mail from people and mail from machines: 70% of
-    Everyday is from a sender in the address book against 5% of Routine, and 38%
+    Everyday is from a sender in the address book against 5% of band 1, and 38%
     of Everyday is a real reply chain against 8%. That distinction was doing the
     work and the labels were hiding it, so it is offered directly.
 

@@ -4343,7 +4343,11 @@
     // Group into significance bands so the (already significance-sorted) list reads
     // as organized by importance, not a flat date jumble (#D).
     var BANDS = [[5, "Major life events"], [4, "Emotionally resonant"], [3, "Personal"],
-                 [2, "Everyday"], [1, "Routine"], [0, "Unranked"]];
+                 // Keep in step with EMAIL_BANDS in family_archive.py — the same
+                 // six labels are defined in both places, and a rename in one of
+                 // them shows the old name on this table and the new one in the
+                 // facet panel.
+                 [2, "Everyday"], [1, "Newsletters, bills, etc."], [0, "Unranked"]];
     BANDS.forEach(function (band) {
       var n = band[0];
       var group = rows.filter(function (r) { return (parseInt(r.significance, 10) || 0) === n; });
@@ -4588,7 +4592,7 @@
     more.appendChild(pplPanel);
 
     // Between the vital cut and significance. It exists because the two bands
-    // below it — Everyday and Routine — are near-synonyms that hid the thing they
+    // below it — Everyday and band 1 — were near-synonyms that hid the thing they
     // were actually splitting on: mail from people against mail from machines.
     var snd = f.sender || [];
     if (snd.length) {
@@ -4629,18 +4633,19 @@
         return { label: b.label, count: b.count,
                  dest: { page: "emails", band: String(b.n) }, crumb: b.label };
       }));
-    // Everyday and Routine hold two thirds of the mail between them and are near
+    // Everyday and band 1 hold two thirds of the mail between them and were near
     // synonyms in English, so the band names never said what separates them. They
     // separate almost entirely on sender: measured on this case, Everyday is ~90%
-    // correspondence between people and Routine ~91% newsletters and financial
+    // correspondence between people and band 1 ~91% newsletters and financial
     // notices, single messages nobody answered. Say it here rather than leaving a
     // reader to guess, and point at the cut that splits it directly.
     bandPanel.appendChild(el("p", "eix-note",
-      "Everyday and Routine are two thirds of the mail and the names do not say "
-      + "how they differ. In practice Everyday is mostly people writing to each "
-      + "other — work and personal, often with replies — and Routine is mostly "
-      + "newsletters, bills and notifications, usually one message nobody "
-      + "answered. \u201CWho it is from\u201D above splits on that directly."));
+      "These two hold two thirds of the mail. Everyday is mostly people writing "
+      + "to each other — work and personal, often with replies — and the band "
+      + "below it is mostly newsletters, bills and notifications, usually one "
+      + "message nobody answered. It used to be called \u201CRoutine\u201D, "
+      + "which said nothing. \u201CWho it is from\u201D above splits on the same "
+      + "thing directly, and more precisely."));
     left.appendChild(bandPanel);
   }
 
