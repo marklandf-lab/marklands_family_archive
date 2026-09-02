@@ -836,7 +836,12 @@ def test_correspondents_data_ranking_shape_and_role():
     top = fam[0]
     assert set(top) == {"address", "name", "sent", "received", "total", "bidirectional",
                         "first_seen", "last_seen", "years_span", "subject_diversity",
-                        "merged_addresses"}
+                        "merged_addresses",
+                        # CONVERSATION counts, a different grain from `total`,
+                        # which counts messages. The hide control offers both
+                        # scopes by number, and "2,470 conversations" is a figure
+                        # a reader can act on where "17,058 messages" is not.
+                        "threads_total", "threads_solo"}
     assert top["name"] == "Alice" and top["total"] == 90 and top["years_span"] == 15
     assert top["merged_addresses"] == []
     # total falls back to sent+received when absent; name falls back to address

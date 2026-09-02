@@ -785,6 +785,123 @@ def _filter_emails_sender(rows, params):
     return rows
 
 
+def verb_hide_correspondent(case, payload):
+    """HIDE a correspondent and their mail (examiner-only).
+
+    `scope`:
+      "solo" — conversations where this address is the ONLY participant besides
+               the owner. Nothing that also belongs to somebody else goes.
+      "all"  — every conversation they appear in, including group threads with
+               people who are not hidden.
+
+    Both are offered because they are genuinely different and the gap is large:
+    across this case only 44% of correspondent-thread pairings are one-to-one, so
+    for a busy contact "all" takes roughly twice as much mail as "solo" and some
+    of it is other people's. The UI asks per person and shows both numbers first.
+
+    NEVER DESTROYS. Nothing is deleted: the mail stays on disk and in the
+    pipeline's own indexes, a decisions overlay hides it at render, and undo puts
+    it back. If real deletion is ever wanted it must be a different, clearly
+    labelled verb -- do not quietly turn this one into it.
+
+    The resolved thread ids are stored with the record so the filter is a set
+    lookup and the audit entry says exactly which conversations went.
+    """
+    require_examiner(case)
+    addr = (payload.get("address") or "").strip()
+    if not addr:
+        raise VerbError("hide needs an address")
+    scope = str(payload.get("scope") or "solo").lower()
+    if scope not in ("solo", "all"):
+        raise VerbError("scope must be 'solo' or 'all'", 400)
+    key = addr.lower()
+
+    # Resolve against the UNFILTERED index, or hiding a second person would only
+    # ever see what the first one left behind.
+    raw = load_thread_index(case.paths.metadata_dir, case.role)
+    owner = {a.lower() for a in
+             (case._email_owner(email_rows(raw, decisions=case.decisions)) or ())}
+    threads = []
+    for t in (raw or {}).get("threads", []) or []:
+        parts = set()
+        for p in (t.get("participants") or []):
+            a = (_email_address(p) or "").strip().lower()
+            if a:
+                parts.add(a)
+        if key not in parts:
+            continue
+        if scope == "all":
+            threads.append(str(t.get("thread_id")))
+            continue
+        if owner:
+            one_to_one = (parts - owner) == {key}
+        else:
+            # No owner guess: _email_owner_addresses refuses to judge from fewer
+            # than 25 threads, and without it "everyone except the owner" is
+            # everyone. A two-party conversation containing them is one-to-one
+            # whoever the other party is, so fall back to that rather than
+            # matching nothing and reporting "no conversations" — which is what
+            # this did, silently, on any small case.
+            one_to_one = len(parts) <= 2
+        if one_to_one:
+            threads.append(str(t.get("thread_id")))
+    if not threads:
+        raise VerbError("no conversations for that correspondent", 404)
+
+    dpath = case.paths.metadata_dir / DECISIONS_FILE
+    with _doc_lock(case):  # cross-process RMW guard (R-4)
+        decisions = load_json(dpath, {}) or {}
+        hidden = decisions.setdefault("correspondent_hidden", {})
+        before = hidden.get(key)
+        hidden[key] = {"scope": scope, "threads": threads,
+                       "ts": _now(), "actor": case.role}
+        atomic_write_json(dpath, decisions)
+    entry = append_action(case, "hide_correspondent", key,
+                          {"present": before}, {"scope": scope, "threads": len(threads)},
+                          reversible=True)
+    case.load()
+    return {"ok": True, "hidden": len(threads), "undo_token": entry["undo_token"]}
+
+
+def _without_hidden_threads(threads_index, decisions):
+    """The thread index minus the conversations hidden with a correspondent.
+
+    APPLIED AT LOAD, not in one builder, because "hide them from every view" is
+    only true if every view reads a thread set that no longer has them. Ten places
+    read this index — the Emails list and its facets, the overview count, thread
+    detail, the vital-document candidates, the estate marks, correspondents. A
+    filter in email_rows would have covered the first two and quietly left the
+    person visible in the rest.
+
+    The thread ids are RESOLVED WHEN HIDING and stored, rather than recomputed
+    here from the address: it makes this a set lookup, it needs no owner-address
+    guess at load time, and the audit entry then records exactly which
+    conversations went — so an undo restores precisely those and a reader can see
+    what a hide actually did.
+
+    Never destroys. The mail is untouched on disk and in the pipeline's own
+    indexes; this is a decisions overlay like every other verb here.
+    """
+    hidden = (decisions or {}).get("correspondent_hidden") or {}
+    if not hidden:
+        return threads_index
+    drop = set()
+    for rec in hidden.values():
+        if isinstance(rec, dict):
+            drop.update(str(t) for t in (rec.get("threads") or ()))
+    if not drop:
+        return threads_index
+    out = dict(threads_index or {})
+    out["threads"] = [t for t in (out.get("threads") or [])
+                      if str(t.get("thread_id")) not in drop]
+    return out
+
+
+def _hidden_addresses(decisions):
+    """The addresses currently hidden, lowercased."""
+    return {str(a).lower() for a in ((decisions or {}).get("correspondent_hidden") or {})}
+
+
 def _filter_emails_rescued(rows, params):
     """?rescued=1 — only the estate-rescued mail, which the family never sees."""
     if _one(params, "rescued") not in ("1", "true", "yes"):
@@ -1027,7 +1144,8 @@ class ArchiveCase:
             # from this thread set). The family's excludes estate-rescued mail;
             # the examiner's is the union. They used to share one filename, so
             # whichever role built last decided what BOTH roles saw next.
-            "email_threads": load_thread_index(md, self.role),
+            "email_threads": _without_hidden_threads(load_thread_index(md, self.role),
+                                                     self.decisions),
             # G-6 correspondents: a LIST of per-address aggregates; [] pre-email
             # cases. Role-scoped too, or the family's Correspondents page ranks
             # marketing senders by volume and every card's click-through lands
@@ -1584,9 +1702,20 @@ class ArchiveCase:
         if page == "correspondents":
             # G-6: ranked correspondent cards (relationship metadata, no bodies —
             # both roles). Click-through filters the Emails list by ?participant=.
-            return correspondents_data(self.correspondent_freq, self.email_threads,
+            # A hidden correspondent leaves this list too. Their conversations
+            # are already gone from the thread index, so leaving the row would
+            # show a person with nothing behind them and no way to tell why.
+            hidden = _hidden_addresses(self.decisions)
+            rows = correspondents_data(self.correspondent_freq, self.email_threads,
                                        self.conversation_index, self.role,
-                                       decisions=self.decisions)
+                                       decisions=self.decisions,
+                                       owner=self._email_owner(
+                                           email_rows(self.email_threads,
+                                                      decisions=self.decisions)))
+            if hidden:
+                rows = [r for r in rows
+                        if (r.get("address") or "").lower() not in hidden]
+            return rows
         if page == "messages":
             # Conversation-grain list (message_triage's conversation_index.json);
             # [] when the stage hasn't run. Per-message detail is served lazily
@@ -4782,6 +4911,16 @@ def _apply_inverse(case, entry):
             (decisions.get("vital_doc_dismissed", {}) or {}).pop(iid, None)
             atomic_write_json(dpath, decisions)
         return {"restored": iid}
+    if action == "hide_correspondent":
+        # Inverse of hiding a correspondent: drop the record and every
+        # conversation it was holding back returns to every view.
+        key = entry["target"]
+        dpath = case.paths.metadata_dir / DECISIONS_FILE
+        with _doc_lock(case):  # cross-process RMW guard (R-4)
+            decisions = load_json(dpath, {}) or {}
+            (decisions.get("correspondent_hidden", {}) or {}).pop(key, None)
+            atomic_write_json(dpath, decisions)
+        return {"restored": key}
     if action == "discard_document":
         # Inverse of a document discard: drop the suppression so the document
         # returns to its category list, its counts and the search index.
@@ -5307,6 +5446,7 @@ VERBS = {
     "vital/confirm": verb_confirm_vital, "vital/promote": verb_promote_vital,
     "vital/not-type": verb_not_type_vital,
     "doc/discard": verb_discard_document,
+    "correspondent/hide": verb_hide_correspondent,
     "remove/person": verb_remove_person, "reset": verb_reset, "undo": verb_undo,
     # ── G-15 face-assist (examiner-only; DECISIONS OVERLAY, never mutates an index) ──
     "merge/persons": verb_merge_persons, "assign/face": verb_assign_face,

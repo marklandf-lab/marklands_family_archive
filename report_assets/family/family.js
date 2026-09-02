@@ -4934,6 +4934,52 @@
   // direction, bring them back; until then they were decoration that read as fact.
   //
   // Names and addresses are estate-derived, so they go in via txt()/textContent.
+  // Hiding asks per person, because the two scopes are genuinely different and
+  // the gap is wide: across this case only 44% of correspondent-thread pairings
+  // are one-to-one, so "everything they appear in" can be roughly twice "their
+  // own conversations" and the difference is other people's mail. The reader sees
+  // both numbers before choosing rather than after.
+  function hideCorrespondent(c) {
+    var solo = c.threads_solo || 0, all = c.threads_total || 0;
+    var name = c.name || c.address || "this person";
+    var box = el("div");
+    box.appendChild(el("p", "hide-lead", esc(
+      "Hiding removes them from the Correspondents list and takes their "
+      + "conversations out of every view — Emails, search, the estate checklist "
+      + "and the counts. Nothing is deleted, and History will undo it.")));
+    var pick = el("div", "hide-opts");
+    function opt(val, label, note, checked) {
+      var id = "hs-" + val;
+      var wrap = el("label", "hide-opt");
+      var r = el("input"); r.type = "radio"; r.name = "hidescope"; r.value = val;
+      r.id = id; r.checked = !!checked;
+      wrap.appendChild(r);
+      var body = el("span");
+      body.appendChild(txt("b", null, label));
+      body.appendChild(txt("span", "hide-note", note));
+      wrap.appendChild(body);
+      pick.appendChild(wrap);
+      return r;
+    }
+    opt("solo", num(solo) + " conversation" + (solo === 1 ? "" : "s") + " that are just theirs",
+        "Group threads stay, because they are also somebody else's mail.", true);
+    opt("all", "All " + num(all) + " conversations they appear in",
+        all - solo > 0
+          ? "Includes " + num(all - solo) + " that involve other people, who go with them."
+          : "They have no group threads, so this is the same set.", false);
+    box.appendChild(pick);
+    pickmodal("Hide " + name + "?", box, {
+      confirmLabel: "Hide",
+      onConfirm: function (close) {
+        var chosen = box.querySelector("input[name=hidescope]:checked");
+        var scope = chosen ? chosen.value : "solo";
+        close();
+        doVerb("/api/correspondent/hide", { address: c.address, scope: scope },
+               "Hid " + name).then(function (x) { if (x) render(); });
+      },
+    });
+  }
+
   function correspondentRow(c) {
     var addr = c.address || "";
     var name = c.name || addr;
@@ -4948,6 +4994,18 @@
       esc(y0 && y1 ? (y0 === y1 ? y0 : y0 + "\u2013" + y1) : "\u2014")));
     tr.appendChild(el("td", "co-last",
       esc(String(c.last_seen || "").slice(0, 10) || "\u2014")));
+    var actTd = el("td", "co-act");
+    // No Hide on a row with nothing to hide. The owner's own addresses sit in
+    // this list with a large message count and NO conversations — they are
+    // excluded as the owner when conversations are counted — so the button would
+    // offer "0 conversations" and the verb would refuse it.
+    if (EXAMINER && (c.threads_total || 0) > 0) {
+      var hide = el("button", "co-hide", "Hide\u2026");
+      hide.title = "Hide this person and their mail from every view";
+      hide.onclick = function (ev) { ev.stopPropagation(); hideCorrespondent(c); };
+      actTd.appendChild(hide);
+    }
+    tr.appendChild(actTd);
     // This row is the only place that knows the address has a name, so it names
     // the destination crumb; Emails itself only ever sees the address.
     tr.onclick = function () { go({ page: "emails", participant: addr }, { label: name }); };
@@ -5018,6 +5076,7 @@
       { key: "n",      label: "Emails",        sort: "",       cls: "co-n" },
       { key: "span",   label: "Years",         sort: null,     cls: "co-span" },
       { key: "last",   label: "Last email",    sort: "recent", cls: "co-last" },
+      { key: "act",    label: "",              sort: null,     cls: "co-act" },
     ];
     var grid = el("div", "corrwrap"); main.appendChild(grid);
     function currentSort() { return Q.sort || ""; }
