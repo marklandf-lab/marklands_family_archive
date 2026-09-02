@@ -2043,7 +2043,11 @@ class ArchiveCase:
                                         decisions=decisions,
                                         threads_index=self.email_threads):
                     near.append({**r, "target": t})
-            items = vital_pager_items(unconfirmed, near)
+            # Canonical target order, so the pager groups each category's
+            # candidates with its own near-misses in checklist order.
+            items = vital_pager_items(
+                unconfirmed, near,
+                target_order=[r.get("target") for r in vital.get("targets", []) or []])
             return {"group": "vital", "items": items, "total": len(items),
                     # The canonical target set (+ labels) for the reassign picker.
                     "all_targets": vital.get("all_targets", [])}

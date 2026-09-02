@@ -730,6 +730,12 @@ body.selecting .jgrid .jcard, body.selecting .jgrid .jcard img { cursor: crossha
 .pager-stage { min-height: 260px; }
 .pcard { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; }
 .pcard .pname { font-family: var(--serif); font-size: 22px; color: var(--head); margin: 6px 0 12px; word-break: break-word; }
+/* The candidates -> near-misses handover card. Deliberately unlike an item
+   card: it is a stopping place, not something to decide about. */
+.pcard.pgate { text-align: center; padding: 34px 26px; border-style: dashed; }
+.pcard.pgate .pgate-title { font-family: var(--serif); font-size: 22px; color: var(--head); margin: 0 0 6px; }
+.pcard.pgate .pgate-ask { font-size: 17px; color: var(--ink); margin: 0 0 14px; }
+.pcard.pgate .pgate-note { font-size: 13px; color: var(--muted); margin: 0 auto; max-width: 46em; line-height: 1.5; }
 .pribbon { display: inline-block; font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; padding: 3px 10px; border-radius: 999px; margin-bottom: 10px; }
 .pribbon-done { background: #e6f2e6; color: #2e7d32; }
 .pribbon-reassigned { background: var(--chip); color: var(--accent); }

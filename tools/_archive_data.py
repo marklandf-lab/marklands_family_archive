@@ -3467,7 +3467,7 @@ def quarantine_pager_items(entries, *, media_exists=None):
     return items
 
 
-def vital_pager_items(unconfirmed, near_miss):
+def vital_pager_items(unconfirmed, near_miss, target_order=None):
     """Kind-B (vital-doc) pager items — BOTH sub-queues, distinguished by `vqueue`.
 
     `unconfirmed` are the found-but-unresolved confirmed items (each an entry from
@@ -3479,10 +3479,19 @@ def vital_pager_items(unconfirmed, near_miss):
 
       unconfirmed → confirm / dismiss / reassign
       near_miss   → promote / dismiss / reassign
+
+    ORDER: grouped BY TARGET — every category's candidates run straight into that
+    same category's near-misses, so a reviewer finishes one document type before
+    meeting the next. It used to be every candidate of every type, then every
+    near-miss of every type: 125 then 1,122 on 813_mf, with nothing marking the
+    handover, so there was no way to tell you had stopped reading candidates.
+    The queue's per-category handover card is anchored on this grouping — it stops
+    at the first near-miss of each target. `target_order` is the canonical target
+    sequence (vital_docs_data's `targets`); anything not named there keeps its
+    first-seen order, candidates before near-miss-only types.
     """
-    items = []
-    for it in unconfirmed or []:
-        items.append({
+    def _unconfirmed_item(it):
+        return {
             "kind": "vital_doc",
             "vqueue": "unconfirmed",
             "id": it.get("id"),
@@ -3496,9 +3505,10 @@ def vital_pager_items(unconfirmed, near_miss):
             "disposition": None,
             "blur": False,
             "actions": ["confirm", "dismiss", "reassign"],
-        })
-    for r in near_miss or []:
-        items.append({
+        }
+
+    def _near_miss_item(r):
+        return {
             "kind": "vital_doc",
             "vqueue": "near_miss",
             "id": r.get("id"),
@@ -3517,7 +3527,21 @@ def vital_pager_items(unconfirmed, near_miss):
             "score": r.get("score"),
             "blur": False,
             "actions": ["promote", "dismiss", "reassign"],
-        })
+        }
+
+    unc_by, nm_by = {}, {}
+    for it in unconfirmed or []:
+        unc_by.setdefault(it.get("target"), []).append(it)
+    for r in near_miss or []:
+        nm_by.setdefault(r.get("target"), []).append(r)
+    order = [t for t in (target_order or []) if t in unc_by or t in nm_by]
+    for t in list(unc_by) + list(nm_by):
+        if t not in order:
+            order.append(t)
+    items = []
+    for t in order:
+        items.extend(_unconfirmed_item(it) for it in unc_by.get(t, []))
+        items.extend(_near_miss_item(r) for r in nm_by.get(t, []))
     return items
 
 
