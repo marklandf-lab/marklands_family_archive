@@ -58,6 +58,31 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 — the suite can now fail the way the app fails
+
+`tests/unit/test_delivery.py` + `_case_fixture.deliver()`. See CLAUDE.md,
+"Conventions worth matching".
+
+**The gap it closes.** `make_case` builds a delivery, but every test that needed a
+working tree created one — so the whole suite ran against a workstation, and the
+class of defect that only appears on a served copy was invisible to it. Five shipped
+that way in one session.
+
+`deliver(case_dir)` strips a set-up case to what a served copy has. Tests set up
+however they like, call it, and then ask the question that matters.
+
+**These tests have teeth — verified, not assumed.** Each of the five fixes was
+reverted in turn and the matching test failed, then the source was restored. Do that
+again if you extend the suite: a test that passes with its fix removed is decoration.
+The rig is disposable; the method is in this entry.
+
+**When you add a verb or a preview that touches the filesystem, add a case here.**
+Gate on the DELIVERED canonical, never the working path. Where something genuinely
+cannot work on a served copy, say so on the surface rather than offering a control
+that can only fail.
+
+---
+
 ## 🎯 2026-09-02 — THE DELIVERY AUDIT: what a served copy cannot do
 
 **Read this before diagnosing any "X does not work" here.** Five bugs this session

@@ -143,6 +143,14 @@ as complete.
   regression to the next person.
 - Tests build a real case tree on disk via `tests/unit/_case_fixture.py::make_case` (lifted from an
   upstream module outside this closure). Extend the fixture rather than mocking the filesystem.
+- **A test that builds a working tree is testing a workstation, not a delivery.** A delivery carries
+  `output/` and nothing else — no `extracted/`, `quarantine/`, `duplicates/` or `original_files/` —
+  and every copy this app serves is one. Five defects shipped through a green suite because each
+  test created the tree its verb needed. `_case_fixture.deliver(case_dir)` strips a set-up case down
+  to what a served copy has; `tests/unit/test_delivery.py` pins the contract. **Any verb or preview
+  that touches the filesystem needs a case there.** Gate on the DELIVERED canonical, never on the
+  working path, and where a thing genuinely cannot work on a served copy, say so on the surface
+  instead of offering a control that can only fail.
 
 ## What must never enter a commit
 
