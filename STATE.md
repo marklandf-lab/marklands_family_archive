@@ -58,6 +58,61 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 — Emails can be cut by vital document type
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+### What shipped
+
+**"By vital document" on the Emails index**, plus `?vital=<type label>`. The estate
+scan has always recorded WHICH of the 27 types it reached each conversation for —
+`estate_thread_map` puts the labels on the row — and the page only ever showed THAT
+it reached it. All 27 types are represented; re-derive the split with the facet
+rather than quoting one.
+
+**Worded deliberately, because a sample said to.** I read a dozen of the strongest
+matches by hand before building. Roughly: a few genuinely transmit a document
+("attached is the signed and notarized…"), a few substantively discuss one, a few
+are plain false positives (an email about a *house* key filed under Safe deposit
+box; a personal message about a friend's illness filed under Power of attorney),
+and about half are two automated streams — brokerage and tax-filing notifications
+that carry no document at all. So the panel and the heading say **mail ABOUT a
+document**, never mail that IS one, and candidate is kept separate from near miss
+rather than summed.
+
+### Panel order on the Emails index
+
+Two stacked columns, not a grid of loose panels. **Left:** vital document, then
+significance. **Right:** subject, year, person. Significance ranks conversations
+rather than sorting them into anything, so it is the least useful way to *start* —
+it is a filter you reach for once you know what you are after, which is why it sits
+last in reading order while still keeping company with the other estate-shaped cut.
+
+### The finding worth acting on
+
+**Email attachments are recorded nowhere** — not on conversations, not on messages.
+Messages DO carry an `attachments` list; mail carries nothing. The attachments were
+extracted and flattened into `extracted/documents/`, so the archive holds two
+unlinked records of one event: the email saying "attached is the power of attorney",
+and the power of attorney. **BACKEND.md #14.** That one field is what separates the
+genuine finds from the notification noise, and a text heuristic over the body was
+tried and fails both ways.
+
+### Where this nearly went wrong
+
+The link filtered the data and then rendered the index over it, and after that
+rendered the LIST with a heading naming one type over all 21,988 conversations —
+right URL, right breadcrumb, wrong data. Two separate places had to learn about the
+new parameter: the index-vs-list decision, and the list's own fetch params. **If you
+add another Emails cut, grep for `Q.estate` and follow it — it appears in five
+places, and missing any one of them fails quietly.**
+
+---
+
 ## 🎯 2026-09-02 — the suite can now fail the way the app fails
 
 `tests/unit/test_delivery.py` + `_case_fixture.deliver()`. See CLAUDE.md,

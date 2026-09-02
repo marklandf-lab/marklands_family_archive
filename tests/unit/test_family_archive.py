@@ -4342,6 +4342,53 @@ def _vrow(case, paths, target):
     return None, vd
 
 
+def _ethread(tid, kind=None, labels=None, sig=3):
+    r = {"thread_id": tid, "participants": [], "significance": sig,
+         "categories": [], "date_first": "2020-01-01T00:00:00+00:00"}
+    if kind:
+        r["estate"] = {"kind": kind, "labels": labels or []}
+    return r
+
+
+def test_email_facets_break_the_estate_marker_down_by_document_type():
+    """The marker said a conversation was on the checklist; it never said as WHAT.
+
+    estate_thread_map has always recorded the labels — which of the 27 vital types
+    the scan reached each conversation for — and nothing displayed them. Candidate
+    and near-miss stay separate because they are different claims and near misses
+    outnumber candidates roughly nine to one; summing them would read as a count of
+    documents found in the mail, which it is not.
+    """
+    rows = [
+        _ethread("t1", "candidate", ["Will / testament", "Trust agreement"]),
+        _ethread("t2", "near_miss", ["Will / testament"]),
+        _ethread("t3", "near_miss", ["Tax return"]),
+        _ethread("t4"),                       # untouched by the estate scan
+    ]
+    f = fa._email_facets(rows)
+    by = {v["label"]: v for v in f["vital"]}
+    assert set(by) == {"Will / testament", "Trust agreement", "Tax return"}
+    assert by["Will / testament"] == {"label": "Will / testament", "candidate": 1,
+                                      "near_miss": 1, "count": 2}
+    assert by["Trust agreement"]["candidate"] == 1
+    assert by["Tax return"]["near_miss"] == 1
+    # ordered by size so the panel leads with the biggest type
+    assert f["vital"][0]["label"] == "Will / testament"
+
+
+def test_filter_emails_vital_narrows_to_one_document_type():
+    rows = [
+        _ethread("t1", "candidate", ["Will / testament", "Trust agreement"]),
+        _ethread("t2", "near_miss", ["Tax return"]),
+        _ethread("t3"),
+    ]
+    # params reach the filters already flattened to one string per key.
+    got = fa._filter_emails_vital(rows, {"vital": "Will / testament"})
+    assert [r["thread_id"] for r in got] == ["t1"], "a thread matches on any of its labels"
+    assert fa._filter_emails_vital(rows, {"vital": "Death certificate"}) == []
+    assert len(fa._filter_emails_vital(rows, {})) == 3, "no filter, no narrowing"
+
+
 def test_dismiss_vital_flips_target_and_undo(tmp_path):
     case, paths = setup_case(tmp_path)
     cpath = _seed_vitals(paths)

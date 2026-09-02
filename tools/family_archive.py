@@ -608,14 +608,33 @@ def _email_facets(rows, owner=(), merges=None):
             people[a] += 1
             names.setdefault(a, _email_display_name(p))
     estate = Counter()
+    # The estate scan already knows WHICH of the 27 vital document types each
+    # conversation was reached for — estate_thread_map records the labels — and
+    # nothing has ever shown them. The marker said "on the checklist" and threw
+    # away the answer to the only question that follows: on it as WHAT?
+    #
+    # Kept split by kind, because they are different claims. A candidate is mail
+    # the checklist actually holds; a near miss matched and was not confirmed, and
+    # near misses outnumber candidates roughly nine to one. Collapsing them would
+    # read as "we found N vital documents in the mail", which is not the claim.
+    vital = {}
     for r in rows:
         e = r.get("estate")
         if e:
             estate[e.get("kind")] += 1
+            kind = "candidate" if e.get("kind") == "candidate" else "near_miss"
+            for lab in (e.get("labels") or []):
+                slot = vital.setdefault(lab, {"candidate": 0, "near_miss": 0})
+                slot[kind] += 1
     rescued_n = sum(1 for r in rows if r.get("rescued"))
     return {
         "estate": [{"kind": k, "count": estate[k]}
                    for k in ("candidate", "near_miss") if estate.get(k)],
+        "vital": [{"label": lab, "candidate": v["candidate"], "near_miss": v["near_miss"],
+                   "count": v["candidate"] + v["near_miss"]}
+                  for lab, v in sorted(vital.items(),
+                                       key=lambda kv: (-(kv[1]["candidate"] + kv[1]["near_miss"]),
+                                                       kv[0]))],
         "rescued": rescued_n,
         "bands": [{"n": n, "label": lab, "count": bands.get(n, 0)}
                   for n, lab in EMAIL_BANDS if bands.get(n, 0)],
@@ -649,6 +668,22 @@ def _filter_emails_estate(rows, params):
     if want == "any":
         return [r for r in rows if r.get("estate")]
     return [r for r in rows if (r.get("estate") or {}).get("kind") == want]
+
+
+def _filter_emails_vital(rows, params):
+    """?vital=<document type label> — the mail the estate checklist reached for ONE
+    of the 27 types.
+
+    The narrowest cut the Emails page has: ?estate= gets you the ~300 conversations
+    the scan touched at all, this gets you the handful that might be the marriage
+    certificate. Matched on the display label rather than the target key, because
+    that is what estate_thread_map records on the row and what the panel links with.
+    """
+    want = _one(params, "vital")
+    if not want:
+        return rows
+    return [r for r in rows
+            if want in ((r.get("estate") or {}).get("labels") or [])]
 
 
 def _filter_emails_group(rows, params):
@@ -1587,6 +1622,7 @@ class ArchiveCase:
             rows = _filter_emails_by_participant(full, params, merges)
             rows = _filter_emails_group(rows, params)
             rows = _filter_emails_estate(rows, params)
+            rows = _filter_emails_vital(rows, params)
             rows = _filter_emails_rescued(rows, params)
             rows = _filter_emails_search(rows, params)
             page = _paginate(rows, offset, limit)

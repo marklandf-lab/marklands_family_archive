@@ -324,7 +324,9 @@
      // the reader last had open, so a link into a group is fully addressable.
      "band", "year", "by", "sort",
      // Recordings: which audio kind is being shown. Reports: which report.
-     "kind", "r", "view", "estate", "rescued", "rescued"].forEach(function (k) {
+     "kind", "r", "view", "estate", "rescued",
+     // Emails narrowed to ONE of the 27 vital document types.
+     "vital"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -4507,22 +4509,54 @@
       + "for a vital document."));
 
     var wrap = el("div", "eix-cols"); main.appendChild(wrap);
-    wrap.appendChild(emailIndexPanel(
-      "By significance", "How the pipeline ranked each conversation.",
-      (f.bands || []).map(function (b) {
-        return { label: b.label, count: b.count,
-                 dest: { page: "emails", band: String(b.n) }, crumb: b.label };
-      })));
-    wrap.appendChild(emailIndexPanel(
+    // Two stacked columns rather than a grid of loose panels: the vital cut and
+    // significance on the left, the three ordinary cuts on the right.
+    var left = el("div", "eix-stack"); wrap.appendChild(left);
+
+    // The narrowest cut on the page, and the only one that answers "could this BE
+    // the will". The estate scan already recorded which of the 27 types it reached
+    // each conversation for; the page has only ever shown that it reached it.
+    //
+    // Worded carefully. These are conversations ABOUT a document, not the document
+    // — a sample of the strongest ones was mail transmitting an agreement, mail
+    // discussing its terms, and automated notifications carrying nothing at all.
+    // And near misses outnumber candidates about nine to one, so the two are named
+    // separately rather than summed into a number that would read as a find count.
+    var vitalRows = f.vital || [];
+    if (vitalRows.length) {
+      var vc = 0, vn = 0;
+      vitalRows.forEach(function (v) { vc += v.candidate || 0; vn += v.near_miss || 0; });
+      var vp = emailIndexPanel(
+        "By vital document",
+        "Which of the estate's " + num(vitalRows.length) + " document types each "
+        + "conversation might be. " + num(vc) + " the checklist holds, "
+        + num(vn) + " weaker matches — each row says which it is.",
+        vitalRows.map(function (v) {
+          return { label: v.label, count: v.count,
+                   dest: { page: "emails", vital: v.label }, crumb: v.label };
+        }));
+      vp.appendChild(el("p", "eix-note",
+        "These are emails ABOUT a document, not the document itself. Where one was "
+        + "attached, the attachment is filed under Other Documents on its own — "
+        + "nothing records which email delivered it."));
+      left.appendChild(vp);
+    }
+
+    // Subject, year and person stack in one column beside the vital cut, so the
+    // sharpest way in sits next to the ordinary ones rather than being followed by
+    // them. Significance goes last, below everything: it ranks conversations rather
+    // than sorting them into anything, so it is the least useful way to START.
+    var side = el("div", "eix-stack"); wrap.appendChild(side);
+    side.appendChild(emailIndexPanel(
       "By subject", "What the conversation is about. A thread can be in more than one.",
       (f.categories || []).map(function (c) {
         return { label: emailCatLabel(c.name), count: c.count,
                  dest: { page: "emails", cat: c.name }, crumb: emailCatLabel(c.name) };
       })));
 
-    // People and years are the other two cuts, but they are long tails rather
-    // than short lists — offered as a way in, not enumerated here.
-    var more = el("div", "eix-cols"); main.appendChild(more);
+    // People and years are long tails rather than short lists — offered as a way
+    // in, not enumerated here.
+    var more = side;
     more.appendChild(emailIndexPanel(
       "By year", null,
       (f.years || []).map(function (y) {
@@ -4552,6 +4586,17 @@
         + "worked out from how much of the mail they appear in."));
     }
     more.appendChild(pplPanel);
+
+    // Under the vital cut, in the same column: still the last of the five to be
+    // read, but sitting with the other estate-shaped way in rather than stranded
+    // in a row of its own.
+    left.appendChild(emailIndexPanel(
+      "By significance", "How the pipeline ranked each conversation — a ranking "
+      + "rather than a subject, so it is the least useful way to start.",
+      (f.bands || []).map(function (b) {
+        return { label: b.label, count: b.count,
+                 dest: { page: "emails", band: String(b.n) }, crumb: b.label };
+      })));
   }
 
   // A flat thread table. Inside a group the significance bands are either the
@@ -4710,6 +4755,10 @@
                                             : "estate near misses");
       }
       if (Q.rescued) parts.push("estate-rescued");
+      // Named as what it is: mail the checklist reached FOR this type, not mail
+      // that is this type. The panel says the same thing; the heading has to too,
+      // or the list reads as "here are the 13 marriage certificates".
+      if (Q.vital) parts.push("about a " + String(Q.vital).toLowerCase());
       return parts.length ? parts.join(" · ") : "All emails";
     }
     var title = titleFrom(data.facets);
@@ -4749,6 +4798,10 @@
         });
         if (Q.estate) p.estate = Q.estate;
         if (Q.rescued) p.rescued = Q.rescued;
+        // Without this the list fetched with no ?vital and rendered all 21,988
+        // under a heading naming one document type — the right URL and crumb over
+        // the wrong data, which is the worst of the three to notice.
+        if (Q.vital) p.vital = Q.vital;
         if (search.value) p.q = search.value;
         if (dFrom.value) p.date_from = dFrom.value;
         if (dTo.value) p.date_to = dTo.value;
@@ -4799,7 +4852,11 @@
       cat: Q.cat || "", year: Q.year || "", participant: Q.participant || "",
     };
     var narrowed = !!(active.band || active.cat || active.year || active.participant
-                      || Q.q || Q.date_from || Q.date_to || Q.sort || Q.estate || Q.rescued);
+                      || Q.q || Q.date_from || Q.date_to || Q.sort || Q.estate || Q.rescued
+                      // ?vital= narrows to one of the 27 document types. Missing it
+                      // here meant the link filtered the data and then rendered the
+                      // index over it: right URL, right crumb, no list.
+                      || Q.vital);
     if (narrowed) return emailGroup(main, data, active);
     return emailIndex(main, data);
   };
