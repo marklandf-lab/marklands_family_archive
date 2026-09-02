@@ -82,11 +82,15 @@ Two changes, one behavioural:
   straight into that same category's near-misses. It used to be every candidate of
   every type, then every near-miss of every type, so the single handover sat
   unmarked in the middle of the whole queue.
-- **A handover card stops at each of those crossings.** "Finished reviewing
-  candidates for *[type]*. Review its *N* near misses?", with **Review near
-  misses** / **Skip to next category**. A type with no candidates says so instead.
-  No verb button is on that card and no verb key fires from it — the item behind it
-  has not been read yet. Answering is remembered, so paging back does not re-ask.
+- **A card stops at every crossing, of which there are two kinds.**
+  Candidates → near-misses within a type: "Finished reviewing candidates for
+  *[type]*. Review its *N* near misses?" One type → the next: "Finished *[type]*.
+  Next: *[type]* — *N* candidates to confirm." Both offer **Skip to next
+  category**. A type with no candidates gets only the first kind, worded "*[type]*
+  has no candidates" — that card already names the type, so announcing it twice
+  would be noise. No verb button is on either card and no verb key fires from
+  them — the item behind has not been read yet. Answering is remembered per
+  crossing, so paging back does not re-ask.
 
 **Terminology:** the user-facing label is **Vital documents** everywhere now. The
 Documents heading said "Estate documents" for the same thing. Note the word

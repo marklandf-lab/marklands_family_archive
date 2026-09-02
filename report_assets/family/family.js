@@ -5699,14 +5699,22 @@
       if (it.vqueue === "near_miss") catNear[t] = (catNear[t] || 0) + 1;
       else if (it.vqueue) catCand[t] = (catCand[t] || 0) + 1;
     });
-    // Never at index 0: there is nothing behind it to have finished.
-    function gateAt(i) {
+    // Two crossings get a stop, and never at index 0 — there is nothing behind it
+    // to have finished:
+    //   "cand" — a new document type begins with candidates to confirm.
+    //   "near" — this type's candidates are done and its near-misses start.
+    // A type with NO candidates gets only "near": that card already names the type,
+    // so announcing the type twice in a row would be noise.
+    function gateKind(i) {
       var it = items[i];
-      if (!it || group !== "vital" || it.vqueue !== "near_miss" || i === 0) return false;
+      if (!it || group !== "vital" || i === 0) return null;
       var prev = items[i - 1];
-      return prev.target !== it.target || prev.vqueue !== "near_miss";
+      if (prev.target === it.target) {
+        return (it.vqueue === "near_miss" && prev.vqueue !== "near_miss") ? "near" : null;
+      }
+      return it.vqueue === "near_miss" ? "near" : "cand";
     }
-    function gated() { return gateAt(pos) && !gateAck[pos]; }
+    function gated() { return !!gateKind(pos) && !gateAck[pos]; }
     // The human label the checklist uses ("Will / testament"), not the raw key.
     function targetLabel(t) {
       for (var i = 0; i < allTargets.length; i++) {
@@ -5785,21 +5793,38 @@
       stage.innerHTML = ""; acts.innerHTML = "";
       stageToken++;            // an in-flight preview belongs to the item we left
       revealed = false;
+      var kind = gateKind(pos);
       var t = (items[pos] || {}).target || "";
       var label = targetLabel(t);
       var nCand = catCand[t] || 0, nNear = catNear[t] || 0;
       var card = el("div", "pcard pgate");
-      card.appendChild(el("h2", "pgate-title", esc(
-        nCand ? "Finished reviewing candidates for " + label + "."
-              : label + " has no candidates.")));
-      card.appendChild(el("p", "pgate-ask", esc(
-        "Review its " + num(nNear) + " near miss" + (nNear === 1 ? "" : "es") + "?")));
-      card.appendChild(el("p", "pgate-note", esc(
-        "A near miss is something the pipeline found and did not confirm as "
-        + label.toLowerCase() + ". Reviewing them is optional — skipping leaves "
-        + "them undecided, and they stay on the checklist.")));
+      var primary;
+      if (kind === "cand") {
+        card.appendChild(el("h2", "pgate-title",
+          esc("Finished " + targetLabel((items[pos - 1] || {}).target) + ".")));
+        card.appendChild(el("p", "pgate-ask", esc(
+          "Next: " + label + " — " + num(nCand) + " candidate"
+          + (nCand === 1 ? "" : "s") + " to confirm.")));
+        card.appendChild(el("p", "pgate-note", esc(
+          "A candidate is something the pipeline matched to this type and nobody has "
+          + "signed off yet."
+          + (nNear ? " Its " + num(nNear) + " near miss" + (nNear === 1 ? "" : "es")
+                     + " come after them." : ""))));
+        primary = "Review candidates";
+      } else {
+        card.appendChild(el("h2", "pgate-title", esc(
+          nCand ? "Finished reviewing candidates for " + label + "."
+                : label + " has no candidates.")));
+        card.appendChild(el("p", "pgate-ask", esc(
+          "Review its " + num(nNear) + " near miss" + (nNear === 1 ? "" : "es") + "?")));
+        card.appendChild(el("p", "pgate-note", esc(
+          "A near miss is something the pipeline found and did not confirm as "
+          + label.toLowerCase() + ". Reviewing them is optional — skipping leaves "
+          + "them undecided, and they stay on the checklist.")));
+        primary = "Review near misses";
+      }
       stage.appendChild(card);
-      var go = el("button", "act primary", "Review near misses");
+      var go = el("button", "act primary", primary);
       go.onclick = function () { gateAck[pos] = true; renderStage(); };
       acts.appendChild(go);
       var sk = el("button", "act ghost", "Skip to next category");
