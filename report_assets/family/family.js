@@ -652,20 +652,57 @@
     return Object.keys(seen);
   }
 
-  // Reassign SCOPE chooser: when a document matched >1 vital category, ask whether
-  // the reassign applies to EVERY category (global) or only the clicked one (single).
-  // CSP-safe (addEventListener/.onclick, no inline handlers); text via esc()+innerHTML.
-  function pickScope(nCats, cb) {
+  // "A, B and C" — the dialogs below name categories, and a bare comma list reads
+  // as one more item rather than the end of the sentence.
+  function andList(names) {
+    names = names || [];
+    if (names.length <= 1) return names[0] || "";
+    return names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+  }
+
+  // Reassign SCOPE chooser: a vital match is per (document, type) pair, so one file
+  // can be a candidate under several types at once, and a reassign either moves the
+  // ONE pairing you are looking at (single) or every pairing the document has
+  // (global).
+  //
+  // This used to ask "All N categories / Just this one" over a bare count. It never
+  // said WHICH categories, and "this one" could be read as the type you are moving
+  // OUT of or the one you had just picked to move INTO — the two readings do
+  // opposite things and nothing on screen settled it. It now names every category
+  // involved and says what each choice LEAVES ALONE, which is the actual difference.
+  //
+  // `info` = { current: label you are viewing, to: label being moved to,
+  //            others: [labels the same document is also a candidate under] }.
+  // CSP-safe (addEventListener/.onclick, no inline handlers); text via esc().
+  function pickScope(info, cb) {
+    var others = info.others || [];
+    var n = others.length + 1;
+    var many = others.length !== 1;
     var back = el("div", "pickmodal-back");
-    var box = el("div", "pickmodal");
+    var box = el("div", "pickmodal pickmodal-wide");
     box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
     box.setAttribute("aria-label", "Reassign scope");
-    box.appendChild(el("h3", null, "Reassign in how many categories?"));
+    box.appendChild(el("h3", null,
+      esc("Move it out of " + info.current + ", or out of all " + n + "?")));
     box.appendChild(el("p", "pickmodal-note",
-      esc("This document is a vital match in " + nCats + " categories.")));
+      esc("This document is a candidate under " + info.current + " — the one you are "
+          + "looking at — and also under " + andList(others) + ". Reassigning it to "
+          + info.to + " can move:")));
+    var ul = el("ul", "pickmodal-opts");
+    ul.appendChild(el("li", null,
+      "<b>" + esc("Just " + info.current) + "</b> — "
+      + esc("that one entry becomes " + info.to + ". Its " + andList(others)
+            + (many ? " entries stay exactly as they are." : " entry stays exactly as it is."))));
+    ul.appendChild(el("li", null,
+      "<b>" + esc("All " + n) + "</b> — "
+      + esc("every one of them becomes " + info.to + ", so it stops being a candidate "
+            + "under " + andList(others) + " too.")));
+    box.appendChild(ul);
     var actions = el("div", "pickmodal-actions");
-    var all = el("button", "btn primary", esc("All " + nCats + " categories"));
-    var one = el("button", "btn", "Just this one");
+    // The narrower choice is the default. Enter used to fire the one that rewrote
+    // every category at once, which is the harder of the two to notice and undo.
+    var one = el("button", "btn primary", esc("Just " + info.current));
+    var all = el("button", "btn", esc("All " + n + " categories"));
     var cancel = el("button", "btn", "Cancel");
     function onKey(e) { if (e.key === "Escape") close(); }
     function close() { document.removeEventListener("keydown", onKey); back.remove(); }
@@ -674,10 +711,10 @@
     cancel.onclick = close;
     back.addEventListener("click", function (e) { if (e.target === back) close(); });
     document.addEventListener("keydown", onKey);
-    actions.appendChild(all); actions.appendChild(one); actions.appendChild(cancel);
+    actions.appendChild(one); actions.appendChild(all); actions.appendChild(cancel);
     box.appendChild(actions);
     back.appendChild(box); document.body.appendChild(back);
-    try { all.focus(); } catch (e) { /* no focus */ }
+    try { one.focus(); } catch (e) { /* no focus */ }
   }
 
   // Financial SUB-category picker (§14.5) — mirrors pickCategory but lists the
@@ -3693,7 +3730,13 @@
             doVerb("/api/vital/reassign", { id: it.id, to_target: to, scope: scope }, "Reassigned")
               .then(function (x) { if (x) render(); });
           }
-          if (cats.length > 1) { pickScope(cats.length, send); } else { send("single"); }
+          // Ask only when there is genuinely somewhere else to affect, and ask it
+          // with the other categories named.
+          var others = cats.filter(function (c) { return c !== t.target; })
+                           .map(function (c) { return vitalTargetLabel(vd, c); });
+          if (others.length) {
+            pickScope({ current: t.label, to: vitalTargetLabel(vd, to), others: others }, send);
+          } else { send("single"); }
         });
       };
       acts.appendChild(reassign);
@@ -6131,9 +6174,13 @@
       box.appendChild(selT);
       // Scope only matters when a document matched more than one vital target;
       // offered always but defaulting to the safe single-item scope.
+      // Same ambiguity as pickScope: "only this item" did not say which of the
+      // document's categories "this" was. The queue does not carry the document's
+      // full match list, so it cannot name the others — it can at least name the
+      // one being moved out of.
       var selS = el("select");
-      selS.appendChild(new Option("Only this item", "single"));
-      selS.appendChild(new Option("Every category this document matched", "global"));
+      selS.appendChild(new Option("Only its " + targetLabel(it.target) + " entry", "single"));
+      selS.appendChild(new Option("Every category this document is a candidate in", "global"));
       box.appendChild(el("label", "flabel", "Apply to"));
       box.appendChild(selS);
       pickmodal("Reassign “" + (it.name || it.id) + "”", box, {
