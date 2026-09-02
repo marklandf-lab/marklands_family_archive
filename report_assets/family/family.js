@@ -434,7 +434,20 @@
   // showed no toast AND left "Discarding…" stuck disabled forever). #F-2
   function doVerb(path, body, okMsg) {
     return postJSON(path, body).then(function (res) {
-      if (res.ok && res.j.ok !== false) { toast(okMsg, res.j.undo_token); return res.j; }
+      if (res.ok && res.j.ok !== false) {
+        // A batch verb reports {count, skipped}: per-item failures are SKIPPED,
+        // not fatal, so ok:true can mean nothing at all happened. Reporting
+        // "Discarded 9 items" over a response that discarded none is how a
+        // reviewer comes to believe the archive is dropping their decisions.
+        var j = res.j;
+        if (typeof j.skipped === "number" && j.skipped > 0) {
+          toast(j.count ? okMsg + " — " + j.skipped + " could not be"
+                        : "Nothing was changed: none of the " + j.skipped
+                          + " selected could be.", j.undo_token);
+          return j;
+        }
+        toast(okMsg, j.undo_token); return j;
+      }
       toast("Couldn't do that: " + (res.j.error || "error")); return null;
     }).catch(function (e) {
       toast("Couldn't do that: " + (e && e.message ? e.message : "server error"));
@@ -984,7 +997,14 @@
         // feedback, so a multi-select Discard updates the grid promptly instead of
         // lagging seconds behind per-item reloads and looking like it failed.
         ban.disabled = true; ban.textContent = "Discarding…";
-        doVerb("/api/banish", { srcs: ids }, "Discarded " + ids.length + " item(s)")
+        // Documents and media discard differently. banish moves bytes and refuses
+        // anything outside output/archive/, so it skipped every document in the
+        // selection while still reporting ok — the discard looked done and the
+        // documents stayed. A document selection goes to its own verb, which
+        // suppresses the rows through the builder every list is made from.
+        var isDocs = ids.length > 0 && ids.every(function (id) { return DOC_CAT[id]; });
+        doVerb(isDocs ? "/api/doc/discard" : "/api/banish",
+               { srcs: ids }, "Discarded " + ids.length + " item(s)")
           .then(function (x) {
             if (!x) { ban.disabled = false; ban.textContent = "Discard"; return; }
             clearSel();
@@ -3352,6 +3372,12 @@
   // losing both the open drawer and any "Show more" pages: reviewing a 40-hit
   // near-miss list meant re-expanding and re-paging after every single decision.
   var NEARMISS_OPEN = {};
+  // Which TYPES are expanded, independent of their near-miss drawer. The panel is
+  // rebuilt from the top on every verb, and the only thing it remembered was the
+  // DRAWER — so a reviewer working a type's candidates (the ordinary case) was
+  // dropped back to the collapsed checklist after every single decision, losing
+  // the list they were working through.
+  var VITAL_OPEN = {};
 
   // #17: bulk-select across near-miss drawers (a decision applies to whichever
   // rows are checked, possibly spanning more than one open target's drawer —
@@ -3945,20 +3971,23 @@
         tr.classList.toggle("open", on);
         caret.textContent = on ? "▾" : "▸";
         tr.setAttribute("aria-expanded", String(on));
-        if (on) build();
+        if (on) { VITAL_OPEN[t.target] = 1; build(); }
+        else delete VITAL_OPEN[t.target];
       }
       tr.onclick = function () { setOpen(detail.hidden); };
       keyable(tr, "button", t.label);
 
       // Re-open a type the examiner was working in before this render, and put it
       // back in front of them — the panel is rebuilt from the top on every verb.
-      if (NEARMISS_OPEN[t.target] != null) {
+      if (NEARMISS_OPEN[t.target] != null || VITAL_OPEN[t.target]) {
         setOpen(true);
-        var bx = detail.querySelector(".vcand-drawer");
-        var bt = detail.querySelector(".vcand");
-        if (bx && bt) {
-          bx.hidden = false; bt.setAttribute("aria-expanded", "true");
-          nearMissLoad(t.target, bx, 0, vd, NEARMISS_OPEN[t.target]);
+        if (NEARMISS_OPEN[t.target] != null) {
+          var bx = detail.querySelector(".vcand-drawer");
+          var bt = detail.querySelector(".vcand");
+          if (bx && bt) {
+            bx.hidden = false; bt.setAttribute("aria-expanded", "true");
+            nearMissLoad(t.target, bx, 0, vd, NEARMISS_OPEN[t.target]);
+          }
         }
         scrollBackTo(tr);
       }

@@ -1289,7 +1289,8 @@ class ArchiveCase:
                 # length, which counted every email as a document too (~66k vs. the
                 # ~1.5k the Documents page actually shows).
                 "documents": len(document_rows(self.summary, self.ocr_index, self.role,
-                                               doc_placements=decisions.get("doc_placements"))),
+                                               doc_placements=decisions.get("doc_placements"),
+                                               discarded=decisions.get("doc_discarded"))),
                 "audio": len(self.summary.get("audio_classifications", []) or []),
                 "videos": self.summary.get("video_delivered", self.summary.get("total_videos", 0)),
                 # Conversations THIS ROLE may see (matches the Messages section
@@ -1353,7 +1354,8 @@ class ArchiveCase:
             return d
         if page == "documents":
             rows = document_rows(self.summary, self.ocr_index, self.role,
-                                 doc_placements=self.decisions.get("doc_placements"))
+                                 doc_placements=self.decisions.get("doc_placements"),
+                                 discarded=self.decisions.get("doc_discarded"))
             return {"index": documents_index(rows), "rows": rows,
                     "vital_docs": vital_docs_data(self.paths, self.summary, self.role,
                                                   decisions=self.decisions,
@@ -1370,7 +1372,8 @@ class ArchiveCase:
             # Real (non-email) correspondence docs, grouped by writing medium,
             # plus scanned document/letter IMAGES (not in document_classifications).
             rows = [d for d in document_rows(self.summary, self.ocr_index, self.role,
-                                             doc_placements=self.decisions.get("doc_placements"))
+                                             doc_placements=self.decisions.get("doc_placements"),
+                                 discarded=self.decisions.get("doc_discarded"))
                     if d.get("category") in LETTER_CATEGORIES]
             typed, hand = [], []
             for r in rows:
@@ -1479,7 +1482,8 @@ class ArchiveCase:
                             st["summary"], st["universe"], {}, self.role,
                             frame_map=st["video_frame_map"], archive_map=st["archive_map"]),
                 document_rows(st["summary"], st["ocr_index"], self.role,
-                              doc_placements=self.decisions.get("doc_placements")),
+                              doc_placements=self.decisions.get("doc_placements"),
+                                 discarded=self.decisions.get("doc_discarded")),
                 audio_rows(st["summary"], st["transcription_index"], self.role, self.cfg),
                 email_rows(st["email_threads"]),
                 conversations=message_rows(st["conversation_index"], self.role)))
@@ -4102,6 +4106,65 @@ def verb_promote_vital(case, payload):
     return out
 
 
+def verb_discard_document(case, payload):
+    """DISCARD one or more DOCUMENTS ({src} or {srcs:[...]}), examiner-only.
+
+    "Discard" on a document selection used to call verb_banish, which moves bytes
+    and refuses anything outside output/archive/. Every document is outside it, so
+    every item was skipped — and because a batch banish skips per-item failures and
+    still returns ok, the UI reported a successful discard over a response that had
+    discarded nothing. The documents were still there on the next render, which is
+    exactly what it looked like: an archive losing decisions.
+
+    A document is not a photo: its row comes from document_classifications, not from
+    the on-disk tree, so moving bytes would not remove it from any list. The
+    suppression therefore lives where every list is built — a doc_discarded overlay
+    keyed by PATH, filtered inside document_rows, which is the sole source of the
+    category lists, their counts and the search index alike.
+
+    Never destroys: the file is untouched on disk and the decision is reversible and
+    audited, like every other verb here."""
+    require_examiner(case)
+    srcs = payload.get("srcs")
+    batch = srcs is not None
+    if not batch:
+        srcs = [payload.get("src")]
+    srcs = [s for s in srcs if s]
+    if not srcs:
+        raise VerbError("discard needs src or srcs")
+    dpath = case.paths.metadata_dir / DECISIONS_FILE
+    # Validate against the DOCUMENT SET rather than against the case directory.
+    # Containment would have been the habit here, but it fails the wrong way: a
+    # document whose recorded path did not relocate still has a row (rows come
+    # from the index, not the disk), and a path check would have made exactly
+    # those rows permanently undiscardable. Matching the index is stricter — an
+    # id that names no document is refused outright — and it can never refuse a
+    # row the archive is actually showing.
+    known = {d.get("file") for d in (case.summary.get("document_classifications") or [])
+             if d.get("file")}
+    tokens, skipped = [], 0
+    with _doc_lock(case):  # cross-process RMW guard (R-4)
+        decisions = load_json(dpath, {}) or {}
+        gone = decisions.setdefault("doc_discarded", {})
+        for src in srcs:
+            if str(src) not in known:
+                if not batch:
+                    raise VerbError("not a document in this case", 400)
+                skipped += 1
+                continue
+            gone[str(src)] = {"ts": _now(), "actor": case.role}
+            tokens.append(str(src))
+        atomic_write_json(dpath, decisions)
+    entries = [append_action(case, "discard_document", t, {"present": False}, {},
+                             reversible=True) for t in tokens]
+    case.load()
+    out = {"ok": True, "count": len(entries), "skipped": skipped,
+           "undo_tokens": [e["undo_token"] for e in entries]}
+    if len(entries) == 1:
+        out["undo_token"] = entries[0]["undo_token"]
+    return out
+
+
 def verb_dismiss_vital(case, payload):
     """DISMISS a document as "not a vital document" (examiner-only). "Not a vital
     document" is a statement about the DOCUMENT, not one categorization, so it drops
@@ -4511,6 +4574,16 @@ def _apply_inverse(case, entry):
             (decisions.get("vital_doc_dismissed", {}) or {}).pop(iid, None)
             atomic_write_json(dpath, decisions)
         return {"restored": iid}
+    if action == "discard_document":
+        # Inverse of a document discard: drop the suppression so the document
+        # returns to its category list, its counts and the search index.
+        src = entry["target"]
+        dpath = case.paths.metadata_dir / DECISIONS_FILE
+        with _doc_lock(case):  # cross-process RMW guard (R-4)
+            decisions = load_json(dpath, {}) or {}
+            (decisions.get("doc_discarded", {}) or {}).pop(src, None)
+            atomic_write_json(dpath, decisions)
+        return {"restored": src}
     if action == "not_type_vital":
         # Inverse of "not a will": drop the rejection so the pairing returns to its
         # category, undecided.
@@ -5025,6 +5098,7 @@ VERBS = {
     "vital/dismiss": verb_dismiss_vital, "vital/reassign": verb_reassign_vital,
     "vital/confirm": verb_confirm_vital, "vital/promote": verb_promote_vital,
     "vital/not-type": verb_not_type_vital,
+    "doc/discard": verb_discard_document,
     "remove/person": verb_remove_person, "reset": verb_reset, "undo": verb_undo,
     # ── G-15 face-assist (examiner-only; DECISIONS OVERLAY, never mutates an index) ──
     "merge/persons": verb_merge_persons, "assign/face": verb_assign_face,

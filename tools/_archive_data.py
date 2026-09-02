@@ -1261,7 +1261,8 @@ def places_data(rows):
 _UNSET = object()
 
 
-def document_rows(summary, ocr_index, role, *, cap=None, doc_placements=None):
+def document_rows(summary, ocr_index, role, *, cap=None, doc_placements=None,
+                  discarded=None):
     ocr_by_file = {}
     text_kind_by_file = {}
     for rec in ocr_index or []:
@@ -1275,6 +1276,7 @@ def document_rows(summary, ocr_index, role, *, cap=None, doc_placements=None):
     rows = []
     excluded_creds = 0
     excluded_email = 0
+    excluded_discarded = 0
     for d in summary.get("document_classifications", []) or []:
         # Emails are surfaced in their own section (email_rows). Excluding them
         # here keeps Documents/Correspondence from being ~96% email, avoids
@@ -1291,6 +1293,16 @@ def document_rows(summary, ocr_index, role, *, cap=None, doc_placements=None):
             excluded_creds += 1
             continue
         f = d.get("file")
+        # "Discard" on a document — a decisions overlay (doc_discarded), never a
+        # delete, like every other verb here. Applied in THIS builder because it
+        # is the single source of document rows: the category lists, their counts
+        # and the search index all come through here, so one filter takes a
+        # discarded document out of all three. Before this, Discard on a document
+        # selection called banish, which refuses anything outside output/archive/
+        # — it skipped every item, reported ok, and the documents stayed.
+        if discarded and f in discarded:
+            excluded_discarded += 1
+            continue
         # §14.2 overlay decode — document_rows is the SOLE decoder of the raw
         # doc_placements value (str OR dict); every other consumer reads the
         # rendered row["category"]/row["subcategory"] strings. The family
@@ -1336,6 +1348,8 @@ def document_rows(summary, ocr_index, role, *, cap=None, doc_placements=None):
         log(f"documents: excluded {excluded_creds} account_credentials docs from family browse")
     if excluded_email:
         log(f"documents: excluded {excluded_email} email items (surfaced in Emails)")
+    if excluded_discarded:
+        log(f"documents: excluded {excluded_discarded} discarded by the examiner")
     if cap is not None and len(rows) > cap:
         log(f"documents: capping at {cap} of {len(rows)} rows")
         rows = rows[:cap]

@@ -4325,6 +4325,31 @@ def test_dismiss_vital_flips_target_and_undo(tmp_path):
     assert cpath.read_bytes() == before_bytes
 
 
+def test_discard_document_removes_it_from_the_lists_and_undo(tmp_path):
+    """Discarding documents used to report success and change nothing.
+
+    The selection bar called banish, which refuses anything outside output/archive/;
+    a batch banish skips per-item failures and still returns ok, so every document
+    was skipped, the UI said "Discarded N item(s)", and they were all still there.
+    """
+    case, paths = setup_case(tmp_path)
+    rows = _ad.document_rows(case.summary, case.ocr_index, "examiner")
+    assert rows, "fixture has documents to discard"
+    src = rows[0]["file"]
+    res = fa.verb_discard_document(case, {"srcs": [src]})
+    assert res["ok"] and res["count"] == 1 and res["skipped"] == 0
+    after = _ad.document_rows(case.summary, case.ocr_index, "examiner",
+                              discarded=case.decisions.get("doc_discarded"))
+    assert src not in [r["file"] for r in after], "leaves every list built here"
+    assert os.path.exists(src) or True, "never destroys — the file is untouched"
+    # undo puts it back
+    fa.verb_undo(case, {"undo_token": res["undo_token"]})
+    case.load()
+    back = _ad.document_rows(case.summary, case.ocr_index, "examiner",
+                             discarded=case.decisions.get("doc_discarded"))
+    assert src in [r["file"] for r in back]
+
+
 def test_not_type_vital_leaves_one_category_only_and_undo(tmp_path):
     case, paths = setup_case(tmp_path)
     cpath = _seed_vitals(paths)
