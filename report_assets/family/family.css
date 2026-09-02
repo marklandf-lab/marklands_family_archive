@@ -407,6 +407,17 @@ a.attchip:hover { text-decoration: underline; }
 .pickmodal h3 { margin: 0 0 12px; }
 .pickmodal-sel { width: 100%; padding: 8px; margin-bottom: 14px; }
 .pickmodal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+/* The reassign-scope dialog names every category involved, so it needs more room
+   than the 380px picker and its buttons carry real labels rather than "OK". */
+/* Wide enough for all three actions on one row: the choice buttons carry a
+   category name, and the longest of the 27 ("Business operating agreement")
+   plus "All N categories" plus Cancel is ~460px of content. flex-wrap stays as
+   the fallback for a narrow viewport rather than as the normal case. */
+.pickmodal.pickmodal-wide { width: 540px; }
+.pickmodal-wide .pickmodal-actions { flex-wrap: wrap; }
+.pickmodal-opts { margin: 0 0 14px; padding-left: 18px; font-size: 13px; line-height: 1.55; color: var(--muted); }
+.pickmodal-opts li { margin: 7px 0; }
+.pickmodal-opts b { color: var(--ink); }
 .lightbox { position: fixed; inset: 0; background: rgba(20,16,12,.86); display: none; align-items: center; justify-content: center; z-index: 1000; }
 .lightbox.show { display: flex; }
 body.lb-open { overflow: hidden; }

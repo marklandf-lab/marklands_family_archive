@@ -58,6 +58,65 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 (late) — the reassign scope dialog says what it does
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+### What shipped
+
+Reassigning a vital document that matched more than one type asked **"Reassign in
+how many categories? — All N categories / Just this one"** over a bare count. It
+never said *which* categories, and "just this one" could be read as the type you
+are moving OUT of or the one you had just picked to move INTO. Those are opposite
+actions and nothing on screen settled it.
+
+It now names them: which type you are looking at, which others hold the same
+document, where it is going, and — the part that actually distinguishes the two
+choices — **what each one leaves alone**. The narrow choice is the default now;
+Enter used to fire the one that rewrote every category at once.
+
+The queue's own reassign modal had the same ambiguity in its "Apply to" select
+("Only this item"). It says "Only its *[type]* entry" now. It cannot name the
+other categories — a pager item does not carry the document's full match list —
+so it names the one it can.
+
+### The dialog only appears when the answer changes something
+
+"All of them" differs from "just this one" ONLY for categories that are neither
+the one being moved out of nor the one being moved into. Every multi-category
+document on 813_mf is in exactly two — and all 16 are the same pair (Buy-sell
+agreement + Business operating agreement) — so moving between those two, which is
+the obvious thing to do with them, now asks nothing at all and simply moves it.
+Before, it asked a question whose two answers had the same result and whose text
+contradicted itself ("becomes Business operating agreement … stops being a
+candidate under Business operating agreement").
+
+### The semantics, since they are not guessable from the UI
+
+A vital match is per **(document, type)** pair. One file can be a candidate under
+several types at once.
+
+- `scope: "single"` — moves only the pairing you are looking at. The document's
+  other type entries are untouched.
+- `scope: "global"` — moves **every** pairing of that document to the new type, so
+  it stops being a candidate under the others.
+
+`verb_reassign_vital` in `tools/family_archive.py` is the authority; it is a pure
+`family_decisions` overlay (`vital_doc_target`), reversible and audited, and never
+touches `vital_doc_confirmed.json`.
+
+### Testing this without writing to the case
+
+Opening the target picker and the scope dialog fires nothing — the verb goes only
+on the scope dialog's own buttons. Cancel out and the case is untouched. Verified
+by count: the audit log did not move for either dialog.
+
+---
+
 ## 🎯 2026-09-02 (evening) — Vital Documents is its own section
 
 ### ▶ Next action
