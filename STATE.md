@@ -58,6 +58,45 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 (end, later) — un-junking works on a delivered case
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+### What shipped
+
+**Un-junk failed for almost every item in Junk review**, with "junk file not
+present". Measured on 813_mf: of the first 400 junk rows, **394 were refused — and
+388 of those were perfectly rescuable.**
+
+`_unjunk_one` has two models. The route_junk model moves the file back out of
+`extracted/photos_junk/`. The scene-classifier model is label-only: the file was
+never moved, junk is a LABEL in `scene_index.junk_results`, and the rescue is a pure
+`junk_rescued` overlay. The second path still refused unless the original **working
+file** was on disk.
+
+**A delivery carries `output/` and leaves the working trees behind.**
+`extracted/photos_junk/` does not exist on this machine at all, and neither does
+`extracted/photos/`. So both paths failed on the only kind of copy this app serves.
+
+The rescue moves nothing, so it never needed the working file. What decides whether
+it can surface anything is the **delivered canonical** — the same thing
+`build_photo_universe` requires before it will put the tile back. That is the check
+now. It still refuses when neither exists, which is honest: nothing to bring back.
+
+### The pattern worth remembering
+
+This is the third bug this session in the same shape: **a verb gated on the working
+tree, on a machine that only ever has the delivered one.** The others were the
+Document Photos thumbnails and document Discard. When something "does not work" here,
+check what it needs on disk before anything else — and check it against
+`~/WyeastCases`, not against the test fixture, whose paths are not a delivery.
+
+---
+
 ## 🎯 2026-09-02 (end) — Vital documents reads as a reference until you switch Reviewing on
 
 ### ▶ Next action

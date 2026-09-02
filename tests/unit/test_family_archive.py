@@ -3801,6 +3801,40 @@ def test_unjunk_undo_never_deletes_a_real_file_at_view_path(tmp_path):
         "a real file at the rescued-view path must survive un-junk undo"
 
 
+def test_unjunk_works_on_a_delivered_copy_with_no_working_file(tmp_path):
+    """A delivery carries output/ and leaves the working trees behind.
+
+    Scene-junk is a LABEL and the rescue is a pure overlay -- nothing is moved -- so
+    the original working file is not needed. Refusing on it meant un-junking failed
+    for almost everything on a served copy: 394 of the first 400 junk rows on 813_mf,
+    of which 388 had a delivered canonical and were perfectly rescuable. What decides
+    whether a rescue can surface anything is that canonical, which is what
+    build_photo_universe requires before it will put the tile back.
+    """
+    case, paths = setup_case(tmp_path)
+    key, work_file = _add_label_junk(case, paths, "delivered.png", with_archive=True)
+    work_file.unlink()                      # the delivery left the working tree behind
+    case.load()
+    res = fa.verb_unjunk(case, {"id": key})
+    assert res["ok"] and res.get("undo_token")
+    assert case.decisions.get("junk_rescued", {}).get(key) is True
+    # and it really does come back to the gallery
+    universe = _ad.build_photo_universe(case.scene_index, case.archive_map, "examiner",
+                                        rescued=case.decisions.get("junk_rescued"))
+    assert key in universe, "the rescued item rejoins the photo universe"
+
+
+def test_unjunk_still_refuses_when_there_is_nothing_to_restore(tmp_path):
+    # No working file AND no delivered canonical: the rescue could not surface
+    # anything, so refusing is the honest answer rather than a silent no-op.
+    case, paths = setup_case(tmp_path)
+    key, work_file = _add_label_junk(case, paths, "gone.png", with_archive=False)
+    work_file.unlink()
+    case.load()
+    with pytest.raises(fa.VerbError):
+        fa.verb_unjunk(case, {"id": key})
+
+
 def test_unjunk_refuses_family(tmp_path):
     case, paths = setup_case(tmp_path, role="family")
     key, junk_file, dest = _add_junk(case, paths, "junk1.png")
