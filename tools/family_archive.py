@@ -1656,6 +1656,14 @@ class ArchiveCase:
                 "locked": False,
                 "canonical_path": e.get("canonical_path"),
                 "src": e.get("canonical_path"),
+                # Whether the quarantined BYTES are in this copy. Release and
+                # discard both move that file, and the preview resolves through
+                # it, so all three are impossible when it is absent — which it is
+                # for every entry on a delivery, since a delivery carries output/
+                # and not quarantine/. This is the list's copy of the same flag
+                # quarantine_pager_items computes for the paged flow.
+                "present": bool(e.get("quarantine_path"))
+                           and os.path.exists(e.get("quarantine_path")),
             }
             out.append(row)
         return {"entries": out, "total": len(out)}

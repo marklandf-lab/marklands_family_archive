@@ -58,6 +58,63 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 — THE DELIVERY AUDIT: what a served copy cannot do
+
+**Read this before diagnosing any "X does not work" here.** Five bugs this session
+were one bug wearing different clothes.
+
+### The single cause
+
+**A delivery carries `output/` and leaves the working trees behind.** On this
+machine, `quarantine/`, `duplicates/`, `original_files/` and the case's log dir do
+not exist at all, and `extracted/` is partial (`extracted/photos_junk/` is absent).
+Re-derive it, do not trust this list:
+
+```bash
+python3 - <<'PY2'
+import os
+from wyeast.core.paths import CasePaths
+p = CasePaths.from_case_id('813_mf', os.path.expanduser('~/WyeastCases'))
+for n in sorted(x for x in dir(p) if x.endswith('_dir')):
+    v = getattr(p, n)
+    print(f"{n:22s} {'EXISTS ' if os.path.isdir(v) else 'MISSING'}  {v}")
+PY2
+```
+
+Code written on the workstation assumes the working trees are there. Every surface
+that touches them is suspect, and pytest cannot see it: the fixtures build a full
+case tree, so **the tests are a workstation, not a delivery.**
+
+### The sweep
+
+Every examiner API surface was probed live. All of them RESPOND — nothing 500s — so
+reading is fine everywhere and the damage is always in a verb or a preview.
+
+Fixed this session: Document Photos thumbnails · document Discard · un-junk ·
+quarantine + sensitivity (this entry).
+
+**Now honest rather than fixed** — these cannot be made to work from this end,
+because the bytes are genuinely not in the copy:
+
+- **Review queue → Quarantine.** Every entry's file lives under `quarantine/`.
+  Preview 404s; Release and Discard both MOVE that file, so both refuse. The list
+  and the paged flow now say so, offer no dead buttons, and mark each row. The
+  count stays visible: it is part of the record.
+- **Review queue → Sensitivity.** Flagged items sit under working trees like
+  `duplicates/`. Same treatment. `review_data._present()` only rejected rows whose
+  ARCHIVE copy was gone and kept anything with no archive entry at all
+  ("nothing to check") — which is exactly these.
+
+### Two traps to avoid repeating
+
+- **`src` is not servability.** Nulling a dead `src` broke three mapping tests that
+  rightly assert what a row's file IS. Keep the mapping; add a `present` flag.
+- **A batch verb that skips failures and returns ok will lie for you.** `doVerb`
+  now reports `{count, skipped}` honestly, which is how the recipe discard was
+  caught. Do not remove it.
+
+---
+
 ## 🎯 2026-09-02 (end, later) — un-junking works on a delivered case
 
 ### ▶ Next action

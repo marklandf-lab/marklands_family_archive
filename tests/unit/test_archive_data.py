@@ -1242,6 +1242,46 @@ def test_review_data_triggered_only(tmp_path):  # Item 14
     assert hr["hr.jpg"]["src"] == "/x/hr.jpg"
 
 
+def test_review_data_marks_rows_whose_bytes_are_not_in_this_copy(tmp_path):
+    """A delivery carries output/ and leaves the working trees behind.
+
+    Quarantined bytes live under <case>/quarantine/ and flagged items can sit under
+    duplicates/ — neither is delivered. On 813_mf that is every quarantine entry
+    (149) and every sensitivity row (27): the previews 404, and Release and Discard
+    both refuse because both have to move a file that is not there. Nothing can make
+    those verbs work from this end, so the rows must at least SAY so instead of
+    offering dead previews and dead buttons.
+
+    `src` still reports what the row's file is — that mapping is a separate question
+    from whether the bytes are here, and conflating the two broke the mapping tests.
+    """
+    paths = CasePaths.from_case_id("C", str(tmp_path))
+    md = paths.metadata_dir; md.mkdir(parents=True)
+    here = tmp_path / "present.jpg"; here.write_bytes(b"\xff\xd8\xff\xd9")
+    gone = tmp_path / "absent.jpg"                      # never created
+    (md / "sensitive_scan_index.json").write_text(json.dumps({
+        str(here): {"sensitivity_filters": {"weapons": {"triggered": True}}},
+        str(gone): {"sensitivity_filters": {"weapons": {"triggered": True}}},
+    }))
+    (md / "quarantine_manifest.json").write_text(json.dumps({"entries": [
+        {"file": "q_here.jpg", "filter": "explicit", "canonical_path": "/a/q_here.jpg",
+         "quarantine_path": str(here)},
+        {"file": "q_gone.jpg", "filter": "explicit", "canonical_path": "/a/q_gone.jpg",
+         "quarantine_path": str(gone)},
+    ]}))
+    d = ad.review_data(paths, {})
+
+    q = {e["file"]: e for e in d["quarantine"]}
+    assert q["q_here.jpg"]["present"] is True
+    assert q["q_gone.jpg"]["present"] is False, "no bytes here: release/discard cannot work"
+
+    sens = {s["name"]: s for s in d["sensitive"]}
+    assert sens["present.jpg"]["present"] is True
+    assert sens["absent.jpg"]["present"] is False
+    # src is unchanged either way — what the file IS, not whether it is here.
+    assert sens["absent.jpg"]["src"] == str(gone)
+
+
 def test_message_rows_shape_order_and_discard_excluded():
     ci = [
         {"conversation_id": "sms_aaa", "platform": "sms", "participants": ["+1555", "Mom"],
