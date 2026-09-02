@@ -4350,6 +4350,67 @@ def _ethread(tid, kind=None, labels=None, sig=3):
     return r
 
 
+def test_email_rows_carry_linked_by_for_the_sender_rule():
+    """A projection that drops a field a rule depends on fails silently.
+
+    sender_kind_map reads linked_by to see a reply chain. email_rows projects a
+    fixed set of fields, did not include it, and so that half of the rule never
+    fired -- 1,610 genuine exchanges were served as "automated" with no error
+    anywhere. Pin the field to the row.
+    """
+    summary = {"email_threads": [{"thread_id": "t1", "subject": "s", "participants": [],
+                                  "significance": 3, "linked_by": "headers",
+                                  "message_count": 2}]}
+    rows = _ad.email_rows({"threads": summary["email_threads"]})
+    assert rows and rows[0].get("linked_by") == "headers"
+
+
+def test_sender_kind_splits_people_from_automated():
+    """Everyday and Routine are near-synonyms that hid what they split on.
+
+    On 813_mf, 70% of Everyday has a sender in the address book against 5% of
+    Routine, and 38% is a real reply chain against 8%. Those two signals ARE the
+    distinction, so they are offered directly instead of through a ranking.
+
+    NOTE the claim's limit, which the panel states too: this is who the sender is
+    to the reader, not whether a human typed the message.
+    """
+    freq = [{"address": "known@x.com", "name_source": "address_book"},
+            {"address": "list@bulk.com", "name_source": "header"}]
+    owner = ["me@x.com"]
+    rows = [
+        {"thread_id": "t1", "participants": ["Me <me@x.com>", "K <known@x.com>"],
+         "linked_by": "single"},                       # in the address book
+        {"thread_id": "t2", "participants": ["Me <me@x.com>", "S <stranger@x.com>"],
+         "linked_by": "headers"},                      # somebody replied
+        {"thread_id": "t3", "participants": ["Me <me@x.com>", "L <list@bulk.com>"],
+         "linked_by": "single"},                       # neither
+    ]
+    rows.append({"thread_id": "t4", "participants": ["Me <me@x.com>", "S <s@x.com>"],
+                 "linked_by": "single", "subject": "Re: the thing we discussed"})
+    got = fa.sender_kind_map(rows, owner, freq)
+    assert got == {"t1": "person", "t2": "person", "t3": "automated",
+                   "t4": "person"}, "a Re: subject is somebody replying"
+
+
+def test_sender_kind_ignores_the_owner_being_in_the_address_book():
+    # The owner is a participant in every thread and is in their own address book,
+    # so counting them made every conversation look like it came from a person --
+    # 92-99% across every band, which is the shape of a broken measurement.
+    freq = [{"address": "me@x.com", "name_source": "address_book"}]
+    rows = [{"thread_id": "t1", "participants": ["Me <me@x.com>", "L <list@bulk.com>"],
+             "linked_by": "single"}]
+    assert fa.sender_kind_map(rows, ["me@x.com"], freq) == {"t1": "automated"}
+
+
+def test_filter_emails_sender_narrows_and_ignores_junk():
+    rows = [{"thread_id": "t1", "sender": "person"},
+            {"thread_id": "t2", "sender": "automated"}]
+    assert [r["thread_id"] for r in fa._filter_emails_sender(rows, {"sender": "person"})] == ["t1"]
+    assert [r["thread_id"] for r in fa._filter_emails_sender(rows, {"sender": "automated"})] == ["t2"]
+    assert len(fa._filter_emails_sender(rows, {"sender": "wat"})) == 2, "unknown value does not filter"
+
+
 def test_email_facets_break_the_estate_marker_down_by_document_type():
     """The marker said a conversation was on the checklist; it never said as WHAT.
 

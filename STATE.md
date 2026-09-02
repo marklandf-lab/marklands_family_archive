@@ -58,6 +58,55 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 — Emails can be cut by who sent it
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+### Why this exists
+
+"Everyday" and "Routine" hold two thirds of the mail and are near-synonyms in
+English, so the page told a reader nothing about the difference. Measured, the two
+bands split almost cleanly on something the labels never mentioned: **Everyday is
+mail from people, Routine is mail from machines.** Re-derive rather than trust
+these, but the shape was ~70% of Everyday from a sender in the address book against
+~5% of Routine, and ~38% a real reply chain against ~8%.
+
+So the distinction is offered directly — **Who it is from: From a person /
+Automated or bulk** — instead of through a ranking that only correlates with it.
+
+### The rule, and its limit
+
+A conversation is **from a person** when the sender is in the address book, OR the
+thread was assembled from real mail headers, OR the subject opens Re:/Fwd:.
+Everything else is automated. **It reports who the sender is to the reader, not
+whether a human typed the message** — a newsletter from a contact counts as a
+person, a one-off note from a stranger does not. The panel says so; do not let a
+later edit upgrade the claim.
+
+### Two things that would have cost the next person a day
+
+- **`bidirectional` and `sent_count` on `correspondent_frequency.json` are present
+  and never populated** — False and 0 on every record. They are the obvious signals
+  and both are dead. Check a field's values before building on it.
+- **The owner is a participant in every thread and is in their own address book.**
+  Counting them made 92–99% of every band look like it came from a person, which is
+  the shape of a broken measurement rather than a finding.
+
+### The bug worth remembering
+
+`email_rows` projects a fixed field set and dropped `linked_by`, so the reply-chain
+half of the rule **silently never fired** — 1,610 genuine exchanges served as
+automated with no error anywhere. It was caught only because the live count
+disagreed with the number measured straight from the index. **When a rule reads a
+field off a row, check the projection carries it**, and compare the shipped number
+against the one you measured from the source.
+
+---
+
 ## 🎯 2026-09-02 — Emails can be cut by vital document type
 
 ### ▶ Next action

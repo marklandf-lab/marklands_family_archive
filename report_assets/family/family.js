@@ -325,8 +325,8 @@
      "band", "year", "by", "sort",
      // Recordings: which audio kind is being shown. Reports: which report.
      "kind", "r", "view", "estate", "rescued",
-     // Emails narrowed to ONE of the 27 vital document types.
-     "vital"].forEach(function (k) {
+     // Emails narrowed to ONE of the 27 vital document types, or to who sent it.
+     "vital", "sender"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -4587,9 +4587,31 @@
     }
     more.appendChild(pplPanel);
 
-    // Under the vital cut, in the same column: still the last of the five to be
-    // read, but sitting with the other estate-shaped way in rather than stranded
-    // in a row of its own.
+    // Between the vital cut and significance. It exists because the two bands
+    // below it — Everyday and Routine — are near-synonyms that hid the thing they
+    // were actually splitting on: mail from people against mail from machines.
+    var snd = f.sender || [];
+    if (snd.length) {
+      var sLab = { person: "From a person", automated: "Automated or bulk" };
+      var sp = emailIndexPanel(
+        "Who it is from",
+        "Whether the conversation involves someone you correspond with.",
+        snd.map(function (x) {
+          return { label: sLab[x.kind] || x.kind, count: x.count,
+                   dest: { page: "emails", sender: x.kind },
+                   crumb: sLab[x.kind] || x.kind };
+        }));
+      sp.appendChild(el("p", "eix-note",
+        "\u201CFrom a person\u201D means the sender is in the address book, or "
+        + "somebody actually replied. It is about who the sender is to you, not "
+        + "whether a human typed the message: a newsletter from someone in your "
+        + "contacts counts as a person, and a one-off note from a stranger does not."));
+      left.appendChild(sp);
+    }
+
+    // Under the vital and sender cuts, in the same column: still the last to be
+    // read, but sitting with the other short ways in rather than stranded in a
+    // row of its own.
     left.appendChild(emailIndexPanel(
       "By significance", "How the pipeline ranked each conversation — a ranking "
       + "rather than a subject, so it is the least useful way to start.",
@@ -4759,6 +4781,8 @@
       // that is this type. The panel says the same thing; the heading has to too,
       // or the list reads as "here are the 13 marriage certificates".
       if (Q.vital) parts.push("about a " + String(Q.vital).toLowerCase());
+      if (Q.sender) parts.push(Q.sender === "person" ? "from a person"
+                                                     : "automated or bulk");
       return parts.length ? parts.join(" · ") : "All emails";
     }
     var title = titleFrom(data.facets);
@@ -4802,6 +4826,7 @@
         // under a heading naming one document type — the right URL and crumb over
         // the wrong data, which is the worst of the three to notice.
         if (Q.vital) p.vital = Q.vital;
+        if (Q.sender) p.sender = Q.sender;
         if (search.value) p.q = search.value;
         if (dFrom.value) p.date_from = dFrom.value;
         if (dTo.value) p.date_to = dTo.value;
@@ -4856,7 +4881,7 @@
                       // ?vital= narrows to one of the 27 document types. Missing it
                       // here meant the link filtered the data and then rendered the
                       // index over it: right URL, right crumb, no list.
-                      || Q.vital);
+                      || Q.vital || Q.sender);
     if (narrowed) return emailGroup(main, data, active);
     return emailIndex(main, data);
   };

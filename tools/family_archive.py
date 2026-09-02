@@ -627,6 +627,7 @@ def _email_facets(rows, owner=(), merges=None):
                 slot = vital.setdefault(lab, {"candidate": 0, "near_miss": 0})
                 slot[kind] += 1
     rescued_n = sum(1 for r in rows if r.get("rescued"))
+    sender = Counter(r.get("sender") for r in rows if r.get("sender"))
     return {
         "estate": [{"kind": k, "count": estate[k]}
                    for k in ("candidate", "near_miss") if estate.get(k)],
@@ -636,6 +637,8 @@ def _email_facets(rows, owner=(), merges=None):
                                        key=lambda kv: (-(kv[1]["candidate"] + kv[1]["near_miss"]),
                                                        kv[0]))],
         "rescued": rescued_n,
+        "sender": [{"kind": k, "count": sender[k]}
+                   for k in ("person", "automated") if sender.get(k)],
         "bands": [{"n": n, "label": lab, "count": bands.get(n, 0)}
                   for n, lab in EMAIL_BANDS if bands.get(n, 0)],
         "categories": [{"name": k, "count": v} for k, v in cats.most_common()],
@@ -649,6 +652,78 @@ def _email_facets(rows, owner=(), merges=None):
         # visible rather than silently reshaping the list.
         "owner_addresses": sorted(owner),
     }
+
+
+# "Re:", "Fwd:", and the German/Dutch forms that turn up in exported mail.
+_REPLY_SUBJECT = re.compile(r"\s*(re|fwd?|aw|antw)\s*:", re.I)
+
+
+def sender_kind_map(rows, owner, correspondent_freq):
+    """thread_id -> "person" | "automated".
+
+    The two significance bands that hold most of the mail — Everyday and Routine —
+    are near-synonyms in English and told a reader nothing, while in practice they
+    split almost cleanly into mail from people and mail from machines: 70% of
+    Everyday is from a sender in the address book against 5% of Routine, and 38%
+    of Everyday is a real reply chain against 8%. That distinction was doing the
+    work and the labels were hiding it, so it is offered directly.
+
+    A conversation counts as from a PERSON when ANY of these is true:
+      * a participant other than the owner is in the address book,
+      * the thread was assembled from real mail headers, i.e. somebody replied, or
+      * the subject opens with Re:/Fwd:, which is somebody replying whose headers
+        did not survive the export. That third one is not decoration: 14% of what
+        the first two called automated opens that way, and reading a sample of them
+        they were plainly people writing to people -- replies about appointments,
+        introductions, one about a second-hand hot tub. Auto-responders do write
+        "Re:", so it is a signal and not a proof.
+
+    Everything else is "automated" — bulk senders and one-off strangers alike.
+
+    WHAT THIS IS NOT. It reports who the sender is TO YOU, not whether a human
+    typed the message. A newsletter from someone in the address book lands on the
+    person side, and a genuine one-off note from a stranger lands on the automated
+    side. The panel says so; do not let a later edit quietly upgrade the claim.
+
+    Deliberately two signals and no more. A bulk-sender heuristic (seen often,
+    never replied to) was measured and separated the same mail — but once the
+    answer is only two-way it changes nothing, and every extra knob is another
+    thing to be wrong about.
+
+    `bidirectional` and `sent_count` on correspondent_frequency.json would have
+    been the natural signals. Both are present and NEVER POPULATED — False and 0
+    on all 1,384 records on 813_mf. Check before reaching for them.
+    """
+    known = {}
+    for c in (correspondent_freq or []):
+        a = (c.get("address") or "").lower()
+        if a:
+            known[a] = c
+    own = {str(a).lower() for a in (owner or ())}
+    out = {}
+    for r in rows:
+        in_book = False
+        for p in (r.get("participants") or []):
+            a = (_email_address(p) or "").lower()
+            if not a or a in own:
+                continue
+            if (known.get(a) or {}).get("name_source") == "address_book":
+                in_book = True
+                break
+        person = (in_book or r.get("linked_by") == "headers"
+                  or bool(_REPLY_SUBJECT.match(r.get("subject") or "")))
+        tid = r.get("thread_id")
+        if tid:
+            out[str(tid)] = "person" if person else "automated"
+    return out
+
+
+def _filter_emails_sender(rows, params):
+    """?sender=person|automated — mail from someone you correspond with, or the rest."""
+    want = _one(params, "sender")
+    if want not in ("person", "automated"):
+        return rows
+    return [r for r in rows if r.get("sender") == want]
 
 
 def _filter_emails_rescued(rows, params):
@@ -1297,6 +1372,17 @@ class ArchiveCase:
             self._estate_thread_cache = cached
         return cached
 
+    def _sender_kinds(self, full_rows):
+        """thread_id -> person|automated, once per generation. Needs the WHOLE
+        thread set (the owner guess is computed over all of it), so it is built
+        from `full` rather than the filtered page."""
+        cached = getattr(self, "_sender_kind_cache", None)
+        if cached is None:
+            cached = sender_kind_map(full_rows, self._email_owner(full_rows),
+                                     self.correspondent_freq)
+            self._sender_kind_cache = cached
+        return cached
+
     def _email_owner(self, full_rows):
         """The owner-address guess, computed once per process against the full
         thread set. Cached because every Emails request needs it and the scan is
@@ -1612,6 +1698,12 @@ class ArchiveCase:
             # review state, and a family session has no use for "near miss".
             estate = self._estate_threads() if self.role == "examiner" else {}
             rescued = self._rescued_threads() if self.role == "examiner" else set()
+            # Who the sender is to the reader. Unlike the estate marks this is
+            # not examiner-only: it says nothing about the estate, only whether
+            # the mail came from someone in the address book or a real exchange.
+            senders = self._sender_kinds(full)
+            for r in full:
+                r["sender"] = senders.get(str(r.get("thread_id") or ""))
             if estate or rescued:
                 for r in full:
                     tid = str(r.get("thread_id") or "")
@@ -1623,6 +1715,7 @@ class ArchiveCase:
             rows = _filter_emails_group(rows, params)
             rows = _filter_emails_estate(rows, params)
             rows = _filter_emails_vital(rows, params)
+            rows = _filter_emails_sender(rows, params)
             rows = _filter_emails_rescued(rows, params)
             rows = _filter_emails_search(rows, params)
             page = _paginate(rows, offset, limit)
