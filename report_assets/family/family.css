@@ -927,6 +927,35 @@ body.selecting .jgrid .jcard, body.selecting .jgrid .jcard img { cursor: crossha
   color: var(--head); margin: 0; }
 .vitals2-lead { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
 
+/* The Reviewing switch. It sits on the page it governs rather than in the rail,
+   because it changes this section and nothing else — and a control that quietly
+   re-skins the whole archive is the failure mode worth avoiding here. */
+.vitals2-titlerow { display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; }
+.revsw { display: inline-flex; align-items: center; gap: 9px; cursor: pointer;
+  font: inherit; font-size: 13px; color: var(--muted);
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 999px; padding: 5px 13px 5px 9px; }
+.revsw:hover { color: var(--ink); }
+.revsw .revsw-dot { width: 30px; height: 17px; border-radius: 999px;
+  background: var(--line); position: relative; flex: none; transition: background .12s; }
+.revsw .revsw-dot::after { content: ""; position: absolute; top: 2px; left: 2px;
+  width: 13px; height: 13px; border-radius: 50%; background: var(--panel);
+  transition: transform .12s; }
+.revsw.on { color: var(--accent); border-color: var(--accent); }
+.revsw.on .revsw-dot { background: var(--accent); }
+.revsw.on .revsw-dot::after { transform: translateX(13px); }
+.revsw:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Said where the buttons would have been, so the switch is discoverable from the
+   one place its absence is felt. */
+.vrow-howto { font-size: 12.5px; color: var(--muted); margin-top: 7px; }
+.linky { font: inherit; font-size: 12.5px; color: var(--accent); background: none;
+  border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+.linky:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.vstats-hint.calm { color: var(--muted); }
+.vstats-hint.calm a { color: var(--accent); }
+
 .vstats { display: flex; gap: 32px; align-items: flex-start; flex-wrap: wrap; margin: 18px 0 20px; }
 .vstat b { display: block; font-family: var(--serif); font-size: 26px; font-weight: 500;
   color: var(--head); line-height: 1.1; }

@@ -58,6 +58,61 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 (end) — Vital documents reads as a reference until you switch Reviewing on
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+### What shipped
+
+The complaint was that the archive "feels like it is in a perpetual review state".
+It did, and the panel's own source already said it should not: *"Two jobs live here
+and they are not the same job… This screen is built for the second."* It was not —
+every structural choice on it was made for reviewing.
+
+Five collisions, now all gated behind one switch on the page:
+
+| | Reviewing OFF (default) | Reviewing ON |
+|---|---|---|
+| Order | the checklist's own | sorted by outstanding work |
+| Numbers | have a document · signed off · still empty | + undecided · near-misses unreviewed |
+| Sentence | one calm line, linking to the queue | the release-gate reminder |
+| Columns | Document type · Documents | + Signed off · Undecided · Near-misses |
+| Rows | evidence and state | four decision verbs, near-miss drawer |
+
+Off is the default. A row with no buttons says *"Turn Reviewing on to decide about
+this document"*, so the switch is discoverable from the one place its absence is
+felt. Remembered in `localStorage` (`wy.reviewing`) — the first use of it in this
+codebase, wrapped in try/catch.
+
+### ⚠️ This is meant to be deleted
+
+The likely destination is **Vital Documents as a section with two pages under it**
+(the checklist, and review) rather than one page in two modes — a mode you cannot
+see is this idea's real weakness, and the rail already carries three separate
+review entries (Review queue, Guided review, Junk review) that confuse more than
+these two do.
+
+So the switch is deliberately thin: one flag, `reviewOn()`, read in a handful of
+places in `family.js` and nowhere else. **When the two-page split happens, delete
+it — do not grow it.** Keeping both a mode and a navigation split doing the same
+job is worse than either.
+
+What it is really for: finding out whether anyone ever browses with Reviewing off.
+If it is always on, the split is not worth building.
+
+### Scope
+
+The switch governs the Vital Documents page only. It sits on that page rather than
+in the rail on purpose — a control that quietly re-skins the whole archive is the
+failure mode worth avoiding. Other surfaces (the Documents lists, Overview) still
+carry their own review affordances.
+
+---
+
 ## 🎯 2026-09-02 (late night) — discarding documents, and keeping your place
 
 ### ▶ Next action
