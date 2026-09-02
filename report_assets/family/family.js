@@ -2154,10 +2154,7 @@
     var rows = [
       ["Photos & videos", c.photos, c.videos ? num(c.videos) + " of them videos" : "", { page: "photos" }],
       ["Emails", c.emails, "", { page: "emails" }],
-      ["Documents", c.documents,
-        (d.vital_docs && d.vital_docs.available)
-          ? num(d.vital_docs.found_count) + " of " + num(d.vital_docs.total_count) + " vital types found" : "",
-        { page: "documents" }],
+      ["Other documents", c.documents, "", { page: "documents" }],
       ["Recordings", c.audio, "", { page: "recordings" }],
       ["Messages", c.messages, "conversations", { page: "messages" }],
       ["People", c.people, "recognised by face", { page: "people" }],
@@ -2187,7 +2184,7 @@
     // ── vital documents ──
     var vd = d.vital_docs;
     if (vd && vd.available) {
-      var vc = ovCard(right, "Vital documents", "Open Documents", { page: "documents" });
+      var vc = ovCard(right, "Vital documents", "Open Vital Documents", { page: "vital" });
       var pct = vd.total_count ? Math.round(vd.found_count / vd.total_count * 100) : 0;
       var tal = el("p", "ovtally");
       tal.innerHTML = "<b>" + num(vd.found_count) + " of " + num(vd.total_count) +
@@ -3954,30 +3951,27 @@
 
   function documentsIndex(main, data) {
     var index = data.index || [];
-    head(main, "Documents", "Documents",
-      num(data.total || 0) + " documents. Every count below is the whole "
-      + "collection, not a page of it.");
+    head(main, "Other Documents", "Other documents",
+      num(data.total || 0) + " documents, filed by category. Every count below is "
+      + "the whole collection, not a page of it.");
 
-    // The estate branch first — a summary and a way in, not the whole checklist.
+    // A pointer to the checklist, not a copy of it. Two places showing the same
+    // counts is how you get two places disagreeing.
     var vd = data.vital_docs;
     if (vd && vd.available) {
-      var st = vitalStats((vd.targets || []).slice());
       var vsec = el("section", "eix-panel doc-estate");
-      vsec.appendChild(el("h2", null, "Vital documents"));
+      vsec.appendChild(el("h2", null, "Looking for a will, deed or certificate?"));
+      // "Other" is a promise this page cannot fully keep, so say the truth: the
+      // checklist is a cut ACROSS the archive, not a set carved out of it. A will
+      // filed as a legal document is on both pages, and pretending otherwise
+      // would send someone looking in one place and concluding it is not here.
       vsec.appendChild(el("p", "eix-note",
-        num(st.types) + " document types an estate needs, searched across every "
-        + "document and email in the archive."));
-      var bar = el("div", "vstats");
-      vitalStat(bar, st.found, "types have a candidate");
-      if (EXAMINER) {
-        vitalStat(bar, st.signed, "signed off");
-        vitalStat(bar, st.undecided, "candidates undecided", st.undecided > 0);
-        vitalStat(bar, st.near, "near-misses unreviewed", st.near > 0);
-      }
-      vsec.appendChild(bar);
-      var go_ = el("a", "eix-more", "Work the checklist, type by type →");
-      go_.href = urlFor({ page: "documents", view: "vital" },
-                        { label: "Vital documents" });
+        "Those have their own section. Vital Documents searches every document "
+        + "AND every email for the types an estate needs, so it is a different "
+        + "cut of the archive rather than a separate pile: a will that arrived as "
+        + "an email is only there, and one that arrived as a file is in both."));
+      var go_ = el("a", "eix-more", "Open Vital Documents →");
+      go_.href = urlFor({ page: "vital" }, { label: "Vital documents" });
       vsec.appendChild(go_);
       main.appendChild(vsec);
     }
@@ -3992,7 +3986,7 @@
     csec.appendChild(el("p", "eix-note",
       "How the pipeline filed each document. Emails are not here — they have "
       + "their own section, and including them would leave this page almost "
-      + "entirely email. The vital-documents checklist above does search them, so a "
+      + "entirely email. The Vital Documents section does search them, so a "
       + "conversation can be a candidate for a vital document without ever "
       + "appearing in this list."));
     index.forEach(function (c) { docCatRow(csec, c); });
@@ -4014,9 +4008,9 @@
     var seedCount = subcat
       ? ((subs.filter(function (x) { return x.name === subcat; })[0] || {}).count || 0)
       : (entry.count || 0);
-    var controls = head(main, "Documents", title,
+    var controls = head(main, "Other Documents", title,
       num(seedCount) + " document" + (seedCount === 1 ? "" : "s") + ".");
-    var back = el("button", "btn chip", "← All documents");
+    var back = el("button", "btn chip", "← All other documents");
     back.onclick = function () { go({ page: "documents" }); };
     controls.appendChild(back);
     var expBtn = el("button", "btn", "Export filtered");
@@ -4057,17 +4051,19 @@
     pg.load(true);
   }
 
+  // The 27-type checklist is its own section. It used to be /documents?view=vital,
+  // so every way out of it — the back button, the review pager's escape, the
+  // Overview card — landed in the general document list. Asking to stay in the
+  // checklist and being dumped into everything was the whole complaint.
+  P.vital = function (main, data) {
+    head(main, "Vital Documents", "Vital documents", "");
+    vitalDocsPanel(main, data.vital_docs);
+  };
+
   P.documents = function (main, data) {
-    // The 27-type checklist, on its own page now rather than above every browse.
-    if (Q.view === "vital") {
-      setCrumb(Q.crumb || "Vital documents");
-      var ctrls = head(main, "Documents", "Vital documents", "");
-      var back = el("button", "btn chip", "← All documents");
-      back.onclick = function () { go({ page: "documents" }); };
-      ctrls.appendChild(back);
-      vitalDocsPanel(main, data.vital_docs);
-      return;
-    }
+    // Old link or bookmark. replace(), not push: Back should leave for wherever
+    // you actually came from, not bounce between the two spellings of one page.
+    if (Q.view === "vital") { location.replace(urlFor({ page: "vital" })); return; }
     if (Q.cat) return documentsCategory(main, data, Q.cat, Q.subcat || "");
     return documentsIndex(main, data);
   };
@@ -4095,7 +4091,7 @@
       "Pictures of paper, rather than files the archive could read. They come "
       + "from the photographs rather than the documents, so they carry no "
       + "extracted text and no summary — and because they are set aside from "
-      + "Photos for being documents, and absent from Documents for being "
+      + "Photos for being documents, and absent from Other Documents for being "
       + "photographs, this page is the only place they appear."));
 
     // The letters that used to be listed here are filed as documents. Point at
@@ -4314,8 +4310,8 @@
       + "archive, not a page of it.");
     // Said from this side too, because the boundary is invisible from either one.
     main.appendChild(el("p", "eix-note",
-      "This is the mail. Files that arrived as documents are in Documents, and "
-      + "an email is never listed there — but the vital-documents checklist on that page "
+      "This is the mail. Files that arrived as documents are in Other Documents, "
+      + "and an email is never listed there — but the Vital Documents section "
       + "does search this mail, so a conversation here can also be a candidate "
       + "for a vital document."));
 
@@ -5657,9 +5653,13 @@
     if (scope) title = (Q.crumb || sentenceCase(scope)) + " — review";
     head(main, "Examiner · Review", title,
       "One at a time. Read it, decide, and the queue moves on.");
-    var esc0 = el("a", "act small", scope ? "← All vital documents" : "List view");
+    // Leaving the vital pager must land in the CHECKLIST, not the general
+    // document list — that was the "dumped into Documents" complaint.
+    var esc0 = el("a", "act small",
+      group === "vital" ? (scope ? "← All vital documents" : "← Vital documents")
+                        : "List view");
     esc0.href = group === "vital"
-      ? (scope ? "/review?group=vital" : "/documents")
+      ? (scope ? "/review?group=vital" : "/vital")
       : "/review?group=quarantine&list=1";
     main.appendChild(esc0);
     var body = el("div", "pager"); main.appendChild(body);
