@@ -58,6 +58,57 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 (late night) — discarding documents, and keeping your place
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+Open: the **review-vs-browsing** conflict — the archive feels like it is in a
+perpetual review state. A design pass was requested (mockups before code); it is
+the next piece of work, not started.
+
+### Two bugs, both reported from real use
+
+**Discarding documents did nothing and said it worked.** The selection bar's
+Discard called `banish`, which moves bytes and refuses anything outside
+`output/archive/`. Every document is outside it. A batch banish **skips** per-item
+failures and still returns `ok`, so the response was `count: 0, skipped: N`, the UI
+toasted "Discarded N item(s)", cleared the selection — and the documents were all
+still there. Nothing was ever written, which is why the audit log had no trace.
+
+Fixed in three places, and the third is the general one:
+
+- `doc/discard` verb + `doc_discarded` overlay, filtered inside `document_rows`.
+  That builder is the SOLE source of the category lists, their counts **and** the
+  search index, so one filter removes a discarded document from all three.
+  `build_fts` now reads the overlay too, or search would still find it.
+- The selection bar routes a document selection to that verb. Media still banishes.
+- **`doVerb` now reports what a batch actually did.** Any batch verb answering
+  `{count, skipped}` was reported as a flat success. That is how a reviewer comes
+  to believe the archive is dropping their decisions — it is worth keeping.
+
+**A decision collapsed the checklist and lost your place.** The panel is rebuilt
+from the top on every verb, and the only thing it remembered was the *near-miss
+drawer*. Working a type's candidates — the ordinary case — recorded nothing, so
+every decision dropped you back to the collapsed checklist. `VITAL_OPEN` now tracks
+the expanded type independently.
+
+### Worth knowing
+
+- **Validate against the index, not the case directory.** The discard verb checks
+  the src is a known document rather than checking containment: a document whose
+  recorded path did not relocate still has a row (rows come from the index, not the
+  disk), and a path check would have made exactly those rows undiscardable. Failing
+  closed is right on ambiguity, not on a legitimate action.
+- The fixture's documents are at `/work/docs/...`, outside the case dir. Any
+  path-shaped check on documents will behave differently in tests than in a real
+  case; check both.
+
+---
+
 ## 🎯 2026-09-02 (night) — the review row answers the question it asks
 
 ### ▶ Next action

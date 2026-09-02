@@ -170,7 +170,13 @@ def iter_rows(paths, role, cfg, *, progress=None):
         f = d.get("file")
         if f and f not in summary_full:
             summary_full[f] = d.get("summary") or ""
-    for r in document_rows(summary, ocr_index, role):
+    # The examiner's discards are a decisions overlay, and the search index is
+    # built from the same builder as the lists — so read it here too, or a
+    # discarded document stays findable by search after it has left every list.
+    _dec = load_json(md / "family_decisions.json", {}) or {}
+    for r in document_rows(summary, ocr_index, role,
+                           doc_placements=_dec.get("doc_placements"),
+                           discarded=_dec.get("doc_discarded")):
         f = r.get("file")
         body = ocr_full.get(f) or summary_full.get(f) or r.get("summary") or ""
         yield (r.get("name") or "", _clean(body), "documents", "document", f)
