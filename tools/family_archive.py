@@ -2629,7 +2629,19 @@ def _unjunk_one(case, jid):
     # and junk_rows stop treating it as junk. NEVER mutate scene_index.json (pipeline
     # output) — a decisions overlay, exactly like the other examiner verbs.
     if not dest.exists():
-        raise VerbError(f"junk file not present: {junk_file.name}", 404)
+        # A DELIVERY carries output/ and leaves the working trees behind, so on a
+        # served copy the original working path is absent for almost every item —
+        # 394 of the first 400 junk rows on 813_mf, of which 388 were perfectly
+        # rescuable. Refusing on the working file tested the wrong thing.
+        #
+        # Scene-junk is a LABEL and the rescue is a pure overlay: nothing is moved,
+        # so the working file is not needed. What decides whether the rescue can
+        # actually surface anything is the DELIVERED CANONICAL — the very thing
+        # build_photo_universe requires before it will put the tile back. Refuse
+        # only when neither exists, which is the honest case: nothing to bring back.
+        canonical = canonical_for(str(dest), case.archive_entries)
+        if canonical is None or not os.path.exists(canonical):
+            raise VerbError(f"nothing to restore for {dest.name}", 404)
     dpath = case.paths.metadata_dir / DECISIONS_FILE
     with _doc_lock(case):   # cross-process RMW guard (R-4)
         decisions = load_json(dpath, {}) or {}
