@@ -4117,6 +4117,13 @@ def email_rows(threads_index, *, cap=None, decisions=None):
             "demoted": is_demoted,
             "categories": t.get("categories") or [],
             "message_count": t.get("message_count"),
+            # How the thread was assembled: real mail headers, a single message,
+            # or a subject-and-date guess. Carried because sender_kind_map needs
+            # it to see a reply chain -- it was projected away, so that half of
+            # the rule silently never fired and 1,610 genuine exchanges were filed
+            # as automated. Also the field that explains a conversation that looks
+            # wrong; no PII in it, so both roles get it.
+            "linked_by": t.get("linked_by"),
         })
     # Rank by significance (matches gen_email_threads): significance desc, then
     # most-recent activity, then subject — so the cap keeps the most significant.

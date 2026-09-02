@@ -58,6 +58,74 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 — Emails can be cut by who sent it
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+### Why this exists
+
+"Everyday" and "Routine" hold two thirds of the mail and are near-synonyms in
+English, so the page told a reader nothing about the difference. Measured, the two
+bands split almost cleanly on something the labels never mentioned: **Everyday is
+mail from people, Routine is mail from machines.** Re-derive rather than trust
+these, but the shape was ~70% of Everyday from a sender in the address book against
+~5% of Routine, and ~38% a real reply chain against ~8%.
+
+So the distinction is offered directly — **Who it is from**, in four buckets:
+someone in your contacts · a back-and-forth with a non-contact · a bulk sender ·
+a one-off from a stranger. The first two pair up as "from a person" and the last
+two as "automated or bulk"; the filter accepts all six spellings, and the pairing
+is derived rather than stored, so there is one classification and not two that can
+drift apart.
+
+**Band 1 is now named "Newsletters, bills, etc." rather than "Routine"** — named
+for what it holds instead of where it ranks. Measured, it is ~91% newsletters and
+financial notices, 86% of them a single message nobody answered. Descriptive, not
+definitional: it is still a significance score and about one in ten of it is
+something else. **The six band labels are defined TWICE** — `EMAIL_BANDS` in
+`tools/family_archive.py` and a `BANDS` array in `family.js` for the grouped thread
+table. Rename in one and the other keeps the old name; both carry a comment saying
+so now.
+
+**And the significance panel finally says what its two big bands hold** — Everyday
+is mostly people writing to each other, Routine is mostly newsletters and bills.
+That was the original question and it deserved an answer on the page, not only a
+new cut beside it.
+
+### The rule, and its limit
+
+**Contact** = a participant other than the owner is in the address book.
+**Exchange** = real mail headers, or a subject opening Re:/Fwd:. **Bulk** = a
+sender seen across 5+ conversations who is essentially never replied to.
+**One-off** = none of the above. **It reports who the sender is to the reader, not
+whether a human typed the message** — a newsletter from a contact counts as a
+person, a one-off note from a stranger does not. The panel says so; do not let a
+later edit upgrade the claim.
+
+### Two things that would have cost the next person a day
+
+- **`bidirectional` and `sent_count` on `correspondent_frequency.json` are present
+  and never populated** — False and 0 on every record. They are the obvious signals
+  and both are dead. Check a field's values before building on it.
+- **The owner is a participant in every thread and is in their own address book.**
+  Counting them made 92–99% of every band look like it came from a person, which is
+  the shape of a broken measurement rather than a finding.
+
+### The bug worth remembering
+
+`email_rows` projects a fixed field set and dropped `linked_by`, so the reply-chain
+half of the rule **silently never fired** — 1,610 genuine exchanges served as
+automated with no error anywhere. It was caught only because the live count
+disagreed with the number measured straight from the index. **When a rule reads a
+field off a row, check the projection carries it**, and compare the shipped number
+against the one you measured from the source.
+
+---
+
 ## 🎯 2026-09-02 — Emails can be cut by vital document type
 
 ### ▶ Next action

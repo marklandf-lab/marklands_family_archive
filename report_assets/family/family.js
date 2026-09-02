@@ -325,8 +325,8 @@
      "band", "year", "by", "sort",
      // Recordings: which audio kind is being shown. Reports: which report.
      "kind", "r", "view", "estate", "rescued",
-     // Emails narrowed to ONE of the 27 vital document types.
-     "vital"].forEach(function (k) {
+     // Emails narrowed to ONE of the 27 vital document types, or to who sent it.
+     "vital", "sender"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -4343,7 +4343,11 @@
     // Group into significance bands so the (already significance-sorted) list reads
     // as organized by importance, not a flat date jumble (#D).
     var BANDS = [[5, "Major life events"], [4, "Emotionally resonant"], [3, "Personal"],
-                 [2, "Everyday"], [1, "Routine"], [0, "Unranked"]];
+                 // Keep in step with EMAIL_BANDS in family_archive.py — the same
+                 // six labels are defined in both places, and a rename in one of
+                 // them shows the old name on this table and the new one in the
+                 // facet panel.
+                 [2, "Everyday"], [1, "Newsletters, bills, etc."], [0, "Unranked"]];
     BANDS.forEach(function (band) {
       var n = band[0];
       var group = rows.filter(function (r) { return (parseInt(r.significance, 10) || 0) === n; });
@@ -4587,16 +4591,62 @@
     }
     more.appendChild(pplPanel);
 
-    // Under the vital cut, in the same column: still the last of the five to be
-    // read, but sitting with the other estate-shaped way in rather than stranded
-    // in a row of its own.
-    left.appendChild(emailIndexPanel(
+    // Between the vital cut and significance. It exists because the two bands
+    // below it — Everyday and band 1 — were near-synonyms that hid the thing they
+    // were actually splitting on: mail from people against mail from machines.
+    var snd = f.sender || [];
+    if (snd.length) {
+      var sLab = {
+        contact:  "Someone in your contacts",
+        exchange: "A back-and-forth with someone not in your contacts",
+        bulk:     "A bulk sender",
+        oneoff:   "A one-off from a stranger",
+      };
+      // Biggest first, like the other panels. The underlying order is
+      // most-human-first, but a bar chart that jumps around reads as an error.
+      var sRows = snd.slice().sort(function (a, b) { return b.count - a.count; });
+      var sp = emailIndexPanel(
+        "Who it is from",
+        "Who the sender is to you — " + num(f.sender_person || 0) + " from someone "
+        + "you correspond with, " + num(f.sender_automated || 0) + " automated or bulk.",
+        sRows.map(function (x) {
+          return { label: sLab[x.kind] || x.kind, count: x.count,
+                   dest: { page: "emails", sender: x.kind },
+                   crumb: sLab[x.kind] || x.kind };
+        }));
+      sp.appendChild(el("p", "eix-note",
+        "A contact is in the address book; a back-and-forth is a real reply chain; "
+        + "a bulk sender writes often and is never replied to. This is who the "
+        + "sender is TO YOU, not whether a human typed the message — a newsletter "
+        + "from someone in your contacts counts as a contact, and a one-off note "
+        + "from a stranger does not."));
+      left.appendChild(sp);
+    }
+
+    // Under the vital and sender cuts, in the same column: still the last to be
+    // read, but sitting with the other short ways in rather than stranded in a
+    // row of its own.
+    var bandPanel = emailIndexPanel(
       "By significance", "How the pipeline ranked each conversation — a ranking "
       + "rather than a subject, so it is the least useful way to start.",
       (f.bands || []).map(function (b) {
         return { label: b.label, count: b.count,
                  dest: { page: "emails", band: String(b.n) }, crumb: b.label };
-      })));
+      }));
+    // Everyday and band 1 hold two thirds of the mail between them and were near
+    // synonyms in English, so the band names never said what separates them. They
+    // separate almost entirely on sender: measured on this case, Everyday is ~90%
+    // correspondence between people and band 1 ~91% newsletters and financial
+    // notices, single messages nobody answered. Say it here rather than leaving a
+    // reader to guess, and point at the cut that splits it directly.
+    bandPanel.appendChild(el("p", "eix-note",
+      "These two hold two thirds of the mail. Everyday is mostly people writing "
+      + "to each other — work and personal, often with replies — and the band "
+      + "below it is mostly newsletters, bills and notifications, usually one "
+      + "message nobody answered. It used to be called \u201CRoutine\u201D, "
+      + "which said nothing. \u201CWho it is from\u201D above splits on the same "
+      + "thing directly, and more precisely."));
+    left.appendChild(bandPanel);
   }
 
   // A flat thread table. Inside a group the significance bands are either the
@@ -4759,6 +4809,14 @@
       // that is this type. The panel says the same thing; the heading has to too,
       // or the list reads as "here are the 13 marriage certificates".
       if (Q.vital) parts.push("about a " + String(Q.vital).toLowerCase());
+      if (Q.sender) {
+        parts.push({ contact: "from someone in your contacts",
+                     exchange: "a back-and-forth with a non-contact",
+                     bulk: "from a bulk sender",
+                     oneoff: "a one-off from a stranger",
+                     person: "from a person",
+                     automated: "automated or bulk" }[Q.sender] || String(Q.sender));
+      }
       return parts.length ? parts.join(" · ") : "All emails";
     }
     var title = titleFrom(data.facets);
@@ -4802,6 +4860,7 @@
         // under a heading naming one document type — the right URL and crumb over
         // the wrong data, which is the worst of the three to notice.
         if (Q.vital) p.vital = Q.vital;
+        if (Q.sender) p.sender = Q.sender;
         if (search.value) p.q = search.value;
         if (dFrom.value) p.date_from = dFrom.value;
         if (dTo.value) p.date_to = dTo.value;
@@ -4856,7 +4915,7 @@
                       // ?vital= narrows to one of the 27 document types. Missing it
                       // here meant the link filtered the data and then rendered the
                       // index over it: right URL, right crumb, no list.
-                      || Q.vital);
+                      || Q.vital || Q.sender);
     if (narrowed) return emailGroup(main, data, active);
     return emailIndex(main, data);
   };
