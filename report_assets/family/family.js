@@ -4539,22 +4539,21 @@
       wrap.appendChild(vp);
     }
 
-    wrap.appendChild(emailIndexPanel(
-      "By significance", "How the pipeline ranked each conversation.",
-      (f.bands || []).map(function (b) {
-        return { label: b.label, count: b.count,
-                 dest: { page: "emails", band: String(b.n) }, crumb: b.label };
-      })));
-    wrap.appendChild(emailIndexPanel(
+    // Subject, year and person stack in one column beside the vital cut, so the
+    // sharpest way in sits next to the ordinary ones rather than being followed by
+    // them. Significance goes last, below everything: it ranks conversations rather
+    // than sorting them into anything, so it is the least useful way to START.
+    var side = el("div", "eix-stack"); wrap.appendChild(side);
+    side.appendChild(emailIndexPanel(
       "By subject", "What the conversation is about. A thread can be in more than one.",
       (f.categories || []).map(function (c) {
         return { label: emailCatLabel(c.name), count: c.count,
                  dest: { page: "emails", cat: c.name }, crumb: emailCatLabel(c.name) };
       })));
 
-    // People and years are the other two cuts, but they are long tails rather
-    // than short lists — offered as a way in, not enumerated here.
-    var more = el("div", "eix-cols"); main.appendChild(more);
+    // People and years are long tails rather than short lists — offered as a way
+    // in, not enumerated here.
+    var more = side;
     more.appendChild(emailIndexPanel(
       "By year", null,
       (f.years || []).map(function (y) {
@@ -4584,6 +4583,15 @@
         + "worked out from how much of the mail they appear in."));
     }
     more.appendChild(pplPanel);
+
+    var last = el("div", "eix-cols"); main.appendChild(last);
+    last.appendChild(emailIndexPanel(
+      "By significance", "How the pipeline ranked each conversation — a ranking "
+      + "rather than a subject, so it is the least useful way to start.",
+      (f.bands || []).map(function (b) {
+        return { label: b.label, count: b.count,
+                 dest: { page: "emails", band: String(b.n) }, crumb: b.label };
+      })));
   }
 
   // A flat thread table. Inside a group the significance bands are either the

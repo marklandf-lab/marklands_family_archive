@@ -84,6 +84,13 @@ that carry no document at all. So the panel and the heading say **mail ABOUT a
 document**, never mail that IS one, and candidate is kept separate from near miss
 rather than summed.
 
+### Panel order on the Emails index
+
+Vital document on the left; subject, year and person stacked beside it; significance
+last, below everything. Significance ranks conversations rather than sorting them
+into anything, so it is the least useful way to *start* — it is a filter you reach
+for once you know what you are after.
+
 ### The finding worth acting on
 
 **Email attachments are recorded nowhere** — not on conversations, not on messages.

@@ -1066,6 +1066,11 @@ a.vstat.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
    style-src 'self' and would drop an inline style attribute. */
 .eix-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 18px; margin: 18px 0; align-items: start; }
+/* The three ordinary cuts stack in one column beside the vital one, so the
+   sharpest way into the mail sits next to them rather than above a queue of
+   them. Collapses to a single column with everything else. */
+.eix-stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
 .eix-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   padding: 16px 18px 14px; }
 .eix-panel h2 { font-size: 15px; margin: 0 0 2px; }
