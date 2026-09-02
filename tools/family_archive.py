@@ -218,7 +218,13 @@ PAGES = [
     ("events", "Events", "heirloom"),
     ("timeline", "Timeline", "heirloom"),
     ("places", "Places", "heirloom"),
-    ("documents", "Documents", "heirloom"),
+    # The 27-type checklist is its own section, not a branch of Documents. It was
+    # reached at /documents?view=vital, which meant every "back" out of it landed
+    # in the general document list — you asked to stay in the checklist and got
+    # dumped into everything. Documents is "Other Documents" for the same reason:
+    # the two are browsed for different reasons and were confusing mixed together.
+    ("vital", "Vital Documents", "heirloom"),
+    ("documents", "Other Documents", "heirloom"),
     # Renamed from "Correspondence". The section's own content is 1,221
     # photographs and screenshots OF documents — pictures of paper from the photo
     # pipeline, which Photos excludes for being documents and Documents excludes
@@ -1350,6 +1356,13 @@ class ArchiveCase:
                                  doc_placements=self.decisions.get("doc_placements"))
             return {"index": documents_index(rows), "rows": rows,
                     "vital_docs": vital_docs_data(self.paths, self.summary, self.role,
+                                                  decisions=self.decisions,
+                                                  threads_index=self.email_threads,
+                                                  per_target_k=self.vital_per_target_k())}
+        if page == "vital":
+            # Only the checklist — the document rows behind it belong to the
+            # Documents section and are fetched there.
+            return {"vital_docs": vital_docs_data(self.paths, self.summary, self.role,
                                                   decisions=self.decisions,
                                                   threads_index=self.email_threads,
                                                   per_target_k=self.vital_per_target_k())}

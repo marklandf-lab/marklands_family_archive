@@ -58,6 +58,55 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 (evening) — Vital Documents is its own section
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+Nothing half-done. Open candidates remain the email cuts in the 2026-08-31 entry.
+
+### What shipped
+
+**The 27-type checklist is a top-level section instead of a view inside
+Documents.** It used to live at `/documents?view=vital`, and because it was a
+branch of that page, every way *out* of it landed in the general document list —
+you asked to stay in the checklist and got dumped into everything. Three routes
+did it: the checklist's own back button, the review pager's escape, and the
+Overview card.
+
+- New page `vital` → `/vital`, served by its own section (`/api/vital`, checklist
+  only). `/documents?view=vital` still works and `location.replace()`s to it, so
+  old links and bookmarks land right and Back does not bounce between the two.
+- **Documents is now "Other Documents"** in the rail, its heading, its eyebrow and
+  its back button ("← All other documents").
+- The review pager's escape goes to `/vital`, not `/documents`.
+- The Documents index shows a *pointer* to the checklist, not a second copy of its
+  stats — two places showing the same counts is how they end up disagreeing.
+
+### ⚠️ "Other" is a promise that page cannot fully keep
+
+Vital Documents is a cut **across** the archive, not a pile carved out of it. It
+searches every document AND every email; the category list holds documents only.
+So a will that arrived as an email is *only* in Vital Documents, and one that
+arrived as a file is in **both**. The copy on both pages says so on purpose.
+
+I nearly shipped a lead reading "everything except the estate's vital types",
+which is simply false. If you edit that copy, keep the overlap visible — the
+label already implies a separation the data does not have.
+
+### Watch out
+
+- `/api/vital` (the section) and `/api/vital/near-misses` (the drawer) are
+  different endpoints. Dispatch is exact-match, so they do not collide — verified,
+  but do not switch that to a prefix match.
+- The family role sees this section too; it is not in `EXAMINER_ONLY`, and
+  `vital_docs_data` gates the examiner-only columns internally.
+
+---
+
 ## 🎯 2026-09-02 (later) — the vital queue now stops between candidates and near-misses
 
 ### ▶ Next action
