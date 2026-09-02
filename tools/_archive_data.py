@@ -3367,6 +3367,14 @@ def review_data(paths, summary):
             # Stable, unique action key for release/discard: basenames collide
             # across filter dirs, so the verbs match on canonical_path first (C-3).
             "canonical_path": e.get("canonical_path"),
+            # Whether the quarantined BYTES are in this copy. A delivery carries
+            # output/ only, so <case>/quarantine/ is absent and every entry is
+            # unservable: its thumbnail 404s and release/discard both refuse,
+            # because both have to move a file that is not here. 149 of 149 on
+            # 813_mf. The UI says that once instead of offering dead previews and
+            # dead buttons.
+            "present": bool(e.get("quarantine_path"))
+                       and os.path.exists(e.get("quarantine_path")),
         })
     # Sensitivity: only entries with a REAL trigger (every record carries a full
     # filter dict even when nothing triggered — without this the list is ~all files
@@ -3386,9 +3394,24 @@ def review_data(paths, summary):
         sens_total += 1
         if len(sens) < SENS_CAP:
             name, src = _review_src(path)
+            # Same delivery problem, different tree: a flagged item can sit under
+            # duplicates/ or another working tree the delivery did not carry, and
+            # every sensitivity row on 813_mf does. _present() only rejects rows
+            # whose ARCHIVE copy is gone and keeps anything with no archive entry
+            # ("nothing to check"), so these arrive with a src whose preview 404s.
+            #
+            # `src` still says WHAT the row's file is — that mapping (frame →
+            # source video, chunk → none) is a separate question from whether the
+            # bytes are in this copy, and conflating them broke the mapping's own
+            # tests. `present` answers the second question; the UI declines to
+            # offer a preview when it is false, and the row still says the flag,
+            # which is a true fact about the case either way.
             sens.append(_attach_chunk({
                 "name": name,
                 "src": src,                            # unmapped-frame/chunk → None; frame → source video
+                # False only when it HAS a src whose file is not in this copy —
+                # distinct from a chunk/unmapped frame, which never had one.
+                "present": not (bool(src) and not os.path.exists(src)),
                 # Stable, unique action key for release/discard (basenames collide
                 # across filter dirs); the delivered canonical for this flagged
                 # working path, or None when it has no archive entry (C-3).
@@ -3491,7 +3514,13 @@ def quarantine_pager_items(entries, *, media_exists=None):
             "thumb": src,        # same key; None ⇒ the client shows a filename card
             "blur": bool(is_media and present),
             "filters": [filt] if filt else [],
-            "actions": ["release", "discard"],
+            "present": present,
+            # Both verbs MOVE the quarantined file: release puts it back in the
+            # archive, discard puts it in family_banished. With the bytes absent
+            # neither can do anything but 404, so offering them is offering a
+            # button that cannot work. A delivery carries output/ and not
+            # quarantine/, so this is every entry on a served copy.
+            "actions": ["release", "discard"] if present else [],
         })
     return items
 

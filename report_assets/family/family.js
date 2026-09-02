@@ -6081,8 +6081,15 @@
         }
         card.appendChild(wrap);
       } else {
-        card.appendChild(el("div", "pnobytes",
-          "No preview — the file's bytes are not available. It can still be released or discarded."));
+        // It CANNOT still be released or discarded: both verbs move the
+        // quarantined file, so with the bytes absent both refuse. Saying
+        // otherwise sent the reviewer to press a button that always failed.
+        card.appendChild(el("div", "pnobytes", it.present === false
+          ? "No preview, and nothing to act on — this item's file is not in this "
+            + "copy of the case. A delivery carries the finished archive, not the "
+            + "quarantine tree it was moved to."
+          : "No preview — the file's bytes are not available. It can still be "
+            + "released or discarded."));
       }
     }
 
@@ -6698,9 +6705,28 @@
 
   // Quarantine group (folded in from the old page, #15): category filter + Release/Discard.
   // `onChange` refreshes P.review's counts after an in-place row removal.
+  // An entry whose bytes are not in this copy of the case. A delivery carries
+  // output/ only, so <case>/quarantine/ is absent and every entry is one of these:
+  // the thumbnail 404s, and Release and Discard both refuse, because both have to
+  // MOVE a file that is not here. Neither is fixable from this end — the bytes are
+  // genuinely elsewhere — so the honest thing is to say so and stop offering them.
+  function quarDead(e) { return e && e.present === false; }
+
   function reviewQuarantine(holder, qd, onChange) {
     var entries = qd.entries || [];
     if (!entries.length) { holder.appendChild(el("p", "notice", "Nothing in quarantine.")); return; }
+    var dead = entries.filter(quarDead).length;
+    if (dead) {
+      holder.appendChild(el("p", "notice", esc(
+        dead === entries.length
+          ? "The files for all " + num(dead) + " of these are not in this copy of the "
+            + "case — a delivery carries the finished archive, not the quarantine "
+            + "tree. They are listed because they are part of the record, but they "
+            + "cannot be previewed, released or discarded here."
+          : num(dead) + " of these " + num(entries.length) + " have no file in this "
+            + "copy of the case, so they cannot be previewed, released or discarded "
+            + "here. The rest can.")));
+    }
     var cats = {}; entries.forEach(function (e) { if (e.filter) cats[e.filter] = 1; });
     var bar = el("div", "filterbar");
     var sel = el("select"); sel.appendChild(new Option("All categories", ""));
@@ -6780,7 +6806,7 @@
       var thCheck = el("th"); thCheck.appendChild(selAll); thead.appendChild(thCheck);
       ["Item", "Reason", "When", ""].forEach(function (t) { thead.appendChild(el("th", null, t)); });
       tbl.appendChild(thead);
-      var selectable = rows.filter(function (e) { return !e.locked; });
+      var selectable = rows.filter(function (e) { return !e.locked && !quarDead(e); });
       selAll.onchange = function () {
         selectable.forEach(function (e) {
           if (selAll.checked) qsel[e.canonical_path] = e; else delete qsel[e.canonical_path];
@@ -6792,7 +6818,7 @@
       rows.forEach(function (e) {
         var tr = el("tr");
         var td0 = el("td");
-        if (!e.locked) {
+        if (!e.locked && !quarDead(e)) {
           var cb = el("input"); cb.type = "checkbox";
           cb.checked = !!qsel[e.canonical_path];
           cb.setAttribute("aria-label", "Select " + e.name);
@@ -6804,13 +6830,14 @@
         }
         tr.appendChild(td0);
         var name = e.locked ? '<span class="locked">🔒 ' + esc(e.name) + " (locked)</span>"
+          : quarDead(e) ? '<span class="locked">' + esc(e.name) + " (file not in this copy)</span>"
           : '<a href="#" class="viewq">' + esc(e.name) + "</a>";
         var restCell = el("td", null, name);
         var reasonCell = el("td", null, esc(pretty(e.filter)));
         var whenCell = el("td", "preview", esc((e.timestamp || "").replace("T", " ")));
         var actCell = el("td");
         tr.appendChild(restCell); tr.appendChild(reasonCell); tr.appendChild(whenCell); tr.appendChild(actCell);
-        if (!e.locked) {
+        if (!e.locked && !quarDead(e)) {
           var acts = quarActions(e);
           var a = tr.querySelector("a.viewq");
           if (a) a.onclick = function (ev) { ev.preventDefault(); lightbox(e.src, mediaKind(e.src), acts); };
@@ -6832,14 +6859,23 @@
   // Sensitivity / Human-review flagged lists (#14): openable unless the row is locked.
   function reviewFlagged(holder, title, rows, showFilters) {
     if (!rows.length) { holder.appendChild(el("p", "notice", "Nothing flagged for " + title.toLowerCase() + ".")); return; }
+    var deadN = rows.filter(quarDead).length;
+    if (deadN) {
+      holder.appendChild(el("p", "notice", esc(
+        num(deadN) + (deadN === rows.length ? " of these" : " of these " + num(rows.length))
+        + " have no file in this copy of the case — a delivery carries the finished "
+        + "archive, not the working trees these were flagged in — so they cannot be "
+        + "previewed here. The flag itself is still part of the record.")));
+    }
     var tbl = el("table");
     tbl.innerHTML = "<tr><th>Item</th>" + (showFilters ? "<th>Flags</th>" : "") + "</tr>";
     rows.forEach(function (e) {
       var tr = el("tr");
       var name = e.locked ? '<span class="locked">🔒 ' + esc(e.name) + " (locked)</span>"
+        : quarDead(e) ? '<span class="locked">' + esc(e.name) + " (file not in this copy)</span>"
         : '<a href="#" class="viewq">' + esc(e.name) + "</a>";
       tr.innerHTML = "<td>" + name + "</td>" + (showFilters ? "<td class='preview'>" + esc((e.filters || []).map(pretty).join(", ")) + "</td>" : "");
-      if (!e.locked && e.src) {
+      if (!e.locked && e.src && !quarDead(e)) {
         var a = tr.querySelector("a.viewq");
         if (a) a.onclick = function (ev) { ev.preventDefault(); lightbox(e.src, mediaKind(e.src)); };
       }
