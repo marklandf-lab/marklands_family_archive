@@ -3379,6 +3379,31 @@
   // the list they were working through.
   var VITAL_OPEN = {};
 
+  // ── Reviewing: on or off ────────────────────────────────────────────────────
+  // Two jobs share the vital-documents page — deciding what the estate has, and
+  // reading what it has — and every structural choice on it was made for the
+  // first: sorted by outstanding work, headline numbers that count chores rather
+  // than facts, a release-gate sentence over the documents, four verbs under every
+  // candidate. Reading it therefore always felt like being handed a worklist.
+  //
+  // OFF (the default) makes it a reference. ON restores the worklist exactly.
+  //
+  // DELIBERATELY THIN: one flag, read in five places, all of them in this file.
+  // The likely destination is two pages under one section rather than one page in
+  // two modes — a mode you cannot see is this idea's real weakness — and when that
+  // happens this should be deleted outright, not grown. Keep it easy to delete.
+  var REVIEWING = (function () {
+    try { return localStorage.getItem("wy.reviewing") === "1"; } catch (e) { return false; }
+  })();
+  function setReviewing(on) {
+    REVIEWING = !!on;
+    try { localStorage.setItem("wy.reviewing", REVIEWING ? "1" : "0"); } catch (e) { /* private mode */ }
+    render();
+  }
+  // Review controls are examiner-only to begin with; the switch narrows that
+  // further. Every review affordance below is gated on THIS, never on EXAMINER.
+  function reviewOn() { return EXAMINER && REVIEWING; }
+
   // #17: bulk-select across near-miss drawers (a decision applies to whichever
   // rows are checked, possibly spanning more than one open target's drawer —
   // same "selection isn't scoped to one sub-group" precedent as the Confirm
@@ -3718,8 +3743,19 @@
         it.reviewed ? "Signed off" : "Not yet decided"));
       row.appendChild(state);
     }
+    // Where the buttons were. Without this the switch is invisible from the one
+    // place its absence is felt, and a reader who wants to act has no idea why
+    // there is nothing to click.
+    if (EXAMINER && !REVIEWING && !it.reviewed) {
+      var howto = el("div", "vrow-howto");
+      var lnk = el("button", "linky", "Turn Reviewing on");
+      lnk.onclick = function (e) { e.stopPropagation(); setReviewing(true); };
+      howto.appendChild(lnk);
+      howto.appendChild(document.createTextNode(" to decide about this document."));
+      main_.appendChild(howto);
+    }
 
-    if (EXAMINER) {
+    if (reviewOn()) {
       // Same three audited, reversible overlay verbs as before. What changed is
       // their weight: Confirm was the only filled button in the group, first in
       // reading order, repeated 172 times — the cheapest thing on screen to click,
@@ -3769,9 +3805,9 @@
           "\"Not a vital document\" is recorded about the document itself, so this "
           + "also removes it from " + also.map(function (tgt) {
               return vitalTargetLabel(vd, tgt); }).join(", ")
-          + ", where it is still awaiting a decision. To move it out of "
-          + t.label + " without touching those, use \u201CAnother type\u2026\u201D "
-          + "instead.",
+          + ", where it is still awaiting a decision. To take it out of "
+          + t.label + " alone, use \u201CNot this type\u201D; to move it somewhere "
+          + "else, use \u201CIt\u2019s a different type\u2026\u201D.",
           "Remove from all of them", send);
       };
       acts.appendChild(dismiss);
@@ -3830,18 +3866,35 @@
     var panel = el("section", "vitals2");
 
     var h = el("div", "vitals2-head");
-    h.appendChild(el("h2", null, "Vital documents"));
+    var titleRow = el("div", "vitals2-titlerow");
+    titleRow.appendChild(el("h2", null, "Vital documents"));
+    if (EXAMINER) {
+      // The switch lives on the page it governs, not in the rail: it changes this
+      // section and says so, rather than silently re-skinning the whole archive.
+      var sw = el("button", "revsw" + (REVIEWING ? " on" : ""));
+      sw.setAttribute("role", "switch");
+      sw.setAttribute("aria-checked", REVIEWING ? "true" : "false");
+      sw.title = REVIEWING
+        ? "Reviewing is on: decision controls and outstanding-work counts are shown."
+        : "Reviewing is off: this page reports what the estate holds.";
+      sw.appendChild(el("span", "revsw-dot"));
+      sw.appendChild(el("span", "revsw-lab", "Reviewing"));
+      sw.onclick = function () { setReviewing(!REVIEWING); };
+      titleRow.appendChild(sw);
+    }
+    h.appendChild(titleRow);
     h.appendChild(el("p", "vitals2-lead",
-      esc(num(st.types) + " document types an estate needs, and where each one stands.")));
+      esc(num(st.types) + " document types an estate needs, and what this one holds.")));
     panel.appendChild(h);
 
     // The state bar. The old panel had ONE number and it flattered: "14 of 27
     // found" says nothing about whether anyone has looked. Four numbers, because
     // four things are true at once and only one of them is a score.
     var bar = el("div", "vstats");
-    vitalStat(bar, st.found, "types have a candidate");
-    if (EXAMINER) {
-      var queue = urlFor({ page: "review", group: "vital" }, { label: "Vital review" });
+    var queue = urlFor({ page: "review", group: "vital" }, { label: "Vital review" });
+    if (reviewOn()) {
+      // Four numbers because four things are true at once, and only one is a score.
+      vitalStat(bar, st.found, "types have a candidate");
       vitalStat(bar, st.signed, "signed off");
       vitalStat(bar, st.undecided, "candidates undecided", st.undecided > 0,
                 st.undecided ? queue : null);
@@ -3854,6 +3907,23 @@
               + " candidates, so " + num(st.near) + " is a floor, not a total." : "")
         : "Every candidate and near-miss has a decision.";
       bar.appendChild(hint);
+    } else {
+      // Reading. Every number describes the ESTATE; none of them describes a
+      // backlog. "Undecided" is still true and still worth knowing, so it is said
+      // once, quietly, with a way to act on it — not as a headline.
+      vitalStat(bar, st.found, "types have a document");
+      if (EXAMINER) vitalStat(bar, st.signed, "signed off");
+      vitalStat(bar, st.types - st.found, "types still empty");
+      if (EXAMINER && (st.undecided || st.near)) {
+        var calm = el("p", "vstats-hint calm");
+        calm.appendChild(document.createTextNode(
+          "Checklist order. " + num(st.undecided) + " candidates and "
+          + num(st.near) + " weaker matches are waiting on a decision — "));
+        var a = el("a", null, "that work lives in the review queue →");
+        a.href = queue;
+        calm.appendChild(a);
+        bar.appendChild(calm);
+      }
     }
     panel.appendChild(bar);
 
@@ -3867,7 +3937,10 @@
       if (t.found) return [1, 0];
       return [2, -(t.near_miss_count || 0)];
     }
-    if (EXAMINER) {
+    // Reading keeps the checklist's own order, so a type can be found by name.
+    // Sorting by outstanding work is right for a worklist and wrong for a
+    // reference — it also means the page rearranges itself as you work.
+    if (reviewOn()) {
       targets.sort(function (a, b) {
         var ra = rank(a), rb = rank(b);
         return ra[0] - rb[0] || ra[1] - rb[1];
@@ -3875,11 +3948,15 @@
     }
 
     // The examiner grid carries four numeric columns, the family view one.
-    var tbl = el("div", "vtable" + (EXAMINER ? " ex" : ""));
+    // Reading collapses the grid to the one column that describes the estate.
+    // "Undecided" and "Near-misses" are counts of outstanding work — the same
+    // chores the header stats drop — and leaving them in the table would have put
+    // the backlog back on the page in smaller type.
+    var tbl = el("div", "vtable" + (reviewOn() ? " ex" : ""));
     var hd = el("div", "vtr vthead");
     hd.appendChild(el("div", "vc-name", "Document type"));
-    hd.appendChild(el("div", "vc-n", "Candidates"));
-    if (EXAMINER) {
+    hd.appendChild(el("div", "vc-n", reviewOn() ? "Candidates" : "Documents"));
+    if (reviewOn()) {
       hd.appendChild(el("div", "vc-n", "Signed off"));
       hd.appendChild(el("div", "vc-n", "Undecided"));
       hd.appendChild(el("div", "vc-n", "Near-misses"));
@@ -3899,7 +3976,7 @@
       nameCell.appendChild(el("span", "vlabel2", esc(t.label)));
       tr.appendChild(nameCell);
       tr.appendChild(el("div", "vc-n", items.length ? esc(num(items.length)) : "—"));
-      if (EXAMINER) {
+      if (reviewOn()) {
         tr.appendChild(el("div", "vc-n" + (signed ? "" : " nil"), signed ? esc(num(signed)) : "—"));
         tr.appendChild(el("div", "vc-n" + (open ? " todo" : " nil"), open ? esc(num(open)) : "—"));
         tr.appendChild(el("div", "vc-n" + (t.near_miss_count ? " todo" : " nil"),
@@ -3919,7 +3996,7 @@
         // candidates one at a time (the queue), or scan its weaker matches in
         // place (the drawer, further down). Reading what has already been decided
         // is this panel's own job and needs neither.
-        if (EXAMINER && (open || t.near_miss_count)) {
+        if (reviewOn() && (open || t.near_miss_count)) {
           var goq = el("a", "vgo",
             open ? "Review " + num(open) + " undecided" : "Work this type in the queue");
           goq.href = urlFor({ page: "review", group: "vital", target: t.target },
@@ -3931,12 +4008,12 @@
           items.forEach(function (it) { detail.appendChild(vitalItemRow(t, it, vd)); });
         } else {
           detail.appendChild(el("p", "vnone",
-            EXAMINER && t.near_miss_count
+            reviewOn() && t.near_miss_count
               ? "Nothing matched well enough to be a candidate. "
                 + num(t.near_miss_count) + " weaker matches are listed below."
               : "Nothing in this collection matched."));
         }
-        if (EXAMINER && t.near_miss_count) {
+        if (reviewOn() && t.near_miss_count) {
           // The existing near-miss drawer, unchanged — it is the REVIEW surface,
           // and reviewing is the other job. It stays behind its own button here.
           var box = el("div", "vcand-drawer");
