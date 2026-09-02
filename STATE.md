@@ -58,6 +58,44 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 — Correspondents is a sortable list, not a wall of cards
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+### What shipped
+
+A table: **Correspondent · Emails · Years · Last email**, with the column headings
+as the sort control. It was 1,384 cards three across — hundreds of screens, and no
+way to compare two of them without holding a number in your head. Counts are
+right-aligned and tabular so rows line up, which is the entire point of a list.
+
+**The three sorts already existed server-side** (`?sort=` name / recent / default
+most-messages) behind a `<select>` beside the search box. They now live on the
+headings, because in a list you sort by clicking the thing you want to sort by, and
+two controls doing one job is how they come to disagree.
+
+### Two dead things removed with the card
+
+The card carried a two-tone **sent/received balance bar** and a **"two-way"
+badge**. `sent` is 0 and `bidirectional` is False on **every** correspondent in
+this case, so the bar could only ever draw 100% received and the badge could never
+appear. A chart and a flag with no data behind them. If the pipeline starts
+recording direction they are worth bringing back — until then they stated a
+conclusion the data never supported. Same two fields that were dead for the email
+sender cut; see that entry.
+
+### The copy trap
+
+The lead said "most frequent first", which stopped being true the moment the
+headings became the sort. **Re-read the lead after changing how a list is ordered**
+— it is the sentence most likely to be left behind.
+
+---
+
 ## 🎯 2026-09-02 — Emails can be cut by who sent it
 
 ### ▶ Next action
