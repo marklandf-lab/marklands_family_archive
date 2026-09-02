@@ -58,6 +58,70 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 (later) — the vital queue now stops between candidates and near-misses
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+Nothing is half-done. The open candidates are still the email cuts in the
+2026-08-31 entry (`linked_by` first). Polish stays off the list.
+
+### What shipped
+
+**The review queue now tells you when you have left the candidates behind.**
+Working the vital documents, there was no marker between the ones the pipeline
+thought it had found and the weaker matches it did not confirm — the queue simply
+carried on, so you could not tell which question you were being asked.
+
+Two changes, one behavioural:
+
+- **The queue is grouped by document type.** Each category's candidates now run
+  straight into that same category's near-misses. It used to be every candidate of
+  every type, then every near-miss of every type, so the single handover sat
+  unmarked in the middle of the whole queue.
+- **A handover card stops at each of those crossings.** "Finished reviewing
+  candidates for *[type]*. Review its *N* near misses?", with **Review near
+  misses** / **Skip to next category**. A type with no candidates says so instead.
+  No verb button is on that card and no verb key fires from it — the item behind it
+  has not been read yet. Answering is remembered, so paging back does not re-ask.
+
+**Terminology:** the user-facing label is **Vital documents** everywhere now. The
+Documents heading said "Estate documents" for the same thing. Note the word
+*estate* is still all over the code in an unrelated sense — "estate-derived text"
+means text out of the case that must be escaped before it reaches the page. Do not
+sweep those; they are a security note, not a label.
+
+### How it was checked
+
+`./run_tests.sh` and `./jscheck.sh` are necessary and not sufficient here, as ever.
+Two new tests pin the grouping and fail against the old code. The queue was then
+driven in a real browser: the stop lands at the right item, the right wording for
+both the has-candidates and no-candidates cases, Skip jumps a whole type, Back
+still works, the escape link out of the pager still lands on Documents.
+
+**Driving the pager is safe only if you never touch a verb.** Advance, Back, Skip
+and the handover buttons are all client-side; Confirm / Dismiss / Promote /
+Reassign POST immediately and are real decisions on the real case.
+
+### ⚠️ Someone else was working this case while I was in it
+
+The audit log gained 55 entries today between 09:54 and 10:01 local — 39
+`confirm_vital`, 15 `dismiss_vital`, 1 `reassign_vital`, in human-paced bursts.
+They are not mine: nothing I did in the browser POSTs anything. Almost certainly
+the user working the checklist in their own window.
+
+Two things follow, and they will bite the next session too:
+
+- **A count that moved is probably a person, not a bug.** Read the log before
+  theorising; the timestamps are UTC and the Mac is UTC-7.
+- **Restarting the server interrupts whoever is mid-review.** I restarted it twice
+  to pick up code changes. Check `lsof -nP -iTCP:7766` and ask before killing it.
+
+---
+
 ## 🎯 2026-09-02 — the broken Document Photos tiles, and what they turned out to be
 
 ### ▶ Next action

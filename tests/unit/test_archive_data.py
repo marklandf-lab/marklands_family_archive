@@ -1618,6 +1618,44 @@ def test_vital_pager_items_carries_conversation_fields():
     assert items[0]["conversation_subject"] == "Alice, Bob"
 
 
+def test_vital_pager_items_group_each_target_with_its_own_near_misses():
+    """Each category's candidates must run straight into that category's near-misses.
+
+    It used to be every candidate of every type, then every near-miss of every type
+    (125 then 1,122 on 813_mf), so a reviewer crossed from candidates to near-misses
+    once, invisibly, in the middle of the queue. The queue's per-category handover
+    card stops at the FIRST near-miss of each target, which only exists if the
+    items are grouped this way.
+    """
+    unconfirmed = [{"id": "c-tax", "target": "tax_return"},
+                   {"id": "c-will", "target": "will_testament"}]
+    near = [{"id": "n-tax", "target": "tax_return"},
+            {"id": "n-will", "target": "will_testament"},
+            {"id": "n-deed", "target": "deed_title"}]   # near-miss-only category
+    order = ["will_testament", "tax_return", "deed_title"]
+    items = ad.vital_pager_items(unconfirmed, near, target_order=order)
+    assert [(i["target"], i["vqueue"]) for i in items] == [
+        ("will_testament", "unconfirmed"), ("will_testament", "near_miss"),
+        ("tax_return", "unconfirmed"), ("tax_return", "near_miss"),
+        ("deed_title", "near_miss"),
+    ], "candidates and near-misses interleave per target, in target_order"
+    # Exactly one candidates -> near-miss handover per target that has candidates.
+    firsts = [k for k, it in enumerate(items)
+              if it["vqueue"] == "near_miss"
+              and (k == 0 or items[k - 1]["target"] != it["target"]
+                   or items[k - 1]["vqueue"] != "near_miss")]
+    assert len(firsts) == 3, "one handover per category that has near-misses"
+
+
+def test_vital_pager_items_unknown_target_keeps_first_seen_order():
+    # A target absent from target_order must still appear (candidates first),
+    # never be dropped from the queue.
+    items = ad.vital_pager_items([{"id": "a", "target": "zzz"}],
+                                 [{"id": "b", "target": "zzz"}],
+                                 target_order=["other"])
+    assert [i["id"] for i in items] == ["a", "b"]
+
+
 def test_near_miss_rows_examiner_only(tmp_path):
     paths, summary = _near_miss_case(tmp_path)
     assert ad.near_miss_rows(paths, summary, "family", "will_testament") == []

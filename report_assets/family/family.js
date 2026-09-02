@@ -3963,7 +3963,7 @@
     if (vd && vd.available) {
       var st = vitalStats((vd.targets || []).slice());
       var vsec = el("section", "eix-panel doc-estate");
-      vsec.appendChild(el("h2", null, "Estate documents"));
+      vsec.appendChild(el("h2", null, "Vital documents"));
       vsec.appendChild(el("p", "eix-note",
         num(st.types) + " document types an estate needs, searched across every "
         + "document and email in the archive."));
@@ -3992,7 +3992,7 @@
     csec.appendChild(el("p", "eix-note",
       "How the pipeline filed each document. Emails are not here — they have "
       + "their own section, and including them would leave this page almost "
-      + "entirely email. The estate checklist above does search them, so a "
+      + "entirely email. The vital-documents checklist above does search them, so a "
       + "conversation can be a candidate for a vital document without ever "
       + "appearing in this list."));
     index.forEach(function (c) { docCatRow(csec, c); });
@@ -4315,7 +4315,7 @@
     // Said from this side too, because the boundary is invisible from either one.
     main.appendChild(el("p", "eix-note",
       "This is the mail. Files that arrived as documents are in Documents, and "
-      + "an email is never listed there — but the estate checklist on that page "
+      + "an email is never listed there — but the vital-documents checklist on that page "
       + "does search this mail, so a conversation here can also be a candidate "
       + "for a vital document."));
 
@@ -5684,6 +5684,37 @@
     var pos = 0;
     var revealed = false;   // per-item blur-reveal latch
 
+    // ── the stopping place between a category's candidates and its near-misses ──
+    // vital_pager_items groups the queue by target, so each category's candidates
+    // run straight into that same category's near-misses. Crossing that line used
+    // to be invisible: the queue simply carried on, and a reviewer had no way to
+    // tell they had stopped reading candidates and started reading weaker matches.
+    // gateAt() marks the FIRST near-miss of every category; renderGate() stops
+    // there once and asks. gateAck remembers the answer, so paging back over a
+    // handover you have already answered does not ask a second time.
+    var gateAck = {};
+    var catCand = {}, catNear = {};
+    items.forEach(function (it) {
+      var t = it.target || "";
+      if (it.vqueue === "near_miss") catNear[t] = (catNear[t] || 0) + 1;
+      else if (it.vqueue) catCand[t] = (catCand[t] || 0) + 1;
+    });
+    // Never at index 0: there is nothing behind it to have finished.
+    function gateAt(i) {
+      var it = items[i];
+      if (!it || group !== "vital" || it.vqueue !== "near_miss" || i === 0) return false;
+      var prev = items[i - 1];
+      return prev.target !== it.target || prev.vqueue !== "near_miss";
+    }
+    function gated() { return gateAt(pos) && !gateAck[pos]; }
+    // The human label the checklist uses ("Will / testament"), not the raw key.
+    function targetLabel(t) {
+      for (var i = 0; i < allTargets.length; i++) {
+        if (allTargets[i].target === t) return allTargets[i].label || sentenceCase(t);
+      }
+      return t ? sentenceCase(t) : "this category";
+    }
+
     if (!items.length) {
       body.appendChild(el("p", "notice",
         group === "vital" ? "No vital documents need review — the checklist is clear."
@@ -5728,6 +5759,7 @@
     // examiner pages on before it lands — every callback re-checks its token.
     var stageToken = 0;
     function renderStage() {
+      if (gated()) return renderGate();
       stage.innerHTML = "";
       stageToken++;
       revealed = false;
@@ -5745,6 +5777,54 @@
       stage.appendChild(card);
       renderActions(it);
       updateProgress();
+    }
+
+    // The handover card itself. It is a stop, not an item: no verb fires from
+    // here, and the near-miss behind it is not rendered until the answer is given.
+    function renderGate() {
+      stage.innerHTML = ""; acts.innerHTML = "";
+      stageToken++;            // an in-flight preview belongs to the item we left
+      revealed = false;
+      var t = (items[pos] || {}).target || "";
+      var label = targetLabel(t);
+      var nCand = catCand[t] || 0, nNear = catNear[t] || 0;
+      var card = el("div", "pcard pgate");
+      card.appendChild(el("h2", "pgate-title", esc(
+        nCand ? "Finished reviewing candidates for " + label + "."
+              : label + " has no candidates.")));
+      card.appendChild(el("p", "pgate-ask", esc(
+        "Review its " + num(nNear) + " near miss" + (nNear === 1 ? "" : "es") + "?")));
+      card.appendChild(el("p", "pgate-note", esc(
+        "A near miss is something the pipeline found and did not confirm as "
+        + label.toLowerCase() + ". Reviewing them is optional — skipping leaves "
+        + "them undecided, and they stay on the checklist.")));
+      stage.appendChild(card);
+      var go = el("button", "act primary", "Review near misses");
+      go.onclick = function () { gateAck[pos] = true; renderStage(); };
+      acts.appendChild(go);
+      var sk = el("button", "act ghost", "Skip to next category");
+      sk.onclick = function () { skipCategory(); };
+      acts.appendChild(sk);
+      var back = el("button", "act ghost", "← Back");
+      back.disabled = pos <= 0;
+      back.onclick = function () { goBack(); };
+      acts.appendChild(back);
+      acts.appendChild(el("span", "pkeyhint", esc("↵/→ review   ← back")));
+      updateProgress();
+    }
+
+    // Skip every remaining item of the category we are standing in. Only the
+    // near-misses are ahead of us (the candidates came before the handover), and
+    // they are marked skipped exactly like a per-item Skip, so the completion
+    // summary still offers them back as unresolved.
+    function skipCategory() {
+      var t = (items[pos] || {}).target;
+      while (pos < items.length && items[pos].target === t) {
+        if (items[pos]._state === "pending") items[pos]._state = "skipped";
+        pos++;
+      }
+      if (pos >= items.length) return renderDone();
+      renderStage();
     }
 
     function renderQuar(card, it) {
@@ -6120,6 +6200,15 @@
         if (["ArrowLeft", "ArrowRight"].indexOf(ev.key) < 0) return;
       }
       var it = curItem();
+      // On the handover card no verb key may fire — the item behind it has not
+      // been read yet. Enter/→ answers "review them", ← steps back.
+      if (gated()) {
+        if (ev.key === "Enter" || ev.key === "ArrowRight") {
+          gateAck[pos] = true; renderStage(); ev.preventDefault(); return;
+        }
+        if (ev.key === "ArrowLeft") { goBack(); ev.preventDefault(); return; }
+        return;
+      }
       if (ev.key === "ArrowRight") { advance(); ev.preventDefault(); return; }
       if (ev.key === "ArrowLeft") { goBack(); ev.preventDefault(); return; }
       if (!it) return;
