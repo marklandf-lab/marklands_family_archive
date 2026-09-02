@@ -58,6 +58,90 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 — SESSION HANDOFF
+
+### ▶ Next action
+
+```bash
+cd ~/mac_family_archive
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+gh pr list --repo marklandf-lab/marklands_family_archive --state merged --limit 20
+```
+
+**Everything from this session is merged. Nothing is open, nothing is blocked, no
+stray branches.** Confirm with the commands above rather than believing this line.
+
+### What shipped (#15–#29)
+
+Bugs, all found by the user working the real case rather than by reading code:
+
+- **#15** Document Photos listed tiles whose picture files were gone.
+- **#21** Discard on documents refused every item and reported success. Also: a
+  decision no longer collapses the vital checklist and loses your place.
+- **#23** Un-junking failed for almost everything in Junk review.
+- **#24** The Review queue offered previews and verbs for 176 items whose bytes are
+  not in this copy.
+
+Then the pattern behind them, and a net for it:
+
+- **#25** `_case_fixture.deliver()` + `tests/unit/test_delivery.py`. Four of the
+  above were one bug: a verb or preview gated on the WORKING trees, on a machine
+  that only ever has the delivered one. See CLAUDE.md, "Conventions worth
+  matching".
+
+Vital documents:
+
+- **#16** The review queue stops between a type's candidates and its near-misses,
+  and again at each new type.
+- **#17** Vital Documents is its own section; Documents became "Other Documents".
+- **#18/#19** The reassign dialog names the categories; the row can now say "not
+  this type" — the answer it never had.
+- **#22** A Reviewing switch: the page reads as a reference until you turn it on.
+
+Email:
+
+- **#26** Cut the mail by vital document type.
+- **#27** Cut by who sent it (four buckets), and say what the significance bands
+  actually hold. Band 1 renamed "Newsletters, bills, etc."
+- **#28/#29** Correspondents is a sortable list; a correspondent can be hidden from
+  every view, reversibly.
+
+### Owed to other people
+
+**BACKEND.md #13 and #14** are new this session and neither can be fixed here.
+**#14 is the one that matters**: email attachments are recorded nowhere, though
+messages carry them. It is the single field that would separate the mail that
+delivers a document from the notification that mentions one.
+
+### Open, and honestly open
+
+- **The estate-relevance cut on Emails is NOT built.** #26 built the vital-document
+  cut; the 16-category estate axis was measured, mocked up and chosen, and then the
+  session went to the sender cut instead. The measurements are in the artifact and
+  in this file's earlier entries. Re-derive before building.
+- **Sub-menus under Vital Documents.** The Reviewing switch (#22) is a deliberate
+  placeholder; its own comment and PR say to DELETE it when the two-page split
+  happens, not grow it. The rail also carries three separate review entries which
+  confuse more than these two do.
+- **No marker when the vital queue crosses from one type's near-misses into the
+  next type's candidates.** Offered and not taken up.
+
+### Read these before touching anything
+
+1. **A green suite says nothing about this UI.** Every defect this session was
+   invisible to pytest. Several were caught only by comparing a shipped number
+   against one measured straight from the index.
+2. **The user works the live case while you edit.** Check `lsof` and the tail of
+   `family_actions.ndjson` before restarting the server, and say which kind of
+   change needs it — only Python does.
+3. **Test verbs without writing to the case** by stubbing `window.fetch` to
+   intercept POSTs. Used all session; the audit log did not move for any of it.
+4. **The PII scan earns its keep.** It caught two real subject lines, one with a
+   person's name, in a docstring on this branch's ancestor. Amended out before
+   pushing.
+
+---
+
 ## 🎯 2026-09-02 — a correspondent can be hidden, and it reaches every view
 
 ### ▶ Next action
