@@ -3081,6 +3081,14 @@ def vital_docs_data(paths, summary, role, decisions=None, threads_index=None,
     #                                           checklist ENTIRELY ("not a vital
     #                                           document" — keyed by PATH, so it
     #                                           leaves every category it matched).
+    #   vital_doc_not_type  {item_id: {...}} — one PAIRING is rejected ("not a will,
+    #                                           and I am not saying what it is").
+    #                                           Keyed by ITEM ID, so the document
+    #                                           keeps every other type it matched.
+    #                                           This is the narrow counterpart to
+    #                                           vital_doc_dismissed: dismiss answers
+    #                                           about the document, this answers about
+    #                                           the document IN THIS CATEGORY.
     #   vital_doc_target    {item_id: target} — one item's EFFECTIVE target is
     #                                           REASSIGNED ("not a will, it's a deed").
     # item_id is the stable ORIGINAL-target+path composite (vital_doc_item_id), so a
@@ -3095,10 +3103,11 @@ def vital_docs_data(paths, summary, role, decisions=None, threads_index=None,
     #                                           .json is not touched, same as the rest.
     decisions = decisions or {}
     dismissed = decisions.get("vital_doc_dismissed") or {}
+    not_type = decisions.get("vital_doc_not_type") or {}
     retarget = decisions.get("vital_doc_target") or {}
     reviewed = decisions.get("vital_doc_reviewed") or {}
     promoted = decisions.get("vital_doc_promoted") or {}
-    overlay_active = bool(dismissed or retarget or promoted)
+    overlay_active = bool(dismissed or retarget or promoted or not_type)
 
     # A promoted near-miss becomes an item indistinguishable from a confirmed one
     # (it flows through the same dismiss/reassign/link logic below), except that it
@@ -3130,6 +3139,12 @@ def vital_docs_data(paths, summary, role, decisions=None, threads_index=None,
         # keyed by PATH and drops the item from EVERY vital category it matched.
         # (A legacy per-item composite key is still honoured for backward compat.)
         if overlay_active and (ipath in dismissed or iid in dismissed):
+            continue
+        # "Not a will" — this document is not THIS type. Keyed by item id, so it
+        # leaves one category and keeps the others, which is the answer the row
+        # could not give before: rejecting a pairing without either rejecting the
+        # document outright or guessing at a replacement type.
+        if overlay_active and iid in not_type:
             continue
         eff_target = (retarget.get(iid) if overlay_active else None) or orig_target
         by_target.setdefault(eff_target, []).append((iid, i))
@@ -3504,7 +3519,10 @@ def vital_pager_items(unconfirmed, near_miss, target_order=None):
             "conversation_subject": it.get("conversation_subject"),
             "disposition": None,
             "blur": False,
-            "actions": ["confirm", "dismiss", "reassign"],
+            # "not_type" is the narrow rejection (this pairing only); "dismiss"
+            # is the broad one (the document, every type). Both are offered
+            # because a reviewer usually knows which of the two they mean.
+            "actions": ["confirm", "not_type", "dismiss", "reassign"],
         }
 
     def _near_miss_item(r):

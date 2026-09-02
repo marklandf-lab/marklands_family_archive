@@ -4325,6 +4325,39 @@ def test_dismiss_vital_flips_target_and_undo(tmp_path):
     assert cpath.read_bytes() == before_bytes
 
 
+def test_not_type_vital_leaves_one_category_only_and_undo(tmp_path):
+    case, paths = setup_case(tmp_path)
+    cpath = _seed_vitals(paths)
+    before_bytes = cpath.read_bytes()
+    # /d/shared.pdf is confirmed under BOTH deed_title and vehicle_title.
+    iid = "deed_title::/d/shared.pdf"
+    res = fa.verb_not_type_vital(case, {"id": iid})
+    assert res["ok"] and res["undo_token"]
+    deed, _ = _vrow(case, paths, "deed_title")
+    veh, _ = _vrow(case, paths, "vehicle_title")
+    assert deed["found"] is False and deed["items"] == []
+    assert veh["found"] is True, "the document keeps every other type it matched"
+    assert cpath.read_bytes() == before_bytes          # pipeline index NEVER mutated
+    # undo puts the pairing back, undecided
+    fa.verb_undo(case, {"undo_token": res["undo_token"]})
+    deed2, _ = _vrow(case, paths, "deed_title")
+    assert deed2["found"] is True
+    assert cpath.read_bytes() == before_bytes
+
+
+def test_confirm_vital_reverses_a_prior_not_type(tmp_path):
+    # Signing a pairing off is the opposite ruling to "not a deed"; the later one
+    # must win, or the row shows a category the examiner has already signed.
+    case, paths = setup_case(tmp_path)
+    _seed_vitals(paths)
+    iid = "deed_title::/d/shared.pdf"
+    fa.verb_not_type_vital(case, {"id": iid})
+    assert _vrow(case, paths, "deed_title")[0]["found"] is False
+    fa.verb_confirm_vital(case, {"id": iid})
+    case.load()
+    assert _vrow(case, paths, "deed_title")[0]["found"] is True
+
+
 def test_reassign_vital_moves_group_and_undo(tmp_path):
     case, paths = setup_case(tmp_path)
     cpath = _seed_vitals(paths)

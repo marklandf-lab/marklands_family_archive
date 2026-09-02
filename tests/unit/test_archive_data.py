@@ -1647,6 +1647,23 @@ def test_vital_pager_items_group_each_target_with_its_own_near_misses():
     assert len(firsts) == 3, "one handover per category that has near-misses"
 
 
+def test_vital_pager_items_offer_both_rejections():
+    """The queue must offer the narrow rejection as well as the broad one.
+
+    A candidate can be rejected for THIS type (not_type) or for the whole document
+    (dismiss). Offering only the broad one is what made "No" mean far more than a
+    reviewer read into it.
+    """
+    items = ad.vital_pager_items([{"id": "will_testament::/d/a.pdf", "target": "will_testament"}],
+                                 [{"id": "n1", "target": "will_testament"}])
+    unconfirmed = [i for i in items if i["vqueue"] == "unconfirmed"][0]
+    near = [i for i in items if i["vqueue"] == "near_miss"][0]
+    assert unconfirmed["actions"] == ["confirm", "not_type", "dismiss", "reassign"]
+    # A near-miss is not claimed as this type in the first place, so the narrow
+    # rejection does not apply to it.
+    assert "not_type" not in near["actions"]
+
+
 def test_vital_pager_items_unknown_target_keeps_first_seen_order():
     # A target absent from target_order must still appear (candidates first),
     # never be dropped from the queue.
@@ -2279,6 +2296,30 @@ def test_vital_dismiss_legacy_composite_key_still_drops_single_item(tmp_path):
                             decisions={"vital_doc_dismissed": {"deed_title::/d/shared.pdf": {}}})
     assert _row(vd, "deed_title")["found"] is False
     assert _row(vd, "vehicle_title")["found"] is True
+
+
+def test_vital_not_type_leaves_one_category_and_keeps_the_others(tmp_path):
+    """"Not a deed" answers about the document IN THIS CATEGORY only.
+
+    The row could not say this before. "Yes, this is it" ruled on one category and
+    "No" ruled on the whole document, so a reviewer who knew a file was not a deed --
+    but not what it was instead -- had to reject it everywhere or reassign it to a
+    guess. /d/shared.pdf is a candidate under both deed_title and vehicle_title, so
+    it is the case that tells the two rulings apart.
+    """
+    paths, summary = _vital_fixture(tmp_path)
+    vd = ad.vital_docs_data(
+        paths, summary, "examiner",
+        decisions={"vital_doc_not_type": {"deed_title::/d/shared.pdf": {"actor": "examiner"}}})
+    assert _row(vd, "deed_title")["found"] is False, "leaves the category it was rejected from"
+    assert _row(vd, "vehicle_title")["found"] is True, "its other category is untouched"
+    assert _row(vd, "will_testament")["found"] is True, "a different document, untouched"
+    assert vd["found_count"] == 2
+    # The contrast that motivates the verb: dismiss on the same document drops BOTH.
+    vd2 = ad.vital_docs_data(
+        paths, summary, "examiner",
+        decisions={"vital_doc_dismissed": {"/d/shared.pdf": {"actor": "examiner"}}})
+    assert _row(vd2, "vehicle_title")["found"] is False
 
 
 def test_vital_reassign_overlay_moves_group_and_keeps_id(tmp_path):

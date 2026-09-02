@@ -4078,6 +4078,7 @@ def verb_promote_vital(case, payload):
                 # Promote and dismiss are opposite rulings on the same document; a
                 # promote un-dismisses (dismissal is keyed by path), mirroring confirm.
                 (decisions.get("vital_doc_dismissed") or {}).pop(path, None)
+                (decisions.get("vital_doc_not_type") or {}).pop(iid, None)
                 before_target = None
                 if to_target is not None:
                     overlay = decisions.setdefault("vital_doc_target", {})
@@ -4146,6 +4147,43 @@ def verb_dismiss_vital(case, payload):
     if len(tokens) == 1:
         out["undo_token"] = tokens[0]
     return out
+
+
+def verb_not_type_vital(case, payload):
+    """REJECT ONE PAIRING: "not a will" (examiner-only) — this document is not THIS
+    type, without saying what it is and without touching the other types it matched.
+
+    The narrow counterpart to verb_dismiss_vital. That one answers about the
+    DOCUMENT and is keyed by path, so it leaves every category at once; this one
+    answers about the document IN THIS CATEGORY and is keyed by the target::path
+    item id, so the document's other pairings are untouched.
+
+    It exists because the row had no way to say it. "Yes, this is it" ruled on one
+    category and "No" ruled on the whole document, so a reviewer who knew a file was
+    not a will — but not what it was instead — had to either reject it everywhere or
+    reassign it to a guess. Both put something into the record that the reviewer did
+    not actually believe.
+
+    Pure family_decisions overlay (vital_doc_not_type) — vital_doc_confirmed.json is
+    NEVER mutated. Reversible + audited."""
+    require_examiner(case)
+    iid = payload.get("id")
+    if not iid:
+        raise VerbError("not-type needs id")
+    iid = str(iid)
+    dpath = case.paths.metadata_dir / DECISIONS_FILE
+    with _doc_lock(case):  # cross-process RMW guard (R-4)
+        decisions = load_json(dpath, {}) or {}
+        not_type = decisions.setdefault("vital_doc_not_type", {})
+        before = iid in not_type
+        not_type[iid] = {"ts": _now(), "actor": case.role}
+        # A pairing cannot be both signed off and rejected; the later ruling wins.
+        (decisions.get("vital_doc_reviewed") or {}).pop(iid, None)
+        atomic_write_json(dpath, decisions)
+    entry = append_action(case, "not_type_vital", iid, {"present": before}, {},
+                          reversible=True)
+    case.load()
+    return {"ok": True, "undo_token": entry["undo_token"]}
 
 
 def verb_reassign_vital(case, payload):
@@ -4234,6 +4272,8 @@ def verb_confirm_vital(case, payload):
         # document; a confirm un-dismisses (dismissal is keyed by path).
         path = iid.split("::", 1)[1] if "::" in iid else iid
         (decisions.get("vital_doc_dismissed") or {}).pop(path, None)
+        # Same for the narrow ruling: signing this pairing off reverses "not a will".
+        (decisions.get("vital_doc_not_type") or {}).pop(iid, None)
         atomic_write_json(dpath, decisions)
     entry = append_action(case, "confirm_vital", iid,
                           {"reviewed": before}, {"reviewed": {"reason": reason}},
@@ -4469,6 +4509,16 @@ def _apply_inverse(case, entry):
         with _doc_lock(case):  # cross-process RMW guard (R-4)
             decisions = load_json(dpath, {}) or {}
             (decisions.get("vital_doc_dismissed", {}) or {}).pop(iid, None)
+            atomic_write_json(dpath, decisions)
+        return {"restored": iid}
+    if action == "not_type_vital":
+        # Inverse of "not a will": drop the rejection so the pairing returns to its
+        # category, undecided.
+        iid = entry["target"]
+        dpath = case.paths.metadata_dir / DECISIONS_FILE
+        with _doc_lock(case):  # cross-process RMW guard (R-4)
+            decisions = load_json(dpath, {}) or {}
+            (decisions.get("vital_doc_not_type", {}) or {}).pop(iid, None)
             atomic_write_json(dpath, decisions)
         return {"restored": iid}
     if action == "promote_vital":
@@ -4974,6 +5024,7 @@ VERBS = {
     #    vital_doc_confirmed.json) ──
     "vital/dismiss": verb_dismiss_vital, "vital/reassign": verb_reassign_vital,
     "vital/confirm": verb_confirm_vital, "vital/promote": verb_promote_vital,
+    "vital/not-type": verb_not_type_vital,
     "remove/person": verb_remove_person, "reset": verb_reset, "undo": verb_undo,
     # ── G-15 face-assist (examiner-only; DECISIONS OVERLAY, never mutates an index) ──
     "merge/persons": verb_merge_persons, "assign/face": verb_assign_face,

@@ -58,6 +58,56 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 (night) — the review row answers the question it asks
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+Design directions were mocked up first and the choice was made from them —
+**Direction A, with one idea borrowed from B**. The mockups (all three, with the
+diagnosis) are an Artifact; ask the user for the link if the next decision here
+needs the reasoning.
+
+### What shipped
+
+**A new verb, because one answer did not exist.** "Yes, this is it" ruled on ONE
+document type; "No" was recorded against the DOCUMENT and dropped it from every
+type it matched. Under a heading reading *Will / testament*, "No" looked like
+"not a will" and meant "not a vital document at all". A reviewer who knew a file
+was not a will — but not what it was instead — had to reject it everywhere or
+reassign it to a guess.
+
+- `vital/not-type` — rejects ONE pairing, keyed by the `target::path` item id.
+  Overlay `vital_doc_not_type`, reversible, audited, never touches
+  `vital_doc_confirmed.json`. Confirm and promote clear it (opposite rulings).
+- **One vocabulary everywhere.** Candidate rows, near-miss rows and the queue used
+  to say *Yes, this is it / No / Another type…*, *Mark as vital / Not a vital
+  document / Reassign…* and *Confirm / Dismiss / Reassign…* — three names for the
+  same three actions. All three now read: **Yes, this is it · Not this type · Not
+  a vital document · It's a different type…** Hover text carries the scope.
+- **The type picker keeps the current type, pre-selected** (the idea borrowed from
+  Direction B). Picking it signs the item off instead of being a no-op the server
+  refuses — reassign and confirm are the same assertion, *what is this?*
+
+### Known gap, deliberately
+
+Near-miss rows get no "Not this type". A near-miss is not claimed as that type in
+the first place, and suppressing one per type would need a second overlay keyed by
+(target, path) — near-misses are computed from `vital_doc_candidates.json`, not
+from confirmed items. If reviewers ask for it, that is the shape it takes.
+
+### Testing this without writing to the case
+
+The UI was driven with `window.fetch` stubbed to intercept POSTs, so the wiring
+was verified (right endpoint, right payload) with nothing reaching the server; the
+verb itself is covered by unit tests against a real case tree, including undo. The
+audit log did not move. Use the same trick rather than clicking a real verb.
+
+---
+
 ## 🎯 2026-09-02 (late) — the reassign scope dialog says what it does
 
 ### ▶ Next action

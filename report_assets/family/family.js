@@ -595,13 +595,20 @@
   // (the item's current display target) is dropped. Labels are textContent-safe via
   // new Option(); the target id rides the option VALUE and goes into a JSON body —
   // never inlined into HTML. Mirrors pickCategory (CSP-safe: addEventListener/.onclick).
-  function pickVitalTarget(title, choices, excludeTarget, cb) {
-    var opts = (choices || []).filter(function (c) { return c.target !== excludeTarget; });
-    if (!opts.length) { toast("No other document types to choose from."); return; }
+  // The current type is IN the list and pre-selected, rather than filtered out.
+  // Confirming and reassigning are the same assertion — what IS this document? —
+  // so leaving the answer where it is signs the item off instead of being a no-op
+  // the server rejects. Callers compare the result against `currentTarget`.
+  function pickVitalTarget(title, choices, currentTarget, cb) {
+    var opts = (choices || []).slice();
+    if (!opts.length) { toast("No document types to choose from."); return; }
     var sel = el("select", "pickmodal-sel");
     opts.forEach(function (c) {
-      sel.appendChild(new Option(c.label || c.target, c.target));   // Option text is textContent-safe
+      var lbl = (c.label || c.target)
+              + (c.target === currentTarget ? "  — filed here now" : "");
+      sel.appendChild(new Option(lbl, c.target));   // Option text is textContent-safe
     });
+    if (currentTarget) sel.value = currentTarget;
     var m = pickmodal(title, sel, {
       onConfirm: function (close) { var v = sel.value; close(); if (v) cb(v); },
     });
@@ -3511,7 +3518,7 @@
     // has always worked; only the label said otherwise.
     var acts = el("div", "vcand-acts");
 
-    var promote = el("button", "vcand-act primary", "Mark as vital");
+    var promote = el("button", "vcand-act primary", "Yes, this is it");
     promote.onclick = function () {
       doVerb("/api/vital/promote", { id: r.id }, "Marked as a vital document")
         .then(function (x) { if (x) render(); });
@@ -3534,12 +3541,16 @@
     // action ("this is vital, but it's a deed, not a will"). No scope prompt: a
     // near-miss promotion creates exactly one item, so the global/single choice
     // a confirmed multi-category doc needs does not arise here.
-    var reassign = el("button", "vcand-act", "Reassign…");
+    var reassign = el("button", "vcand-act", "It's a different type…");
+    reassign.title = "Mark it as vital under another type — or re-pick this one.";
     reassign.onclick = function () {
-      pickVitalTarget("Mark as vital under which document type?",
+      pickVitalTarget("What type is this document?",
                       (vd && vd.all_targets) || [], target, function (to) {
-        doVerb("/api/vital/promote", { id: r.id, to_target: to },
-               "Marked as vital and reassigned")
+        // Same as the candidate row: the current type is in the list, and picking
+        // it means "yes, this one" — a plain promote with no reassignment.
+        var same = to === target;
+        doVerb("/api/vital/promote", same ? { id: r.id } : { id: r.id, to_target: to },
+               same ? "Marked as vital" : "Marked as vital and reassigned")
           .then(function (x) { if (x) render(); });
       });
     };
@@ -3696,7 +3707,22 @@
         };
         acts.appendChild(confirm);
       }
-      var dismiss = el("button", "vact", it.reviewed ? "Undo — not this" : "No");
+      // The answer the row could not give. "Yes, this is it" rules on THIS type
+      // and the old "No" ruled on the WHOLE document, so a reviewer who knew a
+      // file was not a will — but not what it was — had to reject it everywhere or
+      // reassign it to a guess. This rejects the one pairing and says nothing else.
+      var notType = el("button", "vact", "Not this type");
+      notType.title = "Removes it from " + t.label + " only. Its other types are untouched.";
+      notType.onclick = function () {
+        doVerb("/api/vital/not-type", { id: it.id }, "Rejected for this type")
+          .then(function (x) { if (x) render(); });
+      };
+      acts.appendChild(notType);
+      // Was "No", which under a heading reading "Will / testament" looked like
+      // "not a will". It is recorded against the DOCUMENT and drops it from every
+      // type it matched, so it says that now.
+      var dismiss = el("button", "vact", "Not a vital document");
+      dismiss.title = "Removes it from every vital document type it matched.";
       dismiss.onclick = function () {
         // "Not a vital document" is a statement about the DOCUMENT, so the verb
         // is keyed by path and drops it from EVERY type it matched. That is a
@@ -3723,9 +3749,18 @@
           "Remove from all of them", send);
       };
       acts.appendChild(dismiss);
-      var reassign = el("button", "vact", "Another type…");
+      var reassign = el("button", "vact", "It's a different type…");
+      reassign.title = "Move it to another type — or re-pick this one to sign it off.";
       reassign.onclick = function () {
-        pickVitalTarget("Reassign this document", vd.all_targets, t.target, function (to) {
+        pickVitalTarget("What type is this document?", vd.all_targets, t.target, function (to) {
+          // Re-picking the type it already sits under is a sign-off, not a no-op:
+          // the picker asks what the document IS, and the answer can be "what you
+          // said". Without this the server refuses it as "already assigned".
+          if (to === t.target) {
+            doVerb("/api/vital/confirm", { id: it.id }, "Signed off")
+              .then(function (x) { if (x) render(); });
+            return;
+          }
           var cats = vitalPathTargets(vd, it.path);
           function send(scope) {
             doVerb("/api/vital/reassign", { id: it.id, to_target: to, scope: scope }, "Reassigned")
@@ -5675,17 +5710,36 @@
                 pay: function (it) { return { id: it.id }; }, resolves: true },
     dismiss:  { ep: "/api/vital/dismiss", past: "Dismissed", cls: "danger",
                 pay: function (it) { return { id: it.id }; }, resolves: true },
+    // "Not this type" — the narrow ruling. Rejects THIS pairing and leaves the
+    // document's other types alone; dismiss above is the broad one.
+    not_type: { ep: "/api/vital/not-type", past: "Rejected for this type",
+                pay: function (it) { return { id: it.id }; }, resolves: true },
     // to_target / scope are filled by the reassign modal (pay is null here).
     reassign: { ep: "/api/vital/reassign", past: "Reassigned", pay: null, resolves: false },
   };
-  var PAGER_LABEL = { release: "Release", discard: "Discard", confirm: "Confirm",
-                      promote: "Promote", dismiss: "Dismiss", reassign: "Reassign…",
-                      skip: "Skip" };
+  // ONE vocabulary for the vital verbs, everywhere they appear. They used to be
+  // "Yes, this is it / No / Another type…" on a candidate row, "Mark as vital /
+  // Not a vital document / Reassign…" on a near-miss, and "Confirm / Dismiss /
+  // Reassign…" in the queue — three names for the same three actions, on three
+  // screens a reviewer moves between constantly. The two rejections now differ in
+  // the label rather than in a dialog after the click: "Not this type" is about
+  // this category, "Not a vital document" is about the document.
+  var PAGER_LABEL = { release: "Release", discard: "Discard",
+                      confirm: "Yes, this is it", promote: "Yes, this is it",
+                      not_type: "Not this type", dismiss: "Not a vital document",
+                      reassign: "It's a different type…", skip: "Skip" };
+  // Hover text carries the scope, so it is available before the click without
+  // spending a line of the button on it.
+  var PAGER_TITLE = {
+    not_type: "Removes it from this document type only. Its other types are untouched.",
+    dismiss: "Removes it from every vital document type it matched.",
+    reassign: "Move it to another type — or re-pick this one to sign it off.",
+  };
   // Keyboard: per-group accelerators. ←/→ back/forward and S skip are shared;
   // Space reveals a blurred quarantine item.
   var PAGER_KEYS = {
     quarantine: { r: "release", d: "discard" },
-    vital: { c: "confirm", p: "promote", x: "dismiss", a: "reassign" },
+    vital: { c: "confirm", p: "promote", n: "not_type", x: "dismiss", a: "reassign" },
   };
   var PAGER_KEYHANDLER = null;   // module-side so a re-entry unbinds the old one
 
@@ -6089,6 +6143,7 @@
         (it.actions || []).forEach(function (a) {
           var v = PAGER_VERBS[a];
           var b = el("button", "act" + (v && v.cls ? " " + v.cls : ""), PAGER_LABEL[a] || a);
+          if (PAGER_TITLE[a]) b.title = PAGER_TITLE[a];
           b.onclick = function () { doAction(a); };
           acts.appendChild(b);
         });
@@ -6172,12 +6227,16 @@
     // ── reassign modal: pick a target (+ scope for dup-path items) ──
     function openReassign(it) {
       var box = el("div");
+      // The current type stays in the list, selected. Picking it means "yes, this
+      // one" and signs the item off, so the picker answers one question — what IS
+      // this? — instead of being a reassign control that refuses the obvious answer.
       var selT = el("select");
       allTargets.forEach(function (t) {
-        if (t.target === it.target) return;   // can't reassign to its own target
-        selT.appendChild(new Option(t.label || t.target, t.target));
+        selT.appendChild(new Option((t.label || t.target)
+          + (t.target === it.target ? "  — filed here now" : ""), t.target));
       });
-      box.appendChild(el("label", "flabel", "New document type"));
+      if (it.target) selT.value = it.target;
+      box.appendChild(el("label", "flabel", "This document is a…"));
       box.appendChild(selT);
       // Scope only matters when a document matched more than one vital target;
       // offered always but defaulting to the safe single-item scope.
@@ -6192,8 +6251,12 @@
       box.appendChild(selS);
       pickmodal("Reassign “" + (it.name || it.id) + "”", box, {
         onConfirm: function (close) {
-          if (!selT.value) { toast("Pick a target"); return; }
+          if (!selT.value) { toast("Pick a type"); return; }
           close();
+          if (selT.value === it.target) {          // unchanged → a sign-off
+            fire(it, "confirm", PAGER_VERBS.confirm.pay(it));
+            return;
+          }
           fire(it, "reassign", { id: it.id, to_target: selT.value, scope: selS.value });
         },
       });
