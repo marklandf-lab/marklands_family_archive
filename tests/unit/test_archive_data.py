@@ -1100,12 +1100,15 @@ def test_person_detail_family_gating():
     assert exm["photo_n"] == 1 and exm["video_n"] == 1
 
 
-def test_scanned_images_excluded_from_universe_but_surfaced():
+def test_scanned_images_excluded_from_universe_but_surfaced(tmp_path):
     scene = {"clip_results": {
         "/x/doc1.jpg": {"category": "scanned document or handwritten letter", "delivered": True},
         "/x/real.jpg": {"category": "beach", "delivered": True},
     }, "junk_results": {}}
-    amap = {"entries": {"/x/doc1.jpg": "/a/doc1.jpg"}}  # real.jpg has no archive entry → kept (examiner)
+    # The canonical must exist on disk: a scanned row whose canonical has been
+    # moved out is dropped for both roles (see the moved-out test below).
+    doc1 = tmp_path / "doc1.jpg"; doc1.write_bytes(b"\xff\xd8\xff\xd9")
+    amap = {"entries": {"/x/doc1.jpg": str(doc1)}}  # real.jpg has no archive entry → kept (examiner)
     u = ad.build_photo_universe(scene, amap, "examiner")
     assert "/x/doc1.jpg" not in u and "/x/real.jpg" in u, "scanned doc excluded, photo kept"
     sr = ad.scanned_image_rows(scene, amap, {}, "examiner")
@@ -1129,6 +1132,27 @@ def test_scanned_released_overlay_rejoins_universe_leaves_scanned_rows(tmp_path)
     assert "/x/doc1.jpg" not in u2, "overlay only rescues items it actually names"
     sr = ad.scanned_image_rows(scene, amap, {}, "examiner", released=released)
     assert sr == [], "released item leaves the Correspondence scanned list"
+
+
+def test_scanned_rows_drop_moved_out_canonical(tmp_path):
+    """A moved-out scanned image must leave the list for BOTH roles.
+
+    build_photo_universe already drops a row whose archive canonical is gone from
+    disk, precisely so the examiner does not get a broken tile (its /thumb 404s).
+    scanned_image_rows applied that check only to the family role, so on 813_mf 27
+    of 1,221 Document Photos tiles were broken images -- 10 of them items the
+    examiner had banished, whose canonical had moved to family_banished/.
+    """
+    here = tmp_path / "doc_here.jpg"; here.write_bytes(b"\xff\xd8\xff\xd9")
+    gone = tmp_path / "doc_gone.jpg"          # never created: the moved-out canonical
+    scene = {"clip_results": {
+        "/x/here.jpg": {"category": "scanned document or handwritten letter", "delivered": True},
+        "/x/gone.jpg": {"category": "scanned document or handwritten letter", "delivered": True},
+    }, "junk_results": {}}
+    amap = {"entries": {"/x/here.jpg": str(here), "/x/gone.jpg": str(gone)}}
+    for role in ("examiner", "family"):
+        ids = [r["id"] for r in ad.scanned_image_rows(scene, amap, {}, role)]
+        assert ids == ["/x/here.jpg"], f"{role}: moved-out canonical must not be listed"
 
 
 def test_video_rows_poster_and_gating(tmp_path):  # Item 3

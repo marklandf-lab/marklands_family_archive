@@ -1165,10 +1165,19 @@ def scanned_image_rows(scene_index, archive_map, metadata_index, role, *,
             continue
         delivered = bool(rec.get("delivered", True))
         archive = entries.get(src)
+        # If the archive_map names a canonical but it is gone from disk, the file
+        # was moved out (banished, quarantined) — drop the row for BOTH roles, the
+        # same rule build_photo_universe applies and for the same reason: the card
+        # would otherwise be a broken tile, because /thumb 404s and no photo card
+        # carries an onerror fallback. Checking this only for the family role left
+        # 27 of 813_mf's 1,221 Document Photos tiles broken, 10 of them items the
+        # examiner had deliberately banished. #2
+        if archive and not os.path.exists(archive):
+            continue
         if role == "family":
             if src in junk or not delivered:
                 continue
-            if not archive or not os.path.exists(archive):
+            if not archive:
                 continue
         md = metadata_index.get(src, {}) or {}
         rows.append({

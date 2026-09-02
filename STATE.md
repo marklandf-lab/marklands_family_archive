@@ -58,6 +58,77 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-02 — the broken Document Photos tiles, and what they turned out to be
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+**No outright defect is open.** The broken-thumbnail one below is fixed and
+verified in the running app. What is left is judgement calls — the ranked list in
+the 2026-08-31 entry ("Email cuts NOT built", `linked_by` first) — so ask rather
+than pick. Polish remains off the list; do not raise it.
+
+### What shipped
+
+**Document Photos no longer lists pictures it cannot show.** The page was drawing
+broken-image icons for every item whose file had moved out from under it, and
+counting them in the "N photographs and screenshots" header — so the count
+promised more than the page could draw.
+
+`scanned_image_rows` (`tools/_archive_data.py`) applied its can-this-be-shown check
+only to the **family** role; the examiner got no check at all. Its sibling
+`build_photo_universe` has had the right rule all along, with a comment saying it
+drops moved-out files for *both* roles precisely so the examiner is not shown a
+broken tile. This was that rule missing from one of the two builders — now applied
+in both, so the row count and what is drawn agree.
+
+### ⚠️ Correction to the entry below this one
+
+The previous handoff recorded the cause as "a missing thumb-cache entry, not a
+decode failure". **That was wrong, and it was never measured** — the thumbnail
+cache has nothing to do with it. The picture files themselves were unreachable, so
+there was nothing to build a thumbnail from. The extension breakdown in that entry
+(mostly `.jpeg`) is real but irrelevant: file type had no bearing on it.
+
+Read the audit log before theorising about a missing file — it says what happened
+to each one:
+
+```bash
+tail -20 ~/WyeastCases/813_mf/output/metadata/family_actions.ndjson
+```
+
+The affected files split three ways there: items the examiner **banished** (their
+canonical moves to `output/family_banished/` by design — the archive path is
+*meant* to go dead), items **released** from the sensitive-content quarantine whose
+bytes are not in this copy at all, and a few never acted on. Only the first group
+is working as intended.
+
+### What this is owed to someone else
+
+**BACKEND.md #13** (appended, not inserted — STATE.md and CLAUDE.md cite "#5" by
+number, so renumbering would break those references). The archive index names a
+number of files a delivered copy does not hold. A banish explains a missing
+canonical; a release does not. The front end can only decline to draw the row,
+which it now does — the index is still wrong underneath. The item carries a
+command that re-derives the current number; run it, do not trust a figure.
+
+### Two things worth knowing before you verify anything
+
+- **The Chrome extension has no permission for `127.0.0.1`.** Every browser tool
+  call against the running app failed with the same error. Verification here went
+  through the HTTP API and the render code instead. If you need to see the app on
+  screen, grant the site in the extension first, or drive it by hand.
+- **A path in this case does not exist on this machine.** Every pipeline index
+  records `/data/cases/813_mf/...`, and the app rebases those on read
+  (`wyeast/core/rebase.py`). Any script you write against `archive_map.json` or a
+  sidecar **by hand** must rebase too — one that does not will report every single
+  row as broken and read like a catastrophe. This cost real time this session.
+
+---
+
 ## 🎯 2026-08-31 (evening) — email categorisation, and where the boundaries are
 
 Everything through **PR #12** is merged. No open PRs, nothing unpushed.
@@ -111,7 +182,10 @@ attachment field at all — only 41 of 21,988 records mention one anywhere — s
 
 ### Still open
 
-- **27 of the 1,221 Document Photos thumbnails 404** (2.2%), measured
+- ~~**27 of the 1,221 Document Photos thumbnails 404**~~ — **FIXED 2026-09-02,
+  and the cause given here is wrong: it was nothing to do with the thumb cache.
+  See the 2026-09-02 entry above.** Left in place as history, not as a lead.
+  (2.2%), measured
   1 Sep 2026 by requesting every one. All 404 — a missing thumb-cache entry, not
   a decode failure. Mostly `.jpeg` (21), not the `.heic` I had assumed twice
   before measuring. The only outright defect on this list. Re-measure before

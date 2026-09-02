@@ -354,6 +354,51 @@ Both are merged here and are not upstream. Neither is urgent; both are small.
 
 ---
 
+## 13. The archive index lists files a delivered copy does not hold
+
+_Appended rather than inserted at the top: STATE.md and CLAUDE.md both cite
+"BACKEND.md #5" by number, and renumbering would break those references._
+
+**What:** `archive_map.json` maps every delivered item to a canonical path under
+`output/archive/`. On a delivered copy some of those entries point at a path that
+holds no file. A missing canonical is *expected* where the examiner banished the
+item — a banish moves the canonical to `output/family_banished/` by design. It is
+not expected for items **released from the sensitive-content quarantine**: the
+action log records the release writing the item into `output/archive/`, the map
+agrees with that destination, and no file is there.
+
+**What it breaks:** the map is the case's own statement of what was delivered, so
+anything that trusts it is wrong by exactly that many items. The front end can
+only decline to draw the row — this fork now drops any scanned row whose canonical
+is missing, so these no longer appear as broken tiles on Document Photos. That
+hides the symptom; the index is still claiming a file the delivery does not carry.
+A reader is told the archive holds something it does not.
+
+**The fix (upstream):** either carry the bytes into the delivery when an item is
+released, or, where the content is withheld from a copy on purpose, drop the
+`archive_map` entry with it, so the index never names a file the copy lacks.
+
+**How to check it:**
+
+```bash
+# archive entries whose file is not in this copy
+python3 - <<'PY2'
+import json, os
+CASE = os.path.expanduser('~/WyeastCases/813_mf'); REC = '/data/cases/813_mf'
+am = json.load(open(CASE + '/output/metadata/archive_map.json'))
+reb = lambda p: p.replace(REC, CASE, 1) if p.startswith(REC) else p
+ent = am['entries']
+gone = [k for k, v in ent.items() if not os.path.exists(reb(v))]
+print(len(gone), 'of', len(ent), 'archive entries name a file that is not here')
+PY2
+
+# then split those into "explained by a banish" and "not explained":
+#   grep the basename in output/metadata/family_actions.ndjson — a `banish`
+#   accounts for a missing canonical, a `release` does not.
+```
+
+---
+
 ## How to add to this file
 
 Put the newest item at the top of the numbered list and renumber, or append and
