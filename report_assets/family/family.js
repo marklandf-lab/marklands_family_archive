@@ -4921,34 +4921,38 @@
   };
 
   // ── correspondents / relationships (G-6) ──
-  // One correspondent card. Balance-bar widths are set via CSSOM (.style.width),
-  // not inline style="" attributes, because the page CSP is style-src 'self'. All
-  // estate-derived text (name, address) is esc()'d; the address is encodeURIComponent'd
-  // into the Emails deep-link.
-  function correspondentCard(c) {
+  // One correspondent, one ROW. This was a 240px card in a grid: name, address,
+  // span, message count, and a two-tone bar splitting the traffic into sent and
+  // received. Three fitted across a screen, so 1,384 correspondents ran to
+  // hundreds of screens of scrolling and no two of them could be compared without
+  // holding a number in your head.
+  //
+  // The balance bar and the "two-way" badge are gone, and not for space: `sent` is
+  // 0 and `bidirectional` is False on EVERY correspondent in this case. The bar
+  // could only ever draw 100% received and the badge could never appear — a chart
+  // and a flag with no data behind them. If the pipeline starts recording
+  // direction, bring them back; until then they were decoration that read as fact.
+  //
+  // Names and addresses are estate-derived, so they go in via txt()/textContent.
+  function correspondentRow(c) {
     var addr = c.address || "";
     var name = c.name || addr;
+    var tr = el("tr", "corrrow clickable");
+    var nameTd = el("td", "co-name");
+    nameTd.appendChild(txt("span", "co-who", name));
+    if (name !== addr) nameTd.appendChild(txt("span", "co-addr", addr));
+    tr.appendChild(nameTd);
+    tr.appendChild(el("td", "co-n", esc(num(c.total || 0))));
     var y0 = String(c.first_seen || "").slice(0, 4), y1 = String(c.last_seen || "").slice(0, 4);
-    var span = (y0 && y1) ? (y0 === y1 ? y0 : (y0 + "–" + y1)) : "";
-    var card = el("div", "corrcard clickable");
-    card.innerHTML =
-      "<div class='cc-name'>" + esc(name) +
-        (c.bidirectional ? " <span class='cc-badge' title='Two-way correspondence'>⇄</span>" : "") + "</div>" +
-      (name !== addr ? "<div class='cc-addr'>" + esc(addr) + "</div>" : "") +
-      "<div class='cc-meta'>" + (span ? esc(span) + " · " : "") + num(c.total) + " messages</div>";
-    var sent = c.sent || 0, received = c.received || 0, tot = sent + received;
-    var bar = el("div", "cc-bar");
-    var sSeg = el("span", "cc-sent"), rSeg = el("span", "cc-recv");
-    sSeg.style.width = (tot ? sent / tot * 100 : 0) + "%";
-    rSeg.style.width = (tot ? received / tot * 100 : 0) + "%";
-    bar.appendChild(sSeg); bar.appendChild(rSeg);
-    card.appendChild(bar);
-    card.appendChild(el("div", "cc-bal", "Sent " + num(sent) + " · Received " + num(received)));
-    // The card is the only place that knows this address is "Alex Rendon",
-    // so it names the destination crumb; Emails itself only ever sees the address.
-    card.onclick = function () { go({ page: "emails", participant: addr }, { label: name }); };
-    keyable(card, "button", "Correspondence with " + name);   // F-12
-    return card;
+    tr.appendChild(el("td", "co-span",
+      esc(y0 && y1 ? (y0 === y1 ? y0 : y0 + "\u2013" + y1) : "\u2014")));
+    tr.appendChild(el("td", "co-last",
+      esc(String(c.last_seen || "").slice(0, 10) || "\u2014")));
+    // This row is the only place that knows the address has a name, so it names
+    // the destination crumb; Emails itself only ever sees the address.
+    tr.onclick = function () { go({ page: "emails", participant: addr }, { label: name }); };
+    keyable(tr, "button", "Correspondence with " + name);   // F-12
+    return tr;
   }
 
   // P2 #9: one possible-duplicate-identity suggestion card (examiner-only).
@@ -4990,8 +4994,11 @@
   }
 
   P.correspondents = function (main, data) {
+    // "most frequent first" stopped being true the moment the column headings
+    // became the sort control — it contradicted the page as soon as anyone used it.
     head(main, "Correspondents", "Correspondents",
-      num((data && data.total) || 0) + " people the owner exchanged email with — most frequent first. Open one to see those emails.");
+      num((data && data.total) || 0) + " people the owner exchanged email with. "
+      + "Sort by any column heading; open a row to see those emails.");
     // #11: in-list search (name/address) + sort — thousands of correspondents
     // with no way to narrow the list was close to unusable for "find person X"
     // without falling back to full-text search first.
@@ -5000,15 +5007,38 @@
     search.placeholder = "Find a correspondent…"; search.autocomplete = "off";
     search.setAttribute("aria-label", "Find a correspondent");
     if (Q.q) search.value = Q.q;
-    var sort = el("select"); sort.setAttribute("aria-label", "Sort correspondents");
-    [["", "Most messages"], ["name", "Name (A–Z)"], ["recent", "Most recent"]]
-      .forEach(function (o) { sort.appendChild(new Option(o[1], o[0])); });
-    if (Q.sort) sort.value = Q.sort;
-    controls.appendChild(search); controls.appendChild(sort);
+    controls.appendChild(search);
     main.appendChild(controls);
-    var grid = el("div", "corrgrid"); main.appendChild(grid);
+
+    // The sort lives on the column headings rather than in a select beside the
+    // search box: in a list you sort by clicking the thing you want to sort by,
+    // and two controls doing one job is how they disagree.
+    var COLS = [
+      { key: "name",   label: "Correspondent", sort: "name",   cls: "co-name" },
+      { key: "n",      label: "Emails",        sort: "",       cls: "co-n" },
+      { key: "span",   label: "Years",         sort: null,     cls: "co-span" },
+      { key: "last",   label: "Last email",    sort: "recent", cls: "co-last" },
+    ];
+    var grid = el("div", "corrwrap"); main.appendChild(grid);
+    function currentSort() { return Q.sort || ""; }
+    function drawHead(tbl) {
+      var hr = el("tr", "corrhead");
+      COLS.forEach(function (col) {
+        var th = el("th", col.cls);
+        if (col.sort === null) { th.appendChild(document.createTextNode(col.label)); }
+        else {
+          var b = el("button", "co-sort" + (currentSort() === col.sort ? " on" : ""),
+                     esc(col.label) + (currentSort() === col.sort ? " \u2193" : ""));
+          b.setAttribute("aria-label", "Sort by " + col.label);
+          b.onclick = function () { setQ({ sort: col.sort }); pg.load(true); };
+          th.appendChild(b);
+        }
+        hr.appendChild(th);
+      });
+      tbl.appendChild(hr);
+    }
     var pg = pager("/api/correspondents", {
-      getParams: function () { return { q: search.value, sort: sort.value }; },
+      getParams: function () { return { q: search.value, sort: currentSort() }; },
       render: function (all) {
         grid.innerHTML = "";
         if (!all.length) {
@@ -5016,12 +5046,14 @@
             search.value ? "No correspondents match “" + search.value + "”." : "No correspondents in this case."));
           return;
         }
-        all.forEach(function (c) { grid.appendChild(correspondentCard(c)); });
+        var tbl = el("table", "corrtable");
+        drawHead(tbl);
+        all.forEach(function (c) { tbl.appendChild(correspondentRow(c)); });
+        grid.appendChild(tbl);
       },
     });
     var reload = debounce(function () { setQ({ q: search.value }); pg.load(true); }, 250);
     search.oninput = reload;
-    sort.onchange = function () { setQ({ sort: sort.value }); pg.load(true); };
     if (EXAMINER) {
       // Suggestions render ABOVE the grid (inserted before it was appended to
       // main), so the panel appears first while still using pg to refresh the
