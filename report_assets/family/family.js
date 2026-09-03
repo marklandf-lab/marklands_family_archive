@@ -6601,26 +6601,41 @@
       if (it.target) selT.value = it.target;
       box.appendChild(el("label", "flabel", "This document is a…"));
       box.appendChild(selT);
-      // Scope only matters when a document matched more than one vital target;
-      // offered always but defaulting to the safe single-item scope.
-      // Same ambiguity as pickScope: "only this item" did not say which of the
-      // document's categories "this" was. The queue does not carry the document's
-      // full match list, so it cannot name the others — it can at least name the
-      // one being moved out of.
-      var selS = el("select");
-      selS.appendChild(new Option("Only its " + targetLabel(it.target) + " entry", "single"));
-      selS.appendChild(new Option("Every category this document is a candidate in", "global"));
-      box.appendChild(el("label", "flabel", "Apply to"));
-      box.appendChild(selS);
+      // The "Apply to" select is GONE. It asked "only its X entry" or "every
+      // category this document is a candidate in" without ever saying which
+      // categories those were, so the reviewer was choosing between two sentences
+      // rather than between two outcomes. The panel replaced the same question
+      // with a named dialog; the queue asked it in a dropdown and kept the
+      // ambiguity, on the surface where most of the reviewing happens.
+      //
+      // It is asked the same way as the panel now, and only when the answer
+      // changes something — see pickScope.
       pickmodal("Reassign “" + (it.name || it.id) + "”", box, {
         onConfirm: function (close) {
-          if (!selT.value) { toast("Pick a type"); return; }
+          var to = selT.value;
+          if (!to) { toast("Pick a type"); return; }
           close();
-          if (selT.value === it.target) {          // unchanged → a sign-off
+          if (to === it.target) {                  // unchanged → a sign-off
             fire(it, "confirm", PAGER_VERBS.confirm.pay(it));
             return;
           }
-          fire(it, "reassign", { id: it.id, to_target: selT.value, scope: selS.value });
+          // Only the categories that are neither the one being left nor the one
+          // being moved into can differ between the two scopes; when there are
+          // none, both answers end in the same place and the question is noise.
+          var toLabel = targetLabel(to);
+          var affected = (it.also_targets || []).filter(function (lab) {
+            return lab !== targetLabel(it.target) && lab !== toLabel;
+          });
+          if (!affected.length) {
+            fire(it, "reassign", { id: it.id, to_target: to, scope: "single" });
+            return;
+          }
+          pickScope({ current: targetLabel(it.target), to: toLabel,
+                      others: affected,
+                      total: (it.also_targets || []).length },
+                    function (scope) {
+                      fire(it, "reassign", { id: it.id, to_target: to, scope: scope });
+                    });
         },
       });
     }

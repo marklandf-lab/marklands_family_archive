@@ -58,6 +58,40 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-03 — the queue's reassign dialog asks the same question the panel does
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+### What shipped
+
+Reassigning from the **review queue** offered a second dropdown — "Only its *X*
+entry" or "Every category this document is a candidate in" — that never said which
+categories those were. A reviewer was choosing between two sentences rather than
+two outcomes.
+
+The panel had this fixed in #18: a named dialog that says which other types hold
+the document and what each choice leaves alone. The queue kept the dropdown,
+because a queue item did not carry the document's other types. **It carries them
+now** (`also_targets`), so both surfaces ask the same question the same way — and
+the queue is where most of the reviewing actually happens.
+
+The dropdown is gone. The dialog appears only when the answer changes something:
+if the document's only other category IS the one you are moving into, both answers
+end in the same place and it just moves.
+
+### The lesson worth keeping
+
+The gap existed because the fix went to the surface where the problem was
+*reported*, not to every surface that had it. **When a control is confusing, grep
+for the other places that ask the same question** — this one sat unfixed through
+three later passes over the same flow.
+
+---
+
 ## 🎯 2026-09-03 — the estate-relevance cut on Emails is built
 
 ### ▶ Next action
