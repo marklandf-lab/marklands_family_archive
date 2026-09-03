@@ -2421,9 +2421,20 @@ class ArchiveCase:
                     near.append({**r, "target": t})
             # Canonical target order, so the pager groups each category's
             # candidates with its own near-misses in checklist order.
+            # {path: [every type label this document matches]} — the queue's
+            # reassign dialog needs it to name the categories a "move all of
+            # them" would touch, which it previously could not.
+            path_targets = {}
+            for row in vital.get("targets", []) or []:
+                lab = row.get("label") or row.get("target")
+                for it in row.get("items", []) or []:
+                    p = it.get("path")
+                    if p and lab not in path_targets.setdefault(p, []):
+                        path_targets[p].append(lab)
             items = vital_pager_items(
                 unconfirmed, near,
-                target_order=[r.get("target") for r in vital.get("targets", []) or []])
+                target_order=[r.get("target") for r in vital.get("targets", []) or []],
+                path_targets=path_targets)
             return {"group": "vital", "items": items, "total": len(items),
                     # The canonical target set (+ labels) for the reassign picker.
                     "all_targets": vital.get("all_targets", [])}

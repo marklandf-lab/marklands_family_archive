@@ -1740,6 +1740,29 @@ def test_vital_pager_items_offer_both_rejections():
     assert "not_type" not in near["actions"]
 
 
+def test_vital_pager_items_carry_the_documents_other_types():
+    """The queue could not name the categories its own scope question was about.
+
+    A vital match is per (document, type) pair, so a reassign moves either the one
+    pairing or all of them. The panel has named the others since #18; the queue
+    asked "only its X entry" or "every category this document is a candidate in"
+    and left the reviewer choosing between two sentences rather than two outcomes.
+    """
+    path_targets = {"/d/shared.pdf": ["Deed / title", "Vehicle title", "Will / testament"]}
+    items = ad.vital_pager_items(
+        [{"id": "deed_title::/d/shared.pdf", "target": "deed_title",
+          "path": "/d/shared.pdf"},
+         {"id": "will_testament::/d/only.pdf", "target": "will_testament",
+          "path": "/d/only.pdf"}],
+        [], path_targets=path_targets)
+    by = {i["id"]: i for i in items}
+    assert by["deed_title::/d/shared.pdf"]["also_targets"] == [
+        "Deed / title", "Vehicle title", "Will / testament"]
+    # A document matching one type carries an empty list, and the dialog is then
+    # skipped entirely rather than asking a question with one answer.
+    assert by["will_testament::/d/only.pdf"]["also_targets"] == []
+
+
 def test_vital_pager_items_unknown_target_keeps_first_seen_order():
     # A target absent from target_order must still appear (candidates first),
     # never be dropped from the queue.

@@ -3572,7 +3572,7 @@ def quarantine_pager_items(entries, *, media_exists=None):
     return items
 
 
-def vital_pager_items(unconfirmed, near_miss, target_order=None):
+def vital_pager_items(unconfirmed, near_miss, target_order=None, path_targets=None):
     """Kind-B (vital-doc) pager items — BOTH sub-queues, distinguished by `vqueue`.
 
     `unconfirmed` are the found-but-unresolved confirmed items (each an entry from
@@ -3609,6 +3609,10 @@ def vital_pager_items(unconfirmed, near_miss, target_order=None):
             "conversation_subject": it.get("conversation_subject"),
             "disposition": None,
             "blur": False,
+            # Every vital type this same DOCUMENT matches, its own included. The
+            # reassign dialog subtracts the current type and the destination to
+            # see what "move all of them" would actually touch.
+            "also_targets": list((path_targets or {}).get(it.get("path")) or ()),
             # "not_type" is the narrow rejection (this pairing only); "dismiss"
             # is the broad one (the document, every type). Both are offered
             # because a reviewer usually knows which of the two they mean.
