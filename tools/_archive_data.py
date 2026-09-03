@@ -1370,6 +1370,53 @@ def _clean_recording_name(name):
     return stripped or name
 
 
+def estate_relevance_map(paths, threads_index):
+    """thread_id -> sorted [estate-materiality categories] the conversation matched.
+
+    A vocabulary the pipeline computed months ago and the archive has never once
+    shown. estate_materiality scored every item in the case for how it bears on
+    settling an estate and sorted the hits into sixteen kinds of estate business —
+    over EMAIL as well as documents — while the Emails page has only ever offered
+    the pipeline's seven subject categories, where `legal` is a few hundred threads
+    out of twenty-odd thousand and two buckets hold most of the mail.
+
+    Read from the REPORT rather than the index: `estate_materiality_index.json` is
+    ~97MB and carries every item that scored at all, including the below-threshold
+    tail; the report is ~27MB and its `highlights` are the band the pipeline itself
+    considers worth surfacing. Parsing it and building this map measured at well
+    under a second on 813_mf, so it is built on demand per generation rather than
+    cached to disk where it could go stale.
+
+    Items are per MESSAGE and the page is per conversation, so a thread takes the
+    union of its messages' categories — it joins on the `files` list the thread
+    already carries, the same join the vital-document link uses.
+
+    Returns {} when the stage never ran, which is the pre-estate-materiality case.
+    """
+    rep = load_json(paths.metadata_dir / "estate_materiality_report.json", None)
+    if not isinstance(rep, dict):
+        return {}
+    by_file = {}
+    for h in rep.get("highlights") or []:
+        if not isinstance(h, dict) or h.get("source") != "email":
+            continue
+        f = h.get("file")
+        if f:
+            by_file[f] = h.get("matched_categories") or []
+    if not by_file:
+        return {}
+    out = {}
+    for t in (threads_index or {}).get("threads", []) or []:
+        got = set()
+        for f in (t.get("files") or []):
+            got.update(by_file.get(f, ()))
+        if got:
+            tid = t.get("thread_id")
+            if tid:
+                out[str(tid)] = sorted(got)
+    return out
+
+
 def estate_thread_map(paths, decisions=None, vital_docs=None, role="examiner"):
     """thread_id -> {kind, labels}: which email conversations the estate scan
     touched, and as what.

@@ -1287,6 +1287,37 @@ def test_review_data_marks_rows_whose_bytes_are_not_in_this_copy(tmp_path):
     assert sens["absent.jpg"]["src"] == str(gone)
 
 
+def test_estate_relevance_map_joins_messages_up_to_conversations(tmp_path):
+    """A vocabulary the pipeline computed and the archive never showed.
+
+    estate_materiality scores per MESSAGE and the page is per conversation, so a
+    thread takes the union of its messages' categories, joined on the `files` list
+    the thread already carries. Only email highlights count: the report also holds
+    document hits, and the below-threshold tail lives in the 97MB index.
+    """
+    paths = CasePaths.from_case_id("C", str(tmp_path))
+    md = paths.metadata_dir; md.mkdir(parents=True)
+    (md / "estate_materiality_report.json").write_text(json.dumps({"highlights": [
+        {"source": "email", "file": "/m/a.eml", "matched_categories": ["estate_legal"]},
+        {"source": "email", "file": "/m/b.eml", "matched_categories": ["tax_records",
+                                                                      "estate_legal"]},
+        {"source": "document", "file": "/d/x.pdf", "matched_categories": ["insurance"]},
+    ]}))
+    threads = {"threads": [
+        {"thread_id": "t1", "files": ["/m/a.eml", "/m/b.eml"]},   # union of both
+        {"thread_id": "t2", "files": ["/m/c.eml"]},               # no estate signal
+    ]}
+    got = ad.estate_relevance_map(paths, threads)
+    assert got == {"t1": ["estate_legal", "tax_records"]}, got
+    assert "t2" not in got, "a thread with no signal carries no categories"
+
+
+def test_estate_relevance_map_is_empty_when_the_stage_never_ran(tmp_path):
+    paths = CasePaths.from_case_id("C", str(tmp_path))
+    (paths.metadata_dir).mkdir(parents=True)
+    assert ad.estate_relevance_map(paths, {"threads": [{"thread_id": "t1"}]}) == {}
+
+
 def test_message_rows_shape_order_and_discard_excluded():
     ci = [
         {"conversation_id": "sms_aaa", "platform": "sms", "participants": ["+1555", "Mom"],

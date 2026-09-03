@@ -4473,6 +4473,21 @@ def test_sender_kind_ignores_the_owner_being_in_the_address_book():
     assert fa.sender_kind_map(rows, ["me@x.com"], freq) == {"t1": "oneoff"}
 
 
+def test_filter_emails_relevance_matches_any_of_a_threads_categories():
+    # The categories are not exclusive -- a pension thread is employment AND
+    # investments -- so a filter that matched only a primary category would hide
+    # most of what it was asked for.
+    rows = [{"thread_id": "t1", "relevance": ["employment_hr_business",
+                                              "investments_retirement"]},
+            {"thread_id": "t2", "relevance": ["estate_legal"]},
+            {"thread_id": "t3"}]
+    pick = lambda v: [r["thread_id"] for r in fa._filter_emails_relevance(rows, {"relevance": v})]
+    assert pick("investments_retirement") == ["t1"]
+    assert pick("estate_legal") == ["t2"]
+    assert pick("") == ["t1", "t2", "t3"], "no filter, no narrowing"
+    assert pick("nothing_matches_this") == []
+
+
 def test_filter_emails_sender_narrows_and_ignores_junk():
     rows = [{"thread_id": "t1", "sender": "contact"},
             {"thread_id": "t2", "sender": "exchange"},

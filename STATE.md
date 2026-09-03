@@ -58,6 +58,49 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## 🎯 2026-09-03 — the estate-relevance cut on Emails is built
+
+### ▶ Next action
+
+```bash
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+```
+
+This closes the largest item the 2 Sep handoff left open.
+
+### What shipped
+
+**By estate relevance** on the Emails index, plus `?relevance=<category>`. Sixteen
+kinds of estate business, scored by the pipeline when the case was built, over every
+email — and never once displayed until now. Re-derive the split from the facet.
+
+The categories are **not exclusive**: a pension thread is employment and investments
+both, so the filter matches on any of a conversation's categories. Roughly one
+conversation in seven carries a signal at all; the rest genuinely have none, which
+the panel says rather than hiding.
+
+### Where it reads from, and why
+
+`estate_materiality_report.json` (~27MB) rather than `estate_materiality_index.json`
+(~97MB). The index holds every item that scored at all including the
+below-threshold tail; the report's `highlights` are the band the pipeline itself
+considers worth surfacing. Parse plus join measured ~0.16s, so the map is built on
+demand per generation and cached — no sidecar to go stale. First Emails request
+after a load ~0.9s, ~0.07s thereafter.
+
+Scores are per MESSAGE and the page is per conversation, so a thread takes the
+**union** of its messages' categories, joined on the `files` list the thread already
+carries — the same join the vital-document link uses.
+
+### The claim it makes, and the one it does not
+
+The panel says what a conversation is **about**, not that it holds a document. That
+wording is deliberate: a sample read of the vital-document cut (#26) found automated
+notifications and outright false positives mixed with the genuine finds, and this
+axis is scored the same way. Examiner-only, like the estate marks.
+
+---
+
 ## 🎯 2026-09-02 — SESSION HANDOFF
 
 ### ▶ Next action
