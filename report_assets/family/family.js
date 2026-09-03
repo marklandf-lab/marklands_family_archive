@@ -326,7 +326,7 @@
      // Recordings: which audio kind is being shown. Reports: which report.
      "kind", "r", "view", "estate", "rescued",
      // Emails narrowed to ONE of the 27 vital document types, or to who sent it.
-     "vital", "sender"].forEach(function (k) {
+     "vital", "sender", "relevance"].forEach(function (k) {
       var v = target[k] != null ? target[k] : target[k + "_id"];
       if (v != null && v !== "") q.push(k + "=" + encodeURIComponent(v));
     });
@@ -4485,6 +4485,26 @@
     return a;
   }
 
+  var ESTATE_CAT_LABELS = {
+    estate_legal: "Estate & legal",
+    banking_cash_debt: "Banking, cash & debt",
+    employment_hr_business: "Employment & business",
+    personal_correspondence_sentimental: "Personal & sentimental",
+    tax_records: "Tax records",
+    medical_health: "Medical & health",
+    insurance: "Insurance",
+    investments_retirement: "Investments & retirement",
+    digital_account_inventory: "Digital accounts",
+    subscriptions_billing_utilities: "Subscriptions & bills",
+    real_estate_property: "Property & real estate",
+    travel_reservations: "Travel & reservations",
+    community_charitable: "Community & charitable",
+    identity_government: "Identity & government",
+    critical_credentials: "Critical credentials",
+    financial_or_insurance: "Financial or insurance",
+  };
+  function estateCatLabel(k) { return ESTATE_CAT_LABELS[k] || pretty(k); }
+
   function emailIndexPanel(title, note, rows) {
     var sec = el("section", "eix-panel");
     sec.appendChild(el("h2", null, title));
@@ -4594,6 +4614,27 @@
     // Between the vital cut and significance. It exists because the two bands
     // below it — Everyday and band 1 — were near-synonyms that hid the thing they
     // were actually splitting on: mail from people against mail from machines.
+    // The sixteen kinds of estate business, in words. The pipeline's slugs are
+    // built for matching, not reading.
+    var rel = f.relevance || [];
+    if (rel.length) {
+      var rp = emailIndexPanel(
+        "By estate relevance",
+        "What kind of estate business the conversation touches. A conversation can "
+        + "touch several — a pension thread is employment and investments both.",
+        rel.map(function (x) {
+          return { label: estateCatLabel(x.name), count: x.count,
+                   dest: { page: "emails", relevance: x.name },
+                   crumb: estateCatLabel(x.name) };
+        }));
+      rp.appendChild(el("p", "eix-note",
+        "Scored by the pipeline when the case was built, over every email, and "
+        + "never shown until now. It covers the mail with an estate signal \u2014 "
+        + "most of the archive has none, which is itself worth knowing. This is "
+        + "what a conversation is ABOUT, not proof it holds a document."));
+      left.appendChild(rp);
+    }
+
     var snd = f.sender || [];
     if (snd.length) {
       var sLab = {
@@ -4809,6 +4850,7 @@
       // that is this type. The panel says the same thing; the heading has to too,
       // or the list reads as "here are the 13 marriage certificates".
       if (Q.vital) parts.push("about a " + String(Q.vital).toLowerCase());
+      if (Q.relevance) parts.push("touching " + estateCatLabel(Q.relevance).toLowerCase());
       if (Q.sender) {
         parts.push({ contact: "from someone in your contacts",
                      exchange: "a back-and-forth with a non-contact",
@@ -4861,6 +4903,7 @@
         // the wrong data, which is the worst of the three to notice.
         if (Q.vital) p.vital = Q.vital;
         if (Q.sender) p.sender = Q.sender;
+        if (Q.relevance) p.relevance = Q.relevance;
         if (search.value) p.q = search.value;
         if (dFrom.value) p.date_from = dFrom.value;
         if (dTo.value) p.date_to = dTo.value;
@@ -4915,7 +4958,7 @@
                       // ?vital= narrows to one of the 27 document types. Missing it
                       // here meant the link filtered the data and then rendered the
                       // index over it: right URL, right crumb, no list.
-                      || Q.vital || Q.sender);
+                      || Q.vital || Q.sender || Q.relevance);
     if (narrowed) return emailGroup(main, data, active);
     return emailIndex(main, data);
   };

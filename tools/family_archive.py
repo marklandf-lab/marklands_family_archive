@@ -83,7 +83,7 @@ from tools._archive_data import (  # noqa: E402
     tokenize, transcript_detail, video_rows, vital_docs_data, vital_doc_item_id,
     near_miss_rows, vital_doc_label, estate_report_data, family_report_data,
     account_services, _email_address, pipeline_report_data,
-    estate_relevance_data, estate_thread_map,
+    estate_relevance_data, estate_relevance_map, estate_thread_map,
     quarantine_pager_items, vital_pager_items,
     junk_rows, transparency_data, guided_review_data,
     apply_face_overlay, resolve_merge, is_video_frame, SCENE_LABELS,
@@ -634,6 +634,10 @@ def _email_facets(rows, owner=(), merges=None):
                 slot[kind] += 1
     rescued_n = sum(1 for r in rows if r.get("rescued"))
     sender = Counter(r.get("sender") for r in rows if r.get("sender"))
+    relevance = Counter()
+    for r in rows:
+        for c in (r.get("relevance") or ()):
+            relevance[c] += 1
     person_n = sum(sender.get(k, 0) for k in SENDER_PERSON)
     return {
         "estate": [{"kind": k, "count": estate[k]}
@@ -648,6 +652,7 @@ def _email_facets(rows, owner=(), merges=None):
         # pairing as a summary — one classification, reported two ways.
         "sender": [{"kind": k, "count": sender[k]}
                    for k in SENDER_KINDS if sender.get(k)],
+        "relevance": [{"name": k, "count": v} for k, v in relevance.most_common()],
         "sender_person": person_n,
         "sender_automated": sum(sender.values()) - person_n,
         "bands": [{"n": n, "label": lab, "count": bands.get(n, 0)}
@@ -770,6 +775,16 @@ SENDER_KINDS = ("contact", "exchange", "bulk", "oneoff")
 SENDER_PERSON = ("contact", "exchange")
 BULK_MIN_THREADS = 5
 BULK_REPLY_RATE = 0.10
+
+
+def _filter_emails_relevance(rows, params):
+    """?relevance=<estate category> — the mail that touches one kind of estate
+    business. Matches on any of the conversation's categories: they are not
+    exclusive, and a thread about a pension is employment AND investments."""
+    want = _one(params, "relevance")
+    if not want:
+        return rows
+    return [r for r in rows if want in (r.get("relevance") or ())]
 
 
 def _filter_emails_sender(rows, params):
@@ -1549,6 +1564,16 @@ class ArchiveCase:
             self._estate_thread_cache = cached
         return cached
 
+    def _estate_relevance(self):
+        """thread_id -> [estate categories], once per generation. ~0.16s to build
+        (a 27MB parse plus the join), so it is built on demand and held, like the
+        estate marks beside it."""
+        cached = getattr(self, "_estate_relevance_cache", None)
+        if cached is None:
+            cached = estate_relevance_map(self.paths, self.email_threads)
+            self._estate_relevance_cache = cached
+        return cached
+
     def _sender_kinds(self, full_rows):
         """thread_id -> person|automated, once per generation. Needs the WHOLE
         thread set (the owner guess is computed over all of it), so it is built
@@ -1890,8 +1915,16 @@ class ArchiveCase:
             # not examiner-only: it says nothing about the estate, only whether
             # the mail came from someone in the address book or a real exchange.
             senders = self._sender_kinds(full)
+            # Which kinds of estate business the conversation touches. Examiner-only
+            # for the same reason the estate marks are: it is a judgement about the
+            # estate, and the family's view of their own mail should not be shaped
+            # by it.
+            relevance = self._estate_relevance() if self.role == "examiner" else {}
             for r in full:
-                r["sender"] = senders.get(str(r.get("thread_id") or ""))
+                tid = str(r.get("thread_id") or "")
+                r["sender"] = senders.get(tid)
+                if relevance:
+                    r["relevance"] = relevance.get(tid) or None
             if estate or rescued:
                 for r in full:
                     tid = str(r.get("thread_id") or "")
@@ -1904,6 +1937,7 @@ class ArchiveCase:
             rows = _filter_emails_estate(rows, params)
             rows = _filter_emails_vital(rows, params)
             rows = _filter_emails_sender(rows, params)
+            rows = _filter_emails_relevance(rows, params)
             rows = _filter_emails_rescued(rows, params)
             rows = _filter_emails_search(rows, params)
             page = _paginate(rows, offset, limit)
