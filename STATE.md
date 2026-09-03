@@ -58,6 +58,81 @@ lsof -nP -iTCP:7766 -sTCP:LISTEN                      # is the app already runni
 
 ---
 
+## ☑️ 2026-09-03 — HANDOFF (supersedes the 2 Sep one below)
+
+### ▶ Next action
+
+```bash
+cd ~/mac_family_archive
+lsof -nP -iTCP:7766 -sTCP:LISTEN || ./family_archive.sh 813_mf
+gh pr list --repo marklandf-lab/marklands_family_archive --state open
+```
+
+Everything is merged and nothing is blocked. **Check it, do not believe it** — the
+second command is the whole answer.
+
+### What shipped today
+
+- **#31** Emails can be cut by **estate relevance** — sixteen kinds of estate
+  business the pipeline scored over every email when the case was built and the
+  archive had never displayed. This closed the biggest item the 2 Sep handoff left
+  open.
+- **#32** The review queue's **reassign dialog** now names the categories it is
+  talking about, exactly as the panel has since #18. Its "Apply to" dropdown is
+  gone.
+
+The 2 Sep entry below lists #15–#30 and is still accurate as history.
+
+### Still open — nothing here is started
+
+- **Sub-menus under Vital Documents.** The Reviewing switch (#22) is a deliberate
+  placeholder. Its own comment and PR say to **delete** it when Vital Documents
+  becomes two pages, not grow it — a mode and a navigation split doing one job is
+  worse than either. The rail also carries three separate review entries (Review
+  queue, Guided review, Junk review) that confuse more than these two do.
+- **The vital queue says nothing** when it crosses from one type's near-misses into
+  the next type's candidates. Offered twice, not taken up.
+- **Nobody has read the estate-relevance matches.** #31 counts them; a sample of
+  the neighbouring vital-document cut found automated notifications and plain false
+  positives among the genuine finds, and this axis is scored the same way. Both
+  panels say "about", not "is". **Read a sample before anyone leans on it.**
+
+### Owed to other people
+
+**BACKEND.md #13 and #14.** #14 is the one that matters: **email attachments are
+recorded nowhere**, though messages carry them. It is the single field that would
+separate mail delivering a document from a notification mentioning one, and it
+would sharpen both email cuts at once.
+
+### How to work here
+
+1. **A green suite says nothing about this UI.** Every defect this week was
+   invisible to pytest. Several were caught only by comparing a shipped number
+   against one measured straight from the index — do that.
+2. **A test that builds a working tree is testing a workstation.** Every copy this
+   app serves is a delivery. `tests/unit/test_delivery.py` and
+   `_case_fixture.deliver()` exist because five defects shipped through that gap.
+3. **The user is in the live case while you edit.** Check `lsof` and the tail of
+   `family_actions.ndjson` before restarting, and say which kind of change needs it
+   — only Python does. `report_assets/family/*` is served from disk.
+4. **Exercise verbs without writing to the case** by stubbing `window.fetch` to
+   intercept POSTs. Used for every UI check this week; the audit log never moved.
+5. **The PII scan is not a formality.** It caught two real subject lines, one with
+   a person's name, inside a docstring before they were pushed.
+6. **When a control is confusing, grep for the other places asking the same
+   question.** #32 sat unfixed through three passes over the same flow because the
+   first fix went only where the complaint came from.
+
+### The case itself
+
+Two correspondents are hidden and there are decisions from the user's own review
+sessions. **None of it is test residue** — every live check this week was undone
+and verified back to zero. Read
+`~/WyeastCases/813_mf/output/metadata/family_actions.ndjson` rather than assuming a
+count moved because of code.
+
+---
+
 ## 🎯 2026-09-03 — the queue's reassign dialog asks the same question the panel does
 
 ### ▶ Next action
